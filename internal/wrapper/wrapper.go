@@ -1,21 +1,22 @@
 package wrapper
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"sync"
 	"time"
 
-	"github.com/wu8685/ahsir/internal/a2a"
-	"github.com/wu8685/ahsir/internal/transport"
+	"github.com/a2aproject/a2a-go/a2a"
 )
 
 // AgentWrapperConfig configures an agent wrapper instance.
 type AgentWrapperConfig struct {
 	Port        int
 	RegistryURL string
-	AgentCard   a2a.AgentCard
+	AgentCard   *a2a.AgentCard
 }
 
 // AgentWrapper ties together the A2A server, task store, and registry heartbeat.
@@ -105,25 +106,37 @@ func (w *AgentWrapper) heartbeatLoop(ctx context.Context) {
 	defer ticker.Stop()
 
 	// Register immediately
-	w.registerWithRegistry(ctx)
+	w.registerWithRegistry()
 
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			w.registerWithRegistry(ctx)
+			w.registerWithRegistry()
 		}
 	}
 }
 
-func (w *AgentWrapper) registerWithRegistry(ctx context.Context) {
-	client := transport.NewHTTPClient(w.cfg.RegistryURL+"/agents", 5*time.Second)
-	req := a2a.NewJSONRPCRequest("agent/register", nil)
-	// Use raw HTTP POST to register
-	_, err := client.Send(ctx, req)
+func (w *AgentWrapper) registerWithRegistry() {
+	cardData, err := json.Marshal(w.cfg.AgentCard)
 	if err != nil {
-		// Registration failed, will retry on next tick
-		_ = err
+		return
 	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost,
+		w.cfg.RegistryURL+"/agents", bytes.NewReader(cardData))
+	if err != nil {
+		return
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return
+	}
+	resp.Body.Close()
 }

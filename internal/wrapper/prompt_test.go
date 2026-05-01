@@ -4,13 +4,13 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/wu8685/ahsir/internal/a2a"
+	"github.com/a2aproject/a2a-go/a2a"
 )
 
 func TestBuildSystemPrompt(t *testing.T) {
-	agents := []a2a.AgentCard{
-		{Name: "backend", Skills: []a2a.AgentSkill{{Name: "api-design"}}, Endpoint: "http://127.0.0.1:9801/"},
-		{Name: "data", Skills: []a2a.AgentSkill{{Name: "sql"}}, Endpoint: "http://127.0.0.1:9802/"},
+	agents := []*a2a.AgentCard{
+		{Name: "backend", Skills: []a2a.AgentSkill{{Name: "api-design"}}, URL: "http://127.0.0.1:9801/"},
+		{Name: "data", Skills: []a2a.AgentSkill{{Name: "sql"}}, URL: "http://127.0.0.1:9802/"},
 	}
 	basePrompt := "You are a Go developer."
 

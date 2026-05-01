@@ -10,11 +10,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/wu8685/ahsir/internal/a2a"
+	"github.com/a2aproject/a2a-go/a2a"
 )
 
 func TestAgentWrapperStartStop(t *testing.T) {
-	// Find an available port
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
@@ -25,11 +24,10 @@ func TestAgentWrapperStartStop(t *testing.T) {
 	cfg := AgentWrapperConfig{
 		Port:        port,
 		RegistryURL: "",
-		AgentCard: a2a.AgentCard{
-			Name:        "test-agent",
-			Description: "test",
-			Version:     "1.0.0",
-			Endpoint:    fmt.Sprintf("http://127.0.0.1:%d/", port),
+		AgentCard: &a2a.AgentCard{
+			Name:    "test-agent",
+			Version: "1.0.0",
+			URL:     fmt.Sprintf("http://127.0.0.1:%d/", port),
 		},
 	}
 
@@ -41,7 +39,9 @@ func TestAgentWrapperStartStop(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Verify server is listening
+	// Give server time to start
+	time.Sleep(100 * time.Millisecond)
+
 	conn, err := net.DialTimeout("tcp", fmt.Sprintf("127.0.0.1:%d", port), 500*time.Millisecond)
 	if err != nil {
 		t.Fatal("server not listening:", err)
@@ -54,7 +54,6 @@ func TestAgentWrapperStartStop(t *testing.T) {
 }
 
 func TestAgentWrapperRegisterWithRegistry(t *testing.T) {
-	// Start a mock registry
 	registry := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusCreated)
 		json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
@@ -68,11 +67,10 @@ func TestAgentWrapperRegisterWithRegistry(t *testing.T) {
 	cfg := AgentWrapperConfig{
 		Port:        port,
 		RegistryURL: registry.URL,
-		AgentCard: a2a.AgentCard{
-			Name:        "test-agent",
-			Description: "test",
-			Version:     "1.0.0",
-			Endpoint:    fmt.Sprintf("http://127.0.0.1:%d/", port),
+		AgentCard: &a2a.AgentCard{
+			Name:    "test-agent",
+			Version: "1.0.0",
+			URL:     fmt.Sprintf("http://127.0.0.1:%d/", port),
 		},
 	}
 
@@ -85,6 +83,5 @@ func TestAgentWrapperRegisterWithRegistry(t *testing.T) {
 	}
 	defer wrapper.Stop(ctx)
 
-	// Allow time for registration heartbeat
 	time.Sleep(100 * time.Millisecond)
 }

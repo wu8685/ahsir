@@ -5,19 +5,31 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/wu8685/ahsir/internal/a2a"
+	"github.com/a2aproject/a2a-go/a2a"
 	"gopkg.in/yaml.v3"
 )
 
 // AgentCardConfig represents the .a2a/agent-card.yaml file structure.
 type AgentCardConfig struct {
-	Name        string             `yaml:"name"`
-	Description string             `yaml:"description"`
-	Version     string             `yaml:"version"`
-	Provider    *a2a.AgentProvider `yaml:"provider"`
-	Skills      []a2a.AgentSkill   `yaml:"skills"`
-	Claude      ClaudeConfig       `yaml:"claude"`
-	Network     NetworkConfig      `yaml:"network"`
+	Name        string            `yaml:"name"`
+	Description string            `yaml:"description"`
+	Version     string            `yaml:"version"`
+	Provider    *ProviderConfig   `yaml:"provider"`
+	Skills      []SkillConfig     `yaml:"skills"`
+	Claude      ClaudeConfig      `yaml:"claude"`
+	Network     NetworkConfig     `yaml:"network"`
+}
+
+// ProviderConfig maps to a2a.AgentProvider.
+type ProviderConfig struct {
+	Name string `yaml:"name"`
+	URL  string `yaml:"url"`
+}
+
+// SkillConfig maps a skill definition.
+type SkillConfig struct {
+	Name        string `yaml:"name"`
+	Description string `yaml:"description"`
 }
 
 // ClaudeConfig holds Claude-specific settings from the card.
@@ -42,7 +54,6 @@ func NewAgentCardBuilder(workspaceDir string) *AgentCardBuilder {
 	return &AgentCardBuilder{workspaceDir: workspaceDir}
 }
 
-// cardFile returns the path to the agent-card.yaml file.
 func (b *AgentCardBuilder) cardFile() string {
 	return filepath.Join(b.workspaceDir, ".a2a", "agent-card.yaml")
 }
@@ -59,7 +70,6 @@ func (b *AgentCardBuilder) Load() (*AgentCardConfig, error) {
 		return nil, fmt.Errorf("parse agent-card.yaml: %w", err)
 	}
 
-	// Apply defaults
 	if cfg.Network.Bind == "" {
 		cfg.Network.Bind = "127.0.0.1"
 	}
@@ -70,8 +80,8 @@ func (b *AgentCardBuilder) Load() (*AgentCardConfig, error) {
 	return &cfg, nil
 }
 
-// BuildRuntime creates a runtime AgentCard with the endpoint set from the port.
-func (b *AgentCardBuilder) BuildRuntime(cfg *AgentCardConfig, port int) a2a.AgentCard {
+// BuildRuntime creates a runtime a2a.AgentCard with endpoint set from the port.
+func (b *AgentCardBuilder) BuildRuntime(cfg *AgentCardConfig, port int) *a2a.AgentCard {
 	bind := cfg.Network.Bind
 	if bind == "" {
 		bind = "127.0.0.1"
@@ -81,19 +91,35 @@ func (b *AgentCardBuilder) BuildRuntime(cfg *AgentCardConfig, port int) a2a.Agen
 		advertise = bind
 	}
 
-	card := a2a.AgentCard{
+	skills := make([]a2a.AgentSkill, len(cfg.Skills))
+	for i, s := range cfg.Skills {
+		skills[i] = a2a.AgentSkill{
+			ID:          s.Name,
+			Name:        s.Name,
+			Description: s.Description,
+		}
+	}
+
+	card := &a2a.AgentCard{
 		Name:        cfg.Name,
 		Description: cfg.Description,
 		Version:     cfg.Version,
-		Provider:    cfg.Provider,
-		Skills:      cfg.Skills,
-		Endpoint:    fmt.Sprintf("http://%s:%d/", advertise, port),
+		URL:         fmt.Sprintf("http://%s:%d/", advertise, port),
+		Skills:      skills,
+		Capabilities: a2a.AgentCapabilities{
+			Streaming: true,
+		},
 	}
 
-	if card.Provider == nil {
+	if cfg.Provider != nil {
 		card.Provider = &a2a.AgentProvider{
-			Name: "ahsir",
-			URL:  "https://github.com/wu8685/ahsir",
+			Org: cfg.Provider.Name,
+			URL: cfg.Provider.URL,
+		}
+	} else {
+		card.Provider = &a2a.AgentProvider{
+			Org: "ahsir",
+			URL: "https://github.com/wu8685/ahsir",
 		}
 	}
 	if card.Version == "" {

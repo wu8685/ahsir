@@ -3,19 +3,19 @@ package wrapper
 import (
 	"sync"
 
-	"github.com/wu8685/ahsir/internal/a2a"
+	"github.com/a2aproject/a2a-go/a2a"
 )
 
 // TaskStore is an in-memory store for A2A tasks.
 type TaskStore struct {
 	mu    sync.RWMutex
-	tasks map[string]*a2a.Task
+	tasks map[a2a.TaskID]*a2a.Task
 }
 
 // NewTaskStore creates a new in-memory task store.
 func NewTaskStore() *TaskStore {
 	return &TaskStore{
-		tasks: make(map[string]*a2a.Task),
+		tasks: make(map[a2a.TaskID]*a2a.Task),
 	}
 }
 
@@ -27,7 +27,7 @@ func (ts *TaskStore) Save(task *a2a.Task) {
 }
 
 // Get retrieves a task by ID.
-func (ts *TaskStore) Get(id string) (*a2a.Task, bool) {
+func (ts *TaskStore) Get(id a2a.TaskID) (*a2a.Task, bool) {
 	ts.mu.RLock()
 	defer ts.mu.RUnlock()
 	task, ok := ts.tasks[id]

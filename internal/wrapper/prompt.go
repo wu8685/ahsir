@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/wu8685/ahsir/internal/a2a"
+	"github.com/a2aproject/a2a-go/a2a"
 )
 
 // A2ACall represents a parsed ---A2A_CALL--- block from Claude Code output.
@@ -26,7 +26,7 @@ func ValidateA2ACall(call A2ACall) error {
 }
 
 // BuildSystemPrompt injects available agents into the system prompt.
-func BuildSystemPrompt(basePrompt string, agents []a2a.AgentCard, maxCalls int) string {
+func BuildSystemPrompt(basePrompt string, agents []*a2a.AgentCard, maxCalls int) string {
 	var sb strings.Builder
 	sb.WriteString(basePrompt)
 
@@ -38,7 +38,7 @@ func BuildSystemPrompt(basePrompt string, agents []a2a.AgentCard, maxCalls int) 
 				skills[i] = s.Name
 			}
 			sb.WriteString(fmt.Sprintf("- name: %q, skills: %v, endpoint: %q\n",
-				a.Name, skills, a.Endpoint))
+				a.Name, skills, a.URL))
 		}
 		sb.WriteString("\nWhen you need another agent's help, append to your response:\n")
 		sb.WriteString("---A2A_CALL---\n")

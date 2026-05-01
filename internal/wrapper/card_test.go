@@ -64,14 +64,14 @@ network:
 	os.WriteFile(filepath.Join(a2aDir, "agent-card.yaml"), []byte(yamlContent), 0644)
 
 	builder := NewAgentCardBuilder(dir)
-	card, err := builder.Load()
+	cfg, err := builder.Load()
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	runtimeCard := builder.BuildRuntime(card, 9801)
-	if runtimeCard.Endpoint != "http://127.0.0.1:9801/" {
-		t.Errorf("expected endpoint 'http://127.0.0.1:9801/', got '%s'", runtimeCard.Endpoint)
+	runtimeCard := builder.BuildRuntime(cfg, 9801)
+	if runtimeCard.URL != "http://127.0.0.1:9801/" {
+		t.Errorf("expected URL 'http://127.0.0.1:9801/', got '%s'", runtimeCard.URL)
 	}
 	if runtimeCard.Provider == nil {
 		t.Error("expected provider to be set")

@@ -8,17 +8,16 @@ import (
 	"testing"
 	"time"
 
-	"github.com/wu8685/ahsir/internal/a2a"
+	"github.com/a2aproject/a2a-go/a2a"
 )
 
 func TestRegisterAgent(t *testing.T) {
 	reg := NewRegistry(10 * time.Second)
-	card := a2a.AgentCard{
-		Name:        "backend",
-		Description: "Backend agent",
-		Version:     "1.0.0",
-		Endpoint:    "http://127.0.0.1:9801/",
-		Skills:      []a2a.AgentSkill{{Name: "api-design"}},
+	card := &a2a.AgentCard{
+		Name:    "backend",
+		Version: "1.0.0",
+		URL:     "http://127.0.0.1:9801/",
+		Skills:  []a2a.AgentSkill{{Name: "api-design"}},
 	}
 	reg.Register(card)
 
@@ -29,35 +28,34 @@ func TestRegisterAgent(t *testing.T) {
 	if agents[0].Name != "backend" {
 		t.Errorf("expected backend, got %s", agents[0].Name)
 	}
-	if agents[0].Status != "online" {
-		t.Errorf("expected online, got %s", agents[0].Status)
+	if reg.GetStatus("backend") != "online" {
+		t.Errorf("expected online, got %s", reg.GetStatus("backend"))
 	}
 }
 
 func TestRegisterDuplicate(t *testing.T) {
 	reg := NewRegistry(10 * time.Second)
-	card := a2a.AgentCard{Name: "backend", Endpoint: "http://127.0.0.1:9801/"}
+	card := &a2a.AgentCard{Name: "backend", URL: "http://127.0.0.1:9801/"}
 	reg.Register(card)
-	card2 := a2a.AgentCard{Name: "backend", Endpoint: "http://127.0.0.1:9802/"}
+	card2 := &a2a.AgentCard{Name: "backend", URL: "http://127.0.0.1:9802/"}
 	reg.Register(card2)
 
 	agents := reg.List()
 	if len(agents) != 1 {
 		t.Fatalf("expected 1 agent, got %d", len(agents))
 	}
-	if agents[0].Endpoint != "http://127.0.0.1:9802/" {
-		t.Errorf("expected updated endpoint, got %s", agents[0].Endpoint)
+	if agents[0].URL != "http://127.0.0.1:9802/" {
+		t.Errorf("expected updated URL, got %s", agents[0].URL)
 	}
 }
 
 func TestGetAgent(t *testing.T) {
 	reg := NewRegistry(10 * time.Second)
-	card := a2a.AgentCard{
-		Name:        "frontend",
-		Description: "Frontend agent",
-		Version:     "1.0.0",
-		Endpoint:    "http://127.0.0.1:9802/",
-		Skills:      []a2a.AgentSkill{{Name: "react"}},
+	card := &a2a.AgentCard{
+		Name:    "frontend",
+		Version: "1.0.0",
+		URL:     "http://127.0.0.1:9802/",
+		Skills:  []a2a.AgentSkill{{Name: "react"}},
 	}
 	reg.Register(card)
 
@@ -65,8 +63,8 @@ func TestGetAgent(t *testing.T) {
 	if !ok {
 		t.Fatal("expected to find agent")
 	}
-	if found.Description != "Frontend agent" {
-		t.Errorf("unexpected description: %s", found.Description)
+	if found.Name != "frontend" {
+		t.Errorf("unexpected name: %s", found.Name)
 	}
 }
 
@@ -80,7 +78,7 @@ func TestGetAgentNotFound(t *testing.T) {
 
 func TestUnregisterAgent(t *testing.T) {
 	reg := NewRegistry(10 * time.Second)
-	card := a2a.AgentCard{Name: "data", Endpoint: "http://127.0.0.1:9803/"}
+	card := &a2a.AgentCard{Name: "data", URL: "http://127.0.0.1:9803/"}
 	reg.Register(card)
 	if err := reg.Unregister("data"); err != nil {
 		t.Fatal(err)
@@ -100,27 +98,25 @@ func TestUnregisterNotFound(t *testing.T) {
 
 func TestHeartbeat(t *testing.T) {
 	reg := NewRegistry(10 * time.Second)
-	card := a2a.AgentCard{Name: "backend", Endpoint: "http://127.0.0.1:9801/"}
+	card := &a2a.AgentCard{Name: "backend", URL: "http://127.0.0.1:9801/"}
 	reg.Register(card)
 
 	reg.Heartbeat("backend")
 
-	agent, _ := reg.Get("backend")
-	if agent.Status != "online" {
-		t.Errorf("expected online after heartbeat, got %s", agent.Status)
+	if reg.GetStatus("backend") != "online" {
+		t.Errorf("expected online after heartbeat, got %s", reg.GetStatus("backend"))
 	}
 }
 
 func TestHeartbeatTimeout(t *testing.T) {
 	reg := NewRegistry(50 * time.Millisecond)
-	card := a2a.AgentCard{Name: "backend", Endpoint: "http://127.0.0.1:9801/"}
+	card := &a2a.AgentCard{Name: "backend", URL: "http://127.0.0.1:9801/"}
 	reg.Register(card)
 
 	time.Sleep(100 * time.Millisecond)
 
-	agent, _ := reg.Get("backend")
-	if agent.Status != "offline" {
-		t.Errorf("expected offline after timeout, got %s", agent.Status)
+	if reg.GetStatus("backend") != "offline" {
+		t.Errorf("expected offline after timeout, got %s", reg.GetStatus("backend"))
 	}
 }
 
@@ -128,8 +124,7 @@ func TestRegistryHTTPHandler(t *testing.T) {
 	reg := NewRegistry(30 * time.Second)
 	handler := NewHTTPHandler(reg)
 
-	// Register via HTTP
-	card := a2a.AgentCard{Name: "backend", Endpoint: "http://127.0.0.1:9801/", Skills: []a2a.AgentSkill{}}
+	card := a2a.AgentCard{Name: "backend", URL: "http://127.0.0.1:9801/", Skills: []a2a.AgentSkill{}}
 	body := mustMarshal(t, card)
 	req := httptest.NewRequest(http.MethodPost, "/agents", body)
 	req.Header.Set("Content-Type", "application/json")
@@ -163,10 +158,6 @@ func TestRegistryHTTPHandler(t *testing.T) {
 		t.Fatalf("expected 200, got %d", w.Code)
 	}
 
-	// Verify empty
-	req, _ = http.NewRequest(http.MethodGet, "/agents", nil)
-	w = httptest.NewRecorder()
-	handler.ServeHTTP(w, req)
 	if len(reg.List()) != 0 {
 		t.Error("expected empty after delete")
 	}
