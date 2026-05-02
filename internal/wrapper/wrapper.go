@@ -5,7 +5,9 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log"
 	"net/http"
+	"os"
 	"sync"
 	"time"
 
@@ -14,9 +16,11 @@ import (
 
 // AgentWrapperConfig configures an agent wrapper instance.
 type AgentWrapperConfig struct {
-	Port        int
-	RegistryURL string
-	AgentCard   *a2a.AgentCard
+	Port         int
+	RegistryURL  string
+	AgentCard    *a2a.AgentCard
+	FSCfg        FilesystemConfig // Filesystem tool configuration
+	WorkspaceDir string           // Workspace directory for path resolution
 }
 
 // AgentWrapper ties together the A2A server, task store, and registry heartbeat.
@@ -41,6 +45,18 @@ func NewAgentWrapper(cfg AgentWrapperConfig) *AgentWrapper {
 // TaskStore returns the wrapper's task store.
 func (w *AgentWrapper) TaskStore() *TaskStore {
 	return w.taskStore
+}
+
+// SetupExecutor wires the executor (Claude Code session + agent calling) into the A2A server.
+func (w *AgentWrapper) SetupExecutor(session *SessionManager, listAgents func() []*a2a.AgentCard, callAgent func(ctx context.Context, agentName, task string) (string, error), maxDepth int, basePrompt string) {
+	executor := NewExecutor(ExecutorConfig{
+		SendPrompt: session.Send,
+		ListAgents: listAgents,
+		CallAgent:  callAgent,
+		MaxDepth:   maxDepth,
+		BasePrompt: basePrompt,
+	})
+	w.server.SetExecutor(executor.Execute)
 }
 
 // Start starts the HTTP server and begins registry heartbeat.
@@ -70,6 +86,21 @@ func (w *AgentWrapper) Start(ctx context.Context) error {
 		}
 	}()
 
+	// Write .mcp.json for stdio-based filesystem MCP tools if enabled
+	if w.cfg.FSCfg.Enabled {
+		exe, err := os.Executable()
+		if err == nil {
+			if err := WriteMCPConfig(w.cfg.WorkspaceDir, exe); err != nil {
+				log.Printf("Warning: Failed to write .mcp.json: %v", err)
+			} else {
+				log.Printf("FS MCP config written to %s/.mcp.json (binary: %s, allowed: %v)",
+					w.cfg.WorkspaceDir, exe, w.cfg.FSCfg.AllowedPaths)
+			}
+		} else {
+			log.Printf("Warning: Cannot determine binary path for MCP config: %v", err)
+		}
+	}
+
 	// Start heartbeat to registry if configured
 	if w.cfg.RegistryURL != "" {
 		go w.heartbeatLoop(ctx)
@@ -97,6 +128,14 @@ func (w *AgentWrapper) Stop(ctx context.Context) error {
 			return fmt.Errorf("shutdown server: %w", err)
 		}
 	}
+
+	// Remove .mcp.json
+	if w.cfg.FSCfg.Enabled {
+		if err := RemoveMCPConfig(w.cfg.WorkspaceDir); err != nil {
+			log.Printf("Warning: Failed to remove .mcp.json: %v", err)
+		}
+	}
+
 	w.running = false
 	return nil
 }

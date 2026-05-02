@@ -4,11 +4,17 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"net/http"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strconv"
 	"sync"
 	"time"
 
 	"github.com/a2aproject/a2a-go/a2a"
 	"github.com/wu8685/ahsir/internal/registry"
+	"github.com/wu8685/ahsir/internal/wrapper"
 )
 
 // Scheduler manages the lifecycle of all agents.
@@ -16,6 +22,7 @@ type Scheduler struct {
 	cfg      *Config
 	registry *registry.Registry
 	agents   map[string]*agentProcess
+	httpSrv  *http.Server
 	mu       sync.Mutex
 	running  bool
 	cancel   context.CancelFunc
@@ -23,6 +30,7 @@ type Scheduler struct {
 
 type agentProcess struct {
 	cfg    AgentConfig
+	cmd    *exec.Cmd
 	cancel context.CancelFunc
 }
 
@@ -58,12 +66,14 @@ func (s *Scheduler) Start(ctx context.Context) error {
 	ctx, s.cancel = context.WithCancel(ctx)
 
 	// Start registry HTTP server
+	handler := registry.NewHTTPHandler(s.registry)
+	addr := fmt.Sprintf("%s:%d", s.cfg.Registry.Host, s.cfg.Registry.Port)
+	s.httpSrv = &http.Server{Addr: addr, Handler: handler}
 	go func() {
-		handler := registry.NewHTTPHandler(s.registry)
-		addr := fmt.Sprintf("%s:%d", s.cfg.Registry.Host, s.cfg.Registry.Port)
 		log.Printf("Registry listening on %s", addr)
-		// In full implementation: log.Fatal(http.ListenAndServe(addr, handler))
-		_ = handler
+		if err := s.httpSrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			log.Printf("Registry server: %v", err)
+		}
 	}()
 
 	// Start each local agent
@@ -91,14 +101,52 @@ func (s *Scheduler) startAgent(ctx context.Context, cfg AgentConfig) error {
 	}
 
 	agentCtx, cancel := context.WithCancel(ctx)
+
+	// Find the ahsir-agent binary
+	agentExe := s.agentBinary()
+	registryURL := fmt.Sprintf("http://%s:%d", s.cfg.Registry.Host, s.cfg.Registry.Port)
+
+	cmd := exec.CommandContext(agentCtx, agentExe,
+		"--workspace", cfg.Workspace,
+		"--port", strconv.Itoa(port),
+		"--registry", registryURL,
+	)
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+
+	if err := cmd.Start(); err != nil {
+		cancel()
+		return fmt.Errorf("start agent %s: %w", cfg.Name, err)
+	}
+
 	s.agents[cfg.Name] = &agentProcess{
 		cfg:    cfg,
+		cmd:    cmd,
 		cancel: cancel,
 	}
 
-	_ = agentCtx
-	log.Printf("Agent %s would start on port %d", cfg.Name, port)
+	log.Printf("Agent %s started on port %d (pid: %d)", cfg.Name, port, cmd.Process.Pid)
+
+	// Monitor process exit
+	go func() {
+		if err := cmd.Wait(); err != nil {
+			log.Printf("Agent %s exited: %v", cfg.Name, err)
+		}
+		s.mu.Lock()
+		delete(s.agents, cfg.Name)
+		s.mu.Unlock()
+	}()
+
 	return nil
+}
+
+// agentBinary returns the path to the ahsir-agent binary.
+func (s *Scheduler) agentBinary() string {
+	exePath, err := os.Executable()
+	if err != nil {
+		return "ahsir-agent"
+	}
+	return filepath.Join(filepath.Dir(exePath), "ahsir-agent")
 }
 
 // Stop stops all agents and the scheduler.
@@ -110,8 +158,20 @@ func (s *Scheduler) Stop() {
 		s.cancel()
 	}
 
+	// Shut down registry HTTP server
+	if s.httpSrv != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := s.httpSrv.Shutdown(ctx); err != nil {
+			log.Printf("Registry shutdown: %v", err)
+		}
+	}
+
 	for name, proc := range s.agents {
 		proc.cancel()
+		if proc.cmd != nil && proc.cmd.Process != nil {
+			proc.cmd.Process.Kill()
+		}
 		log.Printf("Agent %s stopped", name)
 	}
 	s.agents = make(map[string]*agentProcess)
@@ -129,15 +189,32 @@ func (s *Scheduler) ChatWithAgent(agentName, message string) (string, error) {
 	if !ok {
 		return "", fmt.Errorf("agent %s not found", agentName)
 	}
-	_ = card
-	return fmt.Sprintf("message sent to %s", agentName), nil
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	client, err := wrapper.NewAgentClient(ctx, card)
+	if err != nil {
+		return "", fmt.Errorf("create client for %s: %w", agentName, err)
+	}
+
+	return client.SendMessage(ctx, message)
 }
 
 // GetTaskStatus gets a task's status (implements mcp.AgentRouter).
 func (s *Scheduler) GetTaskStatus(agentName, taskID string) (*a2a.Task, error) {
-	_, ok := s.registry.Get(agentName)
+	card, ok := s.registry.Get(agentName)
 	if !ok {
 		return nil, fmt.Errorf("agent %s not found", agentName)
 	}
-	return &a2a.Task{ID: a2a.TaskID(taskID), Status: a2a.TaskStatus{State: a2a.TaskStateWorking}}, nil
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	client, err := wrapper.NewAgentClient(ctx, card)
+	if err != nil {
+		return nil, fmt.Errorf("create client for %s: %w", agentName, err)
+	}
+
+	return client.GetTask(ctx, taskID)
 }

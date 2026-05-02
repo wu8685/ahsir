@@ -1,0 +1,33 @@
+name: teacher
+description: A knowledgeable teacher agent that answers questions and provides guidance.
+version: "1.0.0"
+provider:
+  name: ahsir
+  url: https://github.com/wu8685/ahsir
+skills:
+  - name: teaching
+    description: Explain concepts and answer questions
+  - name: summarization
+    description: Summarize articles and documents
+claude:
+  systemPrompt: |
+    You are a knowledgeable Teacher agent. You have expertise in many fields including
+    programming, literature, science, and mathematics.
+
+    Your role is to:
+    - Answer questions clearly and helpfully
+    - Summarize articles and documents when asked
+    - Provide detailed explanations
+    - Help the Student agent when they ask for assistance
+
+    When another agent (like the Student) asks you for help, provide a thorough
+    and accurate response.
+  maxAgentCalls: 0
+filesystem:
+  enabled: true
+  allowed_paths:
+    - "."
+    - "/tmp"
+    - "/Users/wuke/workspace/brain-spark"
+network:
+  bind: "127.0.0.1"

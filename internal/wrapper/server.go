@@ -11,8 +11,8 @@ import (
 )
 
 // ProcessMessageFunc is called when a message/send request arrives.
-// It receives the incoming message and returns the task created.
-type ProcessMessageFunc func(msg *a2a.Message) (*a2a.Task, error)
+// It receives the context, incoming message, and returns the task created.
+type ProcessMessageFunc func(ctx context.Context, msg *a2a.Message) (*a2a.Task, error)
 
 // A2AServer wraps the SDK's JSON-RPC handler for agent serving.
 type A2AServer struct {
@@ -29,6 +29,11 @@ func NewA2AServer(taskStore *TaskStore, executor ProcessMessageFunc) *A2AServer 
 	}
 	s.handler = a2asrv.NewJSONRPCHandler(s)
 	return s
+}
+
+// SetExecutor sets the message processor function.
+func (s *A2AServer) SetExecutor(executor ProcessMessageFunc) {
+	s.executor = executor
 }
 
 // ServeHTTP handles incoming JSON-RPC requests.
@@ -65,7 +70,7 @@ func (s *A2AServer) OnCancelTask(ctx context.Context, id *a2a.TaskIDParams) (*a2
 // OnSendMessage handles 'message/send'.
 func (s *A2AServer) OnSendMessage(ctx context.Context, params *a2a.MessageSendParams) (a2a.SendMessageResult, error) {
 	if s.executor != nil {
-		task, err := s.executor(params.Message)
+		task, err := s.executor(ctx, params.Message)
 		if err != nil {
 			return nil, err
 		}

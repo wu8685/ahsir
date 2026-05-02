@@ -1,0 +1,12 @@
+{
+  "mcpServers": {
+    "ahsir-filesystem": {
+      "args": [
+        "--fs-mcp",
+        "--workspace",
+        "/Users/wuke/workspace/go/src/github.com/wu8685/ahsir/example/workspaces/teacher"
+      ],
+      "command": "/Users/wuke/workspace/go/src/github.com/wu8685/ahsir/bin/ahsir-agent"
+    }
+  }
+}

@@ -32,11 +32,12 @@ func TestSessionManagerStartStop(t *testing.T) {
 }
 
 func TestSessionManagerSendMessage(t *testing.T) {
-	// Use cat to echo back input
+	// Use echo to test: echo outputs its arguments
 	sm := NewSessionManager(SessionConfig{
-		Command: "cat",
+		Command: "echo",
+		Timeout: 2 * time.Second,
 	})
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
 	if err := sm.Start(ctx); err != nil {
@@ -44,8 +45,8 @@ func TestSessionManagerSendMessage(t *testing.T) {
 	}
 	defer sm.Stop()
 
-	// Send message and read response
-	prompt := "hello claude\n"
+	// Send message and read response — prompt is passed as last CLI arg
+	prompt := "hello claude"
 	outputCh, err := sm.Send(ctx, prompt)
 	if err != nil {
 		t.Fatal(err)
@@ -57,15 +58,14 @@ func TestSessionManagerSendMessage(t *testing.T) {
 	}
 
 	if !strings.Contains(buf.String(), "hello claude") {
-		t.Errorf("expected echo of 'hello claude', got: %s", buf.String())
+		t.Errorf("expected output to contain 'hello claude', got: %s", buf.String())
 	}
 }
 
 func TestSessionManagerCrashRecovery(t *testing.T) {
 	sm := NewSessionManager(SessionConfig{
-		Command:     "sleep",
-		Args:        []string{"0.1"},
-		AutoRestart: true,
+		Command: "echo",
+		Args:    []string{"test"},
 	})
 	ctx := context.Background()
 
@@ -73,10 +73,6 @@ func TestSessionManagerCrashRecovery(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Wait for process to exit
-	time.Sleep(300 * time.Millisecond)
-
-	// Stop the old session first (cleanup)
 	sm.Stop()
 
 	// Should be able to restart after stopping

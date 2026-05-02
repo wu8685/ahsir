@@ -1,0 +1,19 @@
+agents:
+  - name: teacher
+    workspace: example/workspaces/teacher
+    port: 0
+  - name: student
+    workspace: example/workspaces/student
+    port: 0
+
+registry:
+  host: "127.0.0.1"
+  port: 9800
+  heartbeat_interval: 10s
+  heartbeat_timeout: 30s
+
+mcp: {}
+
+port_range:
+  start: 9801
+  end: 9900

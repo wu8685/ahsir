@@ -1,9 +1,15 @@
 package main
 
 import (
+	"bufio"
+	"context"
 	"fmt"
+	"log"
 	"os"
+	"os/signal"
+	"syscall"
 
+	"github.com/wu8685/ahsir/internal/mcp"
 	"github.com/wu8685/ahsir/internal/scheduler"
 )
 
@@ -29,12 +35,51 @@ func main() {
 			os.Exit(1)
 		}
 		sch := scheduler.New(cfg)
-		if err := sch.Start(nil); err != nil {
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+
+		if err := sch.Start(ctx); err != nil {
 			fmt.Fprintf(os.Stderr, "Error starting scheduler: %v\n", err)
 			os.Exit(1)
 		}
-		fmt.Println("Scheduler started")
-		select {}
+
+		// Handle graceful shutdown
+		sigCh := make(chan os.Signal, 1)
+		signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+
+		// MCP stdio loop in goroutine for MCP mode
+		go func() {
+			mcpServer := mcp.NewServer(sch)
+			scanner := bufio.NewScanner(os.Stdin)
+			// Increase buffer for large messages
+			scanner.Buffer(make([]byte, 0, 1024*1024), 1024*1024)
+
+			log.Println("MCP server ready, waiting for messages on stdin...")
+			for scanner.Scan() {
+				data := scanner.Bytes()
+				if len(data) == 0 {
+					continue
+				}
+				resp, err := mcpServer.HandleMessage(data)
+				if err != nil {
+					log.Printf("MCP error: %v", err)
+					continue
+				}
+				if resp != nil {
+					os.Stdout.Write(resp)
+					os.Stdout.Write([]byte("\n"))
+				}
+			}
+			if err := scanner.Err(); err != nil {
+				log.Printf("stdin scanner error: %v", err)
+			}
+		}()
+
+		// Wait for shutdown signal
+		<-sigCh
+		log.Println("Signal received, shutting down...")
+		cancel()
+		sch.Stop()
 	case "stop":
 		fmt.Println("Stopping scheduler...")
 	default:

@@ -37,18 +37,18 @@ func NewRegistry(heartbeatTimeout time.Duration) *Registry {
 func (r *Registry) Register(card *a2a.AgentCard) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	r.agents[card.Name] = &agentEntry{
+	r.agents[strings.ToLower(card.Name)] = &agentEntry{
 		card:     card,
 		status:   "online",
 		lastBeat: time.Now(),
 	}
 }
 
-// Get retrieves an agent card by name.
+// Get retrieves an agent card by name (case-insensitive).
 func (r *Registry) Get(name string) (*a2a.AgentCard, bool) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
-	entry, ok := r.agents[name]
+	entry, ok := r.agents[strings.ToLower(name)]
 	if !ok {
 		return nil, false
 	}
@@ -72,11 +72,11 @@ func (r *Registry) List() []*a2a.AgentCard {
 	return cards
 }
 
-// GetStatus returns the status of an agent.
+// GetStatus returns the status of an agent (case-insensitive).
 func (r *Registry) GetStatus(name string) string {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
-	entry, ok := r.agents[name]
+	entry, ok := r.agents[strings.ToLower(name)]
 	if !ok {
 		return "unknown"
 	}
@@ -86,22 +86,23 @@ func (r *Registry) GetStatus(name string) string {
 	return entry.status
 }
 
-// Unregister removes an agent from the registry.
+// Unregister removes an agent from the registry (case-insensitive).
 func (r *Registry) Unregister(name string) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if _, ok := r.agents[name]; !ok {
+	key := strings.ToLower(name)
+	if _, ok := r.agents[key]; !ok {
 		return fmt.Errorf("agent %s not found", name)
 	}
-	delete(r.agents, name)
+	delete(r.agents, key)
 	return nil
 }
 
-// Heartbeat updates the last heartbeat time for an agent.
+// Heartbeat updates the last heartbeat time for an agent (case-insensitive).
 func (r *Registry) Heartbeat(name string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if entry, ok := r.agents[name]; ok {
+	if entry, ok := r.agents[strings.ToLower(name)]; ok {
 		entry.lastBeat = time.Now()
 		entry.status = "online"
 	}

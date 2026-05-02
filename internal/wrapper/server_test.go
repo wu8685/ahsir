@@ -2,6 +2,7 @@ package wrapper
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -87,7 +88,7 @@ func TestA2AServerHandleUnknownMethod(t *testing.T) {
 func TestA2AServerWithExecutor(t *testing.T) {
 	taskStore := NewTaskStore()
 
-	execFn := func(msg *a2a.Message) (*a2a.Task, error) {
+	execFn := func(ctx context.Context, msg *a2a.Message) (*a2a.Task, error) {
 		task := a2a.NewSubmittedTask(a2a.TaskInfo{}, msg)
 		task.Status = a2a.TaskStatus{State: a2a.TaskStateWorking}
 		return task, nil

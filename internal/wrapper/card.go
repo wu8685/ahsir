@@ -18,6 +18,7 @@ type AgentCardConfig struct {
 	Skills      []SkillConfig     `yaml:"skills"`
 	Claude      ClaudeConfig      `yaml:"claude"`
 	Network     NetworkConfig     `yaml:"network"`
+	Filesystem  FilesystemConfig  `yaml:"filesystem"`
 }
 
 // ProviderConfig maps to a2a.AgentProvider.
@@ -36,6 +37,12 @@ type SkillConfig struct {
 type ClaudeConfig struct {
 	SystemPrompt  string `yaml:"systemPrompt"`
 	MaxAgentCalls int    `yaml:"maxAgentCalls"`
+}
+
+// FilesystemConfig holds filesystem tool configuration from agent-card.yaml.
+type FilesystemConfig struct {
+	Enabled      bool     `yaml:"enabled"`
+	AllowedPaths []string `yaml:"allowed_paths"`
 }
 
 // NetworkConfig holds network settings from the card.
@@ -76,6 +83,9 @@ func (b *AgentCardBuilder) Load() (*AgentCardConfig, error) {
 	if cfg.Claude.MaxAgentCalls == 0 {
 		cfg.Claude.MaxAgentCalls = 5
 	}
+	if cfg.Filesystem.Enabled && len(cfg.Filesystem.AllowedPaths) == 0 {
+		cfg.Filesystem.AllowedPaths = []string{"."}
+	}
 
 	return &cfg, nil
 }
@@ -101,11 +111,12 @@ func (b *AgentCardBuilder) BuildRuntime(cfg *AgentCardConfig, port int) *a2a.Age
 	}
 
 	card := &a2a.AgentCard{
-		Name:        cfg.Name,
-		Description: cfg.Description,
-		Version:     cfg.Version,
-		URL:         fmt.Sprintf("http://%s:%d/", advertise, port),
-		Skills:      skills,
+		Name:               cfg.Name,
+		Description:        cfg.Description,
+		Version:            cfg.Version,
+		URL:                fmt.Sprintf("http://%s:%d/", advertise, port),
+		PreferredTransport: a2a.TransportProtocolJSONRPC,
+		Skills:             skills,
 		Capabilities: a2a.AgentCapabilities{
 			Streaming: true,
 		},

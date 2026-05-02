@@ -78,7 +78,15 @@ func SerializeA2ACall(call A2ACall) string {
 	return fmt.Sprintf("---A2A_CALL---\n%s\n---END---\n", string(data))
 }
 
-// BuildInjectionPrompt creates a prompt that injects another agent's result.
-func BuildInjectionPrompt(agentName string, result string) string {
-	return fmt.Sprintf("\n[Agent %s returned: %s]\n", agentName, result)
+// BuildInjectionPrompt creates a prompt that injects another agent's result,
+// including the original task context so the agent knows what to do with the response.
+func BuildInjectionPrompt(agentName, originalTask, result string) string {
+	return fmt.Sprintf(
+		"Your original task was: %s\n\n"+
+			"Agent %q returned the following response:\n%s\n\n"+
+			"Please use this response to answer the original task. "+
+			"If the response is sufficient, relay it to the user directly. "+
+			"If not, explain what additional information is needed.",
+		originalTask, agentName, result,
+	)
 }

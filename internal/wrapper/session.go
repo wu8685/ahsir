@@ -5,20 +5,19 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io"
 	"os/exec"
+	"strings"
 	"sync"
 	"time"
 )
 
 // SessionConfig configures a Claude Code session.
 type SessionConfig struct {
-	Command     string
-	Args        []string
-	Env         []string
-	WorkDir     string
-	Timeout     time.Duration
-	AutoRestart bool
+	Command string
+	Args    []string
+	Env     []string
+	WorkDir string
+	Timeout time.Duration
 }
 
 // Validate checks the config for required fields.
@@ -32,12 +31,9 @@ func (c SessionConfig) Validate() error {
 	return nil
 }
 
-// SessionManager manages a persistent Claude Code subprocess.
+// SessionManager manages Claude Code invocations.
 type SessionManager struct {
 	cfg     SessionConfig
-	cmd     *exec.Cmd
-	stdin   io.WriteCloser
-	stdout  io.ReadCloser
 	mu      sync.Mutex
 	running bool
 }
@@ -52,7 +48,7 @@ func NewSessionManager(cfg SessionConfig) *SessionManager {
 	}
 }
 
-// Start launches the Claude Code subprocess.
+// Start validates the session config and marks the session as ready.
 func (sm *SessionManager) Start(ctx context.Context) error {
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
@@ -61,49 +57,21 @@ func (sm *SessionManager) Start(ctx context.Context) error {
 		return errors.New("session already running")
 	}
 
-	sm.cmd = exec.CommandContext(ctx, sm.cfg.Command, sm.cfg.Args...)
-	if sm.cfg.WorkDir != "" {
-		sm.cmd.Dir = sm.cfg.WorkDir
-	}
-	if len(sm.cfg.Env) > 0 {
-		sm.cmd.Env = sm.cfg.Env
+	if err := sm.cfg.Validate(); err != nil {
+		return err
 	}
 
-	var err error
-	sm.stdin, err = sm.cmd.StdinPipe()
-	if err != nil {
-		return fmt.Errorf("create stdin pipe: %w", err)
-	}
-	sm.stdout, err = sm.cmd.StdoutPipe()
-	if err != nil {
-		return fmt.Errorf("create stdout pipe: %w", err)
-	}
-	// Capture stderr to avoid pipe blocking
-	sm.cmd.Stderr = nil
-
-	if err := sm.cmd.Start(); err != nil {
-		return fmt.Errorf("start process: %w", err)
-	}
 	sm.running = true
 	return nil
 }
 
-// Stop terminates the Claude Code subprocess.
+// Stop marks the session as stopped.
 func (sm *SessionManager) Stop() error {
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
 
 	if !sm.running {
 		return nil
-	}
-
-	sm.stdin.Close()
-	sm.stdout.Close()
-
-	if sm.cmd != nil && sm.cmd.Process != nil {
-		if err := sm.cmd.Process.Kill(); err != nil {
-			return fmt.Errorf("kill process: %w", err)
-		}
 	}
 	sm.running = false
 	return nil
@@ -116,17 +84,12 @@ func (sm *SessionManager) IsRunning() bool {
 	return sm.running
 }
 
-// Send writes a prompt to the process and returns an output channel.
+// Send executes the command with the prompt as a CLI argument and returns an output channel.
 func (sm *SessionManager) Send(ctx context.Context, prompt string) (<-chan string, error) {
 	sm.mu.Lock()
 	if !sm.running {
 		sm.mu.Unlock()
 		return nil, errors.New("session not running")
-	}
-
-	if _, err := io.WriteString(sm.stdin, prompt); err != nil {
-		sm.mu.Unlock()
-		return nil, fmt.Errorf("write to stdin: %w", err)
 	}
 	sm.mu.Unlock()
 
@@ -134,23 +97,62 @@ func (sm *SessionManager) Send(ctx context.Context, prompt string) (<-chan strin
 
 	go func() {
 		defer close(outputCh)
-		scanner := bufio.NewScanner(sm.stdout)
-		timeout := sm.cfg.Timeout
 
+		// Build args: base args + prompt as last argument
+		args := make([]string, len(sm.cfg.Args), len(sm.cfg.Args)+1)
+		copy(args, sm.cfg.Args)
+		args = append(args, prompt)
+
+		cmdCtx, cancel := context.WithTimeout(ctx, sm.cfg.Timeout)
+		defer cancel()
+
+		cmd := exec.CommandContext(cmdCtx, sm.cfg.Command, args...)
+		if sm.cfg.WorkDir != "" {
+			cmd.Dir = sm.cfg.WorkDir
+		}
+		if len(sm.cfg.Env) > 0 {
+			cmd.Env = sm.cfg.Env
+		}
+
+		// Capture combined stdout/stderr
+		pipe, err := cmd.StdoutPipe()
+		if err != nil {
+			outputCh <- fmt.Sprintf("ERROR: create stdout pipe: %v", err)
+			return
+		}
+
+		if err := cmd.Start(); err != nil {
+			outputCh <- fmt.Sprintf("ERROR: start command: %v", err)
+			return
+		}
+
+		scanner := bufio.NewScanner(pipe)
 		for scanner.Scan() {
 			select {
 			case <-ctx.Done():
+				cmd.Process.Kill()
 				return
 			default:
 			}
 
 			line := scanner.Text()
+			// Skip log lines emitted by Claude Code
+			if strings.HasPrefix(line, "202") && strings.Contains(line, "logging/config.go") {
+				continue
+			}
+			if strings.HasPrefix(line, "202") && strings.Contains(line, "Logging level") {
+				continue
+			}
+
 			select {
 			case outputCh <- line:
-			case <-time.After(timeout):
+			case <-ctx.Done():
+				cmd.Process.Kill()
 				return
 			}
 		}
+
+		cmd.Wait()
 	}()
 
 	return outputCh, nil

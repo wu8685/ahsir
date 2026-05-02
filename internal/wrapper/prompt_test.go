@@ -86,12 +86,15 @@ func TestSerializeA2ACall(t *testing.T) {
 }
 
 func TestBuildInjectionPrompt(t *testing.T) {
-	result := BuildInjectionPrompt("data", "the query result")
+	result := BuildInjectionPrompt("data", "original task", "the query result")
 	if !strings.Contains(result, "data") {
 		t.Error("expected agent name in injection prompt")
 	}
 	if !strings.Contains(result, "the query result") {
 		t.Error("expected result in injection prompt")
+	}
+	if !strings.Contains(result, "original task") {
+		t.Error("expected original task in injection prompt")
 	}
 }
 
