@@ -11,14 +11,18 @@ import (
 
 // AgentCardConfig represents the .a2a/agent-card.yaml file structure.
 type AgentCardConfig struct {
-	Name        string            `yaml:"name"`
-	Description string            `yaml:"description"`
-	Version     string            `yaml:"version"`
-	Provider    *ProviderConfig   `yaml:"provider"`
-	Skills      []SkillConfig     `yaml:"skills"`
-	Claude      ClaudeConfig      `yaml:"claude"`
-	Network     NetworkConfig     `yaml:"network"`
-	Filesystem  FilesystemConfig  `yaml:"filesystem"`
+	Name        string           `yaml:"name"`
+	Description string           `yaml:"description"`
+	Version     string           `yaml:"version"`
+	Provider    *ProviderConfig  `yaml:"provider"`
+	Skills      []SkillConfig    `yaml:"skills"`
+	// Claude holds agent behavior (system prompt, max delegation depth).
+	// The field is named "Claude" for historical reasons; its contents are
+	// provider-agnostic — any LLM CLI configured via Runtime can consume them.
+	Claude     ClaudeConfig     `yaml:"claude"`
+	Runtime    RuntimeConfig    `yaml:"runtime"`
+	Network    NetworkConfig    `yaml:"network"`
+	Filesystem FilesystemConfig `yaml:"filesystem"`
 }
 
 // ProviderConfig maps to a2a.AgentProvider.
@@ -33,10 +37,44 @@ type SkillConfig struct {
 	Description string `yaml:"description"`
 }
 
-// ClaudeConfig holds Claude-specific settings from the card.
+// ClaudeConfig holds agent-behavior settings (system prompt + max delegation depth).
+// Despite the name, the contents are not Claude-specific.
 type ClaudeConfig struct {
 	SystemPrompt  string `yaml:"systemPrompt"`
 	MaxAgentCalls int    `yaml:"maxAgentCalls"`
+}
+
+// RuntimeConfig configures the LLM CLI subprocess that backs an agent.
+// This is the multi-provider extension point.
+//
+// High-level fields (Provider, BaseURL, APIKey, Model) are the recommended
+// way to switch providers — they get translated into the env vars the
+// underlying CLI expects. Low-level fields (Command/Args/Env) are escape
+// hatches for unusual setups.
+//
+// Provider values:
+//   - "" or "anthropic" (default): drives `claude -p`, sets
+//     ANTHROPIC_BASE_URL / ANTHROPIC_AUTH_TOKEN / ANTHROPIC_MODEL.
+//   - "zhipu": same env mapping as anthropic (Zhipu/智谱 GLM exposes an
+//     Anthropic-compatible endpoint), with BaseURL defaulting to
+//     https://open.bigmodel.cn/api/anthropic.
+//   - any other value: provider mapping is skipped; user must populate Env
+//     (and likely Command) directly.
+//
+// Value expansion: BaseURL, APIKey, Model, and every value in Env support
+// ${VAR} / $VAR expansion via os.ExpandEnv, so secrets can live in shell
+// env instead of YAML.
+//
+// Timeout has the form accepted by time.ParseDuration (e.g. "120s", "2m").
+type RuntimeConfig struct {
+	Provider string            `yaml:"provider"`
+	BaseURL  string            `yaml:"baseURL"`
+	APIKey   string            `yaml:"apiKey"`
+	Model    string            `yaml:"model"`
+	Command  string            `yaml:"command"`
+	Args     []string          `yaml:"args"`
+	Env      map[string]string `yaml:"env"`
+	Timeout  string            `yaml:"timeout"`
 }
 
 // FilesystemConfig holds filesystem tool configuration from agent-card.yaml.
@@ -85,6 +123,15 @@ func (b *AgentCardBuilder) Load() (*AgentCardConfig, error) {
 	}
 	if cfg.Filesystem.Enabled && len(cfg.Filesystem.AllowedPaths) == 0 {
 		cfg.Filesystem.AllowedPaths = []string{"."}
+	}
+	if cfg.Runtime.Command == "" {
+		cfg.Runtime.Command = "claude"
+		if len(cfg.Runtime.Args) == 0 {
+			cfg.Runtime.Args = []string{"-p", "--output-format", "text"}
+		}
+	}
+	if cfg.Runtime.Timeout == "" {
+		cfg.Runtime.Timeout = "120s"
 	}
 
 	return &cfg, nil

@@ -65,10 +65,17 @@ func (s *Scheduler) Start(ctx context.Context) error {
 
 	ctx, s.cancel = context.WithCancel(ctx)
 
-	// Start registry HTTP server
-	handler := registry.NewHTTPHandler(s.registry)
+	// Wrap the registry handler with a gateway router that intercepts the
+	// chat / tasks endpoints first and forwards everything else (the bare
+	// /agents and /agents/{name} CRUD) to the registry. We do path parsing
+	// manually rather than relying on Go 1.22+ ServeMux pattern routing
+	// because the build environment may pin httpmuxgo121=1, in which case
+	// `{name}` wildcards become literal strings and never match.
+	regHandler := registry.NewHTTPHandler(s.registry)
+	gw := newGatewayHandler(s, regHandler)
+
 	addr := fmt.Sprintf("%s:%d", s.cfg.Registry.Host, s.cfg.Registry.Port)
-	s.httpSrv = &http.Server{Addr: addr, Handler: handler}
+	s.httpSrv = &http.Server{Addr: addr, Handler: gw}
 	go func() {
 		log.Printf("Registry listening on %s", addr)
 		if err := s.httpSrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
@@ -184,13 +191,20 @@ func (s *Scheduler) ListAgents() []*a2a.AgentCard {
 }
 
 // ChatWithAgent sends a message to an agent (implements mcp.AgentRouter).
+//
+// The forwarding timeout comes from cfg.Timeouts.Chat (default 10m). It MUST
+// be >= every agent's runtime.timeout (configured per agent-card.yaml),
+// because the scheduler has to wait for the agent's full LLM round-trip
+// before getting a reply. The agent itself is still the authoritative
+// per-call deadline — the gateway timeout is just an upper bound to avoid
+// hanging callers if an agent never responds.
 func (s *Scheduler) ChatWithAgent(agentName, message string) (string, error) {
 	card, ok := s.registry.Get(agentName)
 	if !ok {
 		return "", fmt.Errorf("agent %s not found", agentName)
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), s.cfg.Timeouts.ChatTimeout())
 	defer cancel()
 
 	client, err := wrapper.NewAgentClient(ctx, card)
@@ -202,13 +216,16 @@ func (s *Scheduler) ChatWithAgent(agentName, message string) (string, error) {
 }
 
 // GetTaskStatus gets a task's status (implements mcp.AgentRouter).
+//
+// Uses cfg.Timeouts.TaskStatus (default 30s) — this is a quick task-store
+// read with no LLM round-trip, so it can be tight.
 func (s *Scheduler) GetTaskStatus(agentName, taskID string) (*a2a.Task, error) {
 	card, ok := s.registry.Get(agentName)
 	if !ok {
 		return nil, fmt.Errorf("agent %s not found", agentName)
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), s.cfg.Timeouts.TaskStatusTimeout())
 	defer cancel()
 
 	client, err := wrapper.NewAgentClient(ctx, card)

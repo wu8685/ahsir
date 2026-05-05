@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "ahsir": {
+      "command": "/Users/wuke/workspace/go/src/github.com/wu8685/ahsir/bin/ahsir",
+      "args": ["mcp", "--scheduler", "http://127.0.0.1:9800"]
+    }
+  }
+}

@@ -4,8 +4,20 @@ import (
 	"fmt"
 	"os"
 	"sync"
+	"time"
 
 	"gopkg.in/yaml.v3"
+)
+
+// Default timeouts for the gateway / outer-envelope layer. The gateway
+// timeout is the upper bound on a single agent chat round-trip and MUST be
+// >= every agent's runtime.timeout (in agent-card.yaml); 10 minutes covers
+// the per-agent default of 300s with headroom for slow models, hook
+// overhead, and chained sub-agent calls. task_status is a quick task-store
+// read, no LLM involvement.
+const (
+	defaultChatTimeout       = 10 * time.Minute
+	defaultTaskStatusTimeout = 30 * time.Second
 )
 
 // Config represents the ahsir.yaml configuration.
@@ -14,9 +26,47 @@ type Config struct {
 	Registry  RegistryConfig `yaml:"registry"`
 	MCP       MCPConfig      `yaml:"mcp"`
 	PortRange PortRange      `yaml:"port_range"`
+	Timeouts  TimeoutsConfig `yaml:"timeouts"`
 
 	mu       sync.Mutex
 	nextPort int
+}
+
+// TimeoutsConfig is the single source of truth for the scheduler's
+// outer-envelope timeouts. Per-agent LLM subprocess timeout (claude exit
+// deadline) lives separately in each agent-card.yaml's runtime.timeout
+// because it is intrinsic to that agent's expected response latency.
+//
+// Invariant: Chat must be >= max(agent runtime.timeout) across all agents,
+// otherwise the gateway will kill a request the agent could still complete.
+type TimeoutsConfig struct {
+	// Chat bounds POST /agents/{name}/chat (the JSON-RPC forward to an
+	// agent's A2A server). Default: 10m.
+	Chat string `yaml:"chat"`
+	// TaskStatus bounds GET /agents/{name}/tasks/{taskID}. Default: 30s.
+	TaskStatus string `yaml:"task_status"`
+}
+
+// ChatTimeout returns the parsed Chat timeout, or the default if empty/invalid.
+func (t TimeoutsConfig) ChatTimeout() time.Duration {
+	if t.Chat == "" {
+		return defaultChatTimeout
+	}
+	if d, err := time.ParseDuration(t.Chat); err == nil {
+		return d
+	}
+	return defaultChatTimeout
+}
+
+// TaskStatusTimeout returns the parsed TaskStatus timeout, or the default.
+func (t TimeoutsConfig) TaskStatusTimeout() time.Duration {
+	if t.TaskStatus == "" {
+		return defaultTaskStatusTimeout
+	}
+	if d, err := time.ParseDuration(t.TaskStatus); err == nil {
+		return d
+	}
+	return defaultTaskStatusTimeout
 }
 
 // AgentConfig configures a single agent.

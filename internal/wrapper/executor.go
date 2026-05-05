@@ -10,38 +10,54 @@ import (
 
 // ExecutorConfig configures the agent execution loop.
 type ExecutorConfig struct {
-	SendPrompt func(ctx context.Context, prompt string) (<-chan string, error)
+	// SendPrompt invokes the underlying LLM CLI with the given prompt and
+	// returns the full stdout. An error here is fatal for the current task —
+	// the executor will mark the task failed and stop, so SendPrompt must
+	// surface non-zero exits / stderr (see SessionManager.Send) rather than
+	// returning ("", nil), which would silently produce an empty agent reply.
+	SendPrompt func(ctx context.Context, prompt string) (string, error)
 	ListAgents func() []*a2a.AgentCard
 	CallAgent  func(ctx context.Context, agentName string, task string) (string, error)
-	MaxDepth   int
-	BasePrompt string
+	// LookupHistory returns prior tasks belonging to a contextID, in
+	// chronological order. Used to give the underlying LLM short-term memory
+	// across separate message/send calls. May be nil — in that case each
+	// request starts fresh.
+	LookupHistory func(contextID string) []*a2a.Task
+	MaxDepth      int
+	BasePrompt    string
 }
 
-// Executor runs the core agent loop: receive message → prompt Claude Code →
+// Executor runs the core agent loop: receive message → prompt the LLM →
 // parse A2A_CALL markers → execute sub-agent calls → inject results → return task.
 type Executor struct {
-	sendPrompt func(ctx context.Context, prompt string) (<-chan string, error)
-	listAgents func() []*a2a.AgentCard
-	callAgent  func(ctx context.Context, agentName string, task string) (string, error)
-	maxDepth   int
-	basePrompt string
+	sendPrompt    func(ctx context.Context, prompt string) (string, error)
+	listAgents    func() []*a2a.AgentCard
+	callAgent     func(ctx context.Context, agentName string, task string) (string, error)
+	lookupHistory func(contextID string) []*a2a.Task
+	maxDepth      int
+	basePrompt    string
 }
 
 // NewExecutor creates a new Executor.
 // If MaxDepth is not set (0), it defaults to 5.
 func NewExecutor(cfg ExecutorConfig) *Executor {
 	return &Executor{
-		sendPrompt: cfg.SendPrompt,
-		listAgents: cfg.ListAgents,
-		callAgent:  cfg.CallAgent,
-		maxDepth:   cfg.MaxDepth,
-		basePrompt: cfg.BasePrompt,
+		sendPrompt:    cfg.SendPrompt,
+		listAgents:    cfg.ListAgents,
+		callAgent:     cfg.CallAgent,
+		lookupHistory: cfg.LookupHistory,
+		maxDepth:      cfg.MaxDepth,
+		basePrompt:    cfg.BasePrompt,
 	}
 }
 
 // Execute runs the agent execution loop for an incoming message.
 func (e *Executor) Execute(ctx context.Context, msg *a2a.Message) (*a2a.Task, error) {
-	task := a2a.NewSubmittedTask(a2a.TaskInfo{}, msg)
+	// Pass msg as the TaskInfoProvider so msg.ContextID propagates onto the
+	// new task — this is what links sequential message/send calls into one
+	// conversation. NewSubmittedTask generates a fresh ContextID only if
+	// msg.ContextID is empty.
+	task := a2a.NewSubmittedTask(msg, msg)
 
 	// Build the full system prompt with available agents
 	agents := e.listAgents()
@@ -50,8 +66,24 @@ func (e *Executor) Execute(ctx context.Context, msg *a2a.Message) (*a2a.Task, er
 	// Extract user text
 	userText := messageText(msg)
 
-	// Compose initial prompt
-	fullPrompt := systemPrompt + "\n\n" + userText + "\n"
+	// Replay prior conversation in this context, if any.
+	historyText := ""
+	if e.lookupHistory != nil {
+		prior := e.lookupHistory(task.ContextID)
+		historyText = formatPriorHistory(prior)
+	}
+
+	// Compose initial prompt: system + prior conversation + new user turn.
+	var sb strings.Builder
+	sb.WriteString(systemPrompt)
+	if historyText != "" {
+		sb.WriteString("\n\n")
+		sb.WriteString(historyText)
+	}
+	sb.WriteString("\n\n")
+	sb.WriteString(userText)
+	sb.WriteString("\n")
+	fullPrompt := sb.String()
 
 	// Run the agent interaction loop
 	resultText, history, err := e.interact(ctx, task, fullPrompt, 0, userText)
@@ -67,20 +99,44 @@ func (e *Executor) Execute(ctx context.Context, msg *a2a.Message) (*a2a.Task, er
 	return task, nil
 }
 
+// formatPriorHistory renders prior tasks in the same context as a
+// conversation transcript that can be prepended to a new prompt. The format
+// is intentionally simple text — provider-agnostic, no JSON or special
+// tokens — so any LLM CLI configured via RuntimeConfig can consume it.
+func formatPriorHistory(prior []*a2a.Task) string {
+	if len(prior) == 0 {
+		return ""
+	}
+	var sb strings.Builder
+	sb.WriteString("Conversation so far (prior turns in this context):\n")
+	for _, t := range prior {
+		for _, m := range t.History {
+			role := "user"
+			if m.Role == a2a.MessageRoleAgent {
+				role = "assistant"
+			}
+			text := ""
+			for _, p := range m.Parts {
+				if tp, ok := p.(a2a.TextPart); ok {
+					text = tp.Text
+					break
+				}
+			}
+			if text == "" {
+				continue
+			}
+			sb.WriteString(fmt.Sprintf("- %s: %s\n", role, strings.TrimSpace(text)))
+		}
+	}
+	return sb.String()
+}
+
 // interact runs the recursive agent interaction loop.
 func (e *Executor) interact(ctx context.Context, task *a2a.Task, prompt string, depth int, originalTask string) (string, []*a2a.Message, error) {
-	outputCh, err := e.sendPrompt(ctx, prompt)
+	responseText, err := e.sendPrompt(ctx, prompt)
 	if err != nil {
 		return "", task.History, fmt.Errorf("send prompt: %w", err)
 	}
-
-	var output strings.Builder
-	for line := range outputCh {
-		output.WriteString(line)
-		output.WriteString("\n")
-	}
-
-	responseText := output.String()
 
 	// Record agent response in history
 	respMsg := a2a.NewMessage(a2a.MessageRoleAgent, a2a.TextPart{Text: responseText})

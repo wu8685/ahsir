@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"iter"
+	"log"
 	"net/http"
 
 	"github.com/a2aproject/a2a-go/a2a"
@@ -72,7 +73,17 @@ func (s *A2AServer) OnSendMessage(ctx context.Context, params *a2a.MessageSendPa
 	if s.executor != nil {
 		task, err := s.executor(ctx, params.Message)
 		if err != nil {
+			// Log here so failures show up in the agent process's stdout
+			// (which the scheduler tees into its own terminal). Without
+			// this, JSON-RPC errors are only visible to whoever is calling
+			// the endpoint — the scheduler operator sees nothing.
+			log.Printf("OnSendMessage: executor failed: %v", err)
 			return nil, err
+		}
+		// Persist completed task so subsequent message/send calls sharing the
+		// same contextId can replay history.
+		if task != nil {
+			s.tasks.Save(task)
 		}
 		return task, nil
 	}

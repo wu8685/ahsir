@@ -20,19 +20,25 @@ AHSIR is a multi-agent scheduler that enables multiple Claude Code instances (ag
 ```
 +------------------------------------------------------------+
 |                   User's Local Claude Code                  |
-|                  (MCP Client --> Scheduler MCP)             |
 +----------------------------------+-------------------------+
-                                   | MCP (agent_list / agent_chat)
+                                   | spawns + JSON-RPC over stdio
                                    v
 +------------------------------------------------------------+
-|                     Scheduler (ahsir)                       |
+|              ahsir mcp  (thin stdio MCP shim)               |
+|              tools: agent_list / agent_chat /               |
+|                     agent_task_status                       |
++----------------------------------+-------------------------+
+                                   | HTTP (gateway endpoints)
+                                   v
++------------------------------------------------------------+
+|              Scheduler (ahsir start)                        |
 |  +--------------+  +----------------+  +-----------------+  |
-|  |  Lifecycle   |  |   Registry     |  |   MCP Server    |  |
-|  |  Manager     |  |  (AgentCards)  |  |  (stdio)        |  |
-|  +------+-------+  +-------+--------+  +-----------------+  |
-+---------+------------------+--------------------------------+
-          | start/stop       | register AgentCard + lookup
-          v                  v
+|  |  Lifecycle   |  |   Registry     |  |    Gateway      |  |
+|  |  Manager     |  |  (AgentCards)  |  |  (chat / tasks) |  |
+|  +------+-------+  +-------+--------+  +--------+--------+  |
++---------+------------------+--------------------+----------+
+          | start/stop       | register + lookup  | A2A forward
+          v                  v                    v
 +------------------+  +------------------+  +------------------+
 |  Agent Wrapper   |  |  Agent Wrapper   |  |  Agent Wrapper   |
 |  (backend/)      |<>|  (frontend/)     |  |  (data/)         |
@@ -42,11 +48,14 @@ AHSIR is a multi-agent scheduler that enables multiple Claude Code instances (ag
 +------------------+  +------------------+  +------------------+
 ```
 
+The user-facing path is **Claude Code → MCP shim → scheduler gateway → agent**. The MCP shim is a tiny per-invocation process that owns no state; the scheduler is the single chokepoint that holds the registry and forwards every chat/task call into A2A. Agent-to-agent calls are still peer-to-peer over A2A (they discover endpoints from the registry but bypass the gateway).
+
 ### Components
 
 | Component | Binary | Responsibility |
 |-----------|--------|----------------|
-| Scheduler | `ahsir` | Lifecycle management, Registry, MCP Server |
+| Scheduler | `ahsir start` | Lifecycle management, Registry, Gateway HTTP API |
+| MCP shim | `ahsir mcp` | stdio JSON-RPC adapter; forwards each tool call to the scheduler over HTTP |
 | Agent Wrapper | `ahsir-agent` | A2A Server + Client, Claude Code session management |
 
 ## 3. Agent Wrapper
@@ -220,26 +229,39 @@ port_range:
 3. Monitor agent health via heartbeat
 4. On `ahsir stop`: send SIGTERM to all agent processes, wait for graceful shutdown
 
-### 4.3 Registry API
+### 4.3 Registry + Gateway HTTP API
+
+The scheduler's HTTP server exposes both registry routes and gateway routes on the same listener (default `127.0.0.1:9800`). Go 1.22+ `http.ServeMux` pattern routing prefers the more specific gateway patterns, so registry handlers continue to own the bare `/agents` and `/agents/{name}` paths:
 
 ```
-POST   /agents              Register agent (AgentCard in body)
-GET    /agents               List all registered agents (AgentCard summaries)
-GET    /agents/:name         Get specific agent's full AgentCard
-DELETE /agents/:name         Unregister agent
+POST   /agents                          Register agent (AgentCard in body)
+GET    /agents                          List all registered agents
+GET    /agents/{name}                   Get specific agent's full AgentCard
+DELETE /agents/{name}                   Unregister agent
+
+POST   /agents/{name}/chat              Gateway: forward a message; body {"message":"..."} -> {"response":"..."}
+GET    /agents/{name}/tasks/{taskID}    Gateway: forward task-status query; returns A2A Task JSON
 ```
 
-### 4.4 MCP Server
+The gateway routes are the public seam used by the MCP shim (and any future CLI / web UI). They never reach the registry handler.
 
-The scheduler exposes an MCP server over stdio transport for the user's local Claude Code.
+### 4.4 MCP shim (`ahsir mcp`)
+
+The MCP shim is a separate, short-lived process spawned by the user's local Claude Code per `.mcp.json` configuration. It does **not** spawn agents, does not load `ahsir.yaml`, does not embed a scheduler — it is purely a protocol adapter:
+
+- reads JSON-RPC messages line-by-line from stdin,
+- forwards each `tools/call` to the scheduler over HTTP (registry list + gateway chat/tasks),
+- writes responses to stdout; logs go to stderr to keep the MCP wire clean.
+
+It accepts a single flag, `--scheduler <url>` (default `http://127.0.0.1:9800`), so the same shim works against any reachable scheduler.
 
 **Tools:**
 
-| Tool | Parameters | Description |
-|------|-----------|-------------|
-| `agent_list` | — | List all registered agents with name, description, skills, status |
-| `agent_chat` | `agent_name`, `message` | Send a message to a specific agent, return response |
-| `agent_task_status` | `agent_name`, `task_id` | Query a task's status on a specific agent |
+| Tool | Parameters | Routes through scheduler |
+|------|-----------|-------------------------|
+| `agent_list` | — | `GET /agents` |
+| `agent_chat` | `agent_name`, `message` | `POST /agents/{name}/chat` |
+| `agent_task_status` | `agent_name`, `task_id` | `GET /agents/{name}/tasks/{taskID}` |
 
 ### 4.5 Agent Discovery Flow (Agent A -> Agent B)
 
@@ -251,12 +273,13 @@ The scheduler exposes an MCP server over stdio transport for the user's local Cl
 ## 5. User Interaction Flow
 
 1. User starts scheduler: `ahsir start`
-2. User opens Claude Code in any project
+2. User opens Claude Code in any project; Claude Code spawns `ahsir mcp --scheduler http://127.0.0.1:9800` per `.mcp.json`
 3. User says: "Ask the backend agent to design a user API"
 4. Claude Code (via MCP) calls `agent_chat("backend", "design a user API")`
-5. Scheduler routes to Backend Agent Wrapper via A2A `message/send`
-6. Backend Agent's Claude Code processes the request
-7. Response flows back through A2A -> MCP -> user's Claude Code session
+5. The MCP shim forwards the call as `POST /agents/backend/chat` to the scheduler
+6. Scheduler gateway looks up the agent in its registry and routes to the Backend Agent Wrapper via A2A `message/send`
+7. Backend Agent's Claude Code processes the request
+8. Response flows back: A2A → scheduler → MCP shim → user's Claude Code session
 
 ## 6. V2 Multi-Machine Extension Points
 
@@ -279,7 +302,7 @@ Design decisions that enable multi-machine deployment:
 | A2A Client call | Target agent unreachable | Retry 3 times; on failure, inject error into Claude Code context |
 | Agent chain calls | Exceed maxAgentCalls | Terminate chain; return partial results |
 | Registry heartbeat | Timeout | Mark agent offline; notify subscribers |
-| MCP | Scheduler not running | Local Claude Code prompts user to start ahsir |
+| MCP shim | Scheduler not running | HTTP call fails; shim returns the connection error to Claude Code |
 
 ## 8. Security
 
@@ -291,34 +314,32 @@ Design decisions that enable multi-machine deployment:
 ```
 ahsir/
 ├── cmd/
-│   ├── ahsir/                # Scheduler binary
+│   ├── ahsir/                # Scheduler + MCP shim binary (subcommands: start, mcp, stop)
 │   │   └── main.go
 │   └── ahsir-agent/          # Agent Wrapper binary
 │       └── main.go
 ├── internal/
 │   ├── scheduler/            # Scheduler logic
 │   │   ├── config.go
-│   │   ├── scheduler.go
-│   │   └── process.go
-│   ├── registry/             # Agent registry
+│   │   ├── scheduler.go      #   Lifecycle + HTTP server (registry + gateway routes)
+│   │   └── gateway.go        #   POST /agents/{name}/chat, GET /agents/{name}/tasks/{taskID}
+│   ├── registry/             # Agent registry (HTTP CRUD on AgentCards)
 │   │   └── registry.go
-│   ├── mcp/                  # MCP Server (stdio transport)
-│   │   └── server.go
+│   ├── mcp/                  # MCP server (stdio JSON-RPC) + scheduler HTTP client
+│   │   ├── server.go
+│   │   └── scheduler_client.go  # SchedulerHTTPClient implementing AgentRouter
 │   ├── wrapper/              # Agent Wrapper
 │   │   ├── server.go         #   A2A JSON-RPC Server
 │   │   ├── client.go         #   A2A Client (call other agents)
+│   │   ├── runtime.go        #   Provider env resolution + session config
 │   │   ├── session.go        #   Claude Code subprocess management
 │   │   ├── prompt.go         #   Prompt construction & --A2A_CALL-- parsing
 │   │   └── card.go           #   AgentCard reading & building
-│   ├── a2a/                  # A2A protocol types
-│   │   ├── types.go          #   Task, Message, Part, AgentCard, etc.
-│   │   ├── jsonrpc.go        #   JSON-RPC 2.0 codec
-│   │   └── errors.go         #   A2A standard error codes
-│   └── transport/            # HTTP transport
-│       └── http.go           #   HTTP Server + Client
+│   └── ...
 ├── go.mod
 ├── go.sum
-└── ahsir.yaml                # Default config
+├── .mcp.json                 # Local Claude Code → spawns `ahsir mcp --scheduler http://127.0.0.1:9800`
+└── ahsir.yaml                # Default scheduler config
 ```
 
 ## 10. Open Questions / Future Work

@@ -85,6 +85,41 @@ func TestA2AServerHandleUnknownMethod(t *testing.T) {
 	}
 }
 
+// TestA2AServerSavesTaskFromExecutor verifies that tasks returned by the
+// executor are persisted to the TaskStore — this is what enables history
+// lookups for subsequent message/send calls in the same context.
+func TestA2AServerSavesTaskFromExecutor(t *testing.T) {
+	taskStore := NewTaskStore()
+	execFn := func(ctx context.Context, msg *a2a.Message) (*a2a.Task, error) {
+		task := a2a.NewSubmittedTask(msg, msg)
+		task.Status = a2a.TaskStatus{State: a2a.TaskStateCompleted}
+		return task, nil
+	}
+	server := NewA2AServer(taskStore, execFn)
+
+	msg := a2a.NewMessage(a2a.MessageRoleUser, a2a.TextPart{Text: "first turn"})
+	msg.ContextID = "ctx-keep"
+
+	reqBody := map[string]interface{}{
+		"jsonrpc": "2.0",
+		"method":  "message/send",
+		"params":  &a2a.MessageSendParams{Message: msg},
+		"id":      "save-test",
+	}
+	body, _ := json.Marshal(reqBody)
+	httpReq := httptest.NewRequest(http.MethodPost, "/", bytes.NewReader(body))
+	httpReq.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	server.ServeHTTP(w, httpReq)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	if got := taskStore.ListByContextID("ctx-keep"); len(got) != 1 {
+		t.Fatalf("expected 1 task saved for ctx-keep, got %d", len(got))
+	}
+}
+
 func TestA2AServerWithExecutor(t *testing.T) {
 	taskStore := NewTaskStore()
 

@@ -20,9 +20,24 @@ claude:
     - Provide detailed explanations
     - Help the Student agent when they ask for assistance
 
+    File access:
+    - When asked to summarize or analyze a directory or file, use the built-in
+      Read / LS / Glob / Grep tools to inspect content directly. Do NOT make
+      anything up; read the actual files.
+    - Allowed roots include the current workspace, /tmp, and
+      /Users/wuke/workspace/brain-spark.
+
     When another agent (like the Student) asks you for help, provide a thorough
     and accurate response.
   maxAgentCalls: 0
+runtime:
+  command: claude
+  args: ["-p", "--output-format", "text"]
+  timeout: 300s
+  provider: zhipu
+  baseURL: https://open.bigmodel.cn/api/anthropic
+  apiKey: "${MODEL_API_KEY}"
+  model: glm-5.1
 filesystem:
   enabled: true
   allowed_paths:

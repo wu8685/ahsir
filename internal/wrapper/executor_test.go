@@ -4,44 +4,28 @@ import (
 	"context"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/a2aproject/a2a-go/a2a"
 )
 
-// mockMessageSender returns a channel that yields predefined lines.
-// lineSets is a queue of line sets; each Send call consumes the next set.
+// mockMessageSender returns a fixed string per call (one entry from lineSets
+// per Send), joined with newlines. lineSets is a queue; each Send call
+// consumes the next set.
 type mockMessageSender struct {
 	lineSets [][]string
 	callIdx  int
-	delay    time.Duration
 }
 
-func (m *mockMessageSender) Send(ctx context.Context, prompt string) (<-chan string, error) {
+func (m *mockMessageSender) Send(ctx context.Context, prompt string) (string, error) {
 	var lines []string
 	if m.callIdx < len(m.lineSets) {
 		lines = m.lineSets[m.callIdx]
 		m.callIdx++
 	}
-	ch := make(chan string, len(lines))
-	go func() {
-		defer close(ch)
-		for _, line := range lines {
-			if m.delay > 0 {
-				select {
-				case <-ctx.Done():
-					return
-				case <-time.After(m.delay):
-				}
-			}
-			select {
-			case ch <- line:
-			case <-ctx.Done():
-				return
-			}
-		}
-	}()
-	return ch, nil
+	if len(lines) == 0 {
+		return "", nil
+	}
+	return strings.Join(lines, "\n") + "\n", nil
 }
 
 func TestExecutorSimpleMessage(t *testing.T) {
@@ -212,6 +196,95 @@ func TestExecutorNoA2ACallMarker(t *testing.T) {
 	// Verify history contains both user message and response
 	if len(task.History) < 2 {
 		t.Fatalf("expected at least 2 history entries, got %d", len(task.History))
+	}
+}
+
+// TestExecutorPropagatesContextID verifies that the contextID on the incoming
+// message is carried onto the resulting task — the linchpin for cross-request
+// memory.
+func TestExecutorPropagatesContextID(t *testing.T) {
+	sender := &mockMessageSender{lineSets: [][]string{{"ok"}}}
+	executor := NewExecutor(ExecutorConfig{
+		SendPrompt: sender.Send,
+		ListAgents: func() []*a2a.AgentCard { return nil },
+		MaxDepth:   3,
+		BasePrompt: "you are a helper",
+	})
+
+	msg := a2a.NewMessage(a2a.MessageRoleUser, a2a.TextPart{Text: "hi"})
+	msg.ContextID = "ctx-fixed"
+
+	task, err := executor.Execute(context.Background(), msg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if task.ContextID != "ctx-fixed" {
+		t.Errorf("expected task.ContextID=ctx-fixed, got %q", task.ContextID)
+	}
+}
+
+// TestExecutorInjectsPriorHistory verifies that LookupHistory results are
+// rendered into the prompt sent to the LLM, giving the agent short-term
+// memory across separate message/send calls.
+func TestExecutorInjectsPriorHistory(t *testing.T) {
+	var capturedPrompt string
+	sender := func(ctx context.Context, prompt string) (string, error) {
+		capturedPrompt = prompt
+		return "follow-up answer\n", nil
+	}
+
+	prior := []*a2a.Task{{
+		ID:        "earlier",
+		ContextID: "ctx-1",
+		History: []*a2a.Message{
+			a2a.NewMessage(a2a.MessageRoleUser, a2a.TextPart{Text: "what is a goroutine?"}),
+			a2a.NewMessage(a2a.MessageRoleAgent, a2a.TextPart{Text: "a lightweight thread."}),
+		},
+	}}
+
+	executor := NewExecutor(ExecutorConfig{
+		SendPrompt:    sender,
+		ListAgents:    func() []*a2a.AgentCard { return nil },
+		LookupHistory: func(ctxID string) []*a2a.Task { return prior },
+		MaxDepth:      3,
+		BasePrompt:    "you are a helper",
+	})
+
+	msg := a2a.NewMessage(a2a.MessageRoleUser, a2a.TextPart{Text: "and a channel?"})
+	msg.ContextID = "ctx-1"
+
+	if _, err := executor.Execute(context.Background(), msg); err != nil {
+		t.Fatal(err)
+	}
+
+	if !strings.Contains(capturedPrompt, "Conversation so far") {
+		t.Errorf("prompt missing history header:\n%s", capturedPrompt)
+	}
+	if !strings.Contains(capturedPrompt, "what is a goroutine") {
+		t.Errorf("prompt missing prior user turn:\n%s", capturedPrompt)
+	}
+	if !strings.Contains(capturedPrompt, "lightweight thread") {
+		t.Errorf("prompt missing prior agent turn:\n%s", capturedPrompt)
+	}
+	if !strings.Contains(capturedPrompt, "and a channel?") {
+		t.Errorf("prompt missing current user turn:\n%s", capturedPrompt)
+	}
+}
+
+// TestExecutorNoHistoryWhenLookupNil verifies that omitting LookupHistory does
+// not break Execute (backwards-compatible default).
+func TestExecutorNoHistoryWhenLookupNil(t *testing.T) {
+	sender := &mockMessageSender{lineSets: [][]string{{"ok"}}}
+	executor := NewExecutor(ExecutorConfig{
+		SendPrompt: sender.Send,
+		ListAgents: func() []*a2a.AgentCard { return nil },
+		MaxDepth:   3,
+		BasePrompt: "you are a helper",
+	})
+
+	msg := a2a.NewMessage(a2a.MessageRoleUser, a2a.TextPart{Text: "hi"})
+	if _, err := executor.Execute(context.Background(), msg); err != nil {
+		t.Fatal(err)
 	}
 }
 

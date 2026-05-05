@@ -1,0 +1,13 @@
+# Build artifacts
+/bin/
+/ahsir
+/ahsir-agent
+
+# Vendored deps — fetched via `go mod download` instead
+/vendor/
+
+# OS / editor
+.DS_Store
+*.swp
+.idea/
+.vscode/

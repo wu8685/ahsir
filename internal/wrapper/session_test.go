@@ -1,7 +1,6 @@
 package wrapper
 
 import (
-	"bytes"
 	"context"
 	"strings"
 	"testing"
@@ -32,9 +31,12 @@ func TestSessionManagerStartStop(t *testing.T) {
 }
 
 func TestSessionManagerSendMessage(t *testing.T) {
-	// Use echo to test: echo outputs its arguments
+	// `cat` echoes stdin to stdout — perfect for verifying that Send wires
+	// the prompt into the child's stdin (the structural defense against
+	// flag-eats-prompt bugs). Don't switch this back to `echo`: echo doesn't
+	// read stdin, so the test would silently pass with empty output.
 	sm := NewSessionManager(SessionConfig{
-		Command: "echo",
+		Command: "cat",
 		Timeout: 2 * time.Second,
 	})
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -45,20 +47,42 @@ func TestSessionManagerSendMessage(t *testing.T) {
 	}
 	defer sm.Stop()
 
-	// Send message and read response — prompt is passed as last CLI arg
 	prompt := "hello claude"
-	outputCh, err := sm.Send(ctx, prompt)
+	out, err := sm.Send(ctx, prompt)
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	var buf bytes.Buffer
-	for line := range outputCh {
-		buf.WriteString(line)
+	if !strings.Contains(out, "hello claude") {
+		t.Errorf("expected output to contain 'hello claude', got: %s", out)
 	}
+}
 
-	if !strings.Contains(buf.String(), "hello claude") {
-		t.Errorf("expected output to contain 'hello claude', got: %s", buf.String())
+// TestSessionManagerSurfacesNonZeroExit verifies that a CLI exiting non-zero
+// produces an error containing the captured stderr. This is the regression
+// test for the original "empty agent reply" bug: without stderr capture and
+// exit-code checking, the wrapper used to swallow CLI errors and return ""
+// as a successful response.
+func TestSessionManagerSurfacesNonZeroExit(t *testing.T) {
+	sm := NewSessionManager(SessionConfig{
+		Command: "sh",
+		Args:    []string{"-c", "echo boom-on-stderr >&2; exit 7"},
+		Timeout: 2 * time.Second,
+	})
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	if err := sm.Start(ctx); err != nil {
+		t.Fatal(err)
+	}
+	defer sm.Stop()
+
+	_, err := sm.Send(ctx, "anything")
+	if err == nil {
+		t.Fatal("expected non-zero exit to surface as error, got nil")
+	}
+	if !strings.Contains(err.Error(), "boom-on-stderr") {
+		t.Errorf("expected error to include captured stderr, got: %v", err)
 	}
 }
 

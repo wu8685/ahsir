@@ -3,6 +3,7 @@ package wrapper
 import (
 	"context"
 	"fmt"
+	"net/http"
 
 	"github.com/a2aproject/a2a-go/a2a"
 	"github.com/a2aproject/a2a-go/a2aclient"
@@ -14,9 +15,27 @@ type AgentClient struct {
 	card   *a2a.AgentCard
 }
 
+// noFieldTimeoutHTTPClient is the http.Client we hand to the A2A SDK. We
+// deliberately leave Timeout = 0 (no field-level deadline) so the *context*
+// timeout passed to SendMessage / GetTask is the single source of truth.
+//
+// Why this matters: the SDK's NewJSONRPCTransport defaults to
+// `&http.Client{Timeout: 3*time.Minute}` if no client is supplied. That
+// field-level timeout is independent of any context deadline — whichever
+// fires first wins. So even though the scheduler hands a 10-minute context
+// to ChatWithAgent, the http.Client would silently terminate the request at
+// 3 minutes. Empty-string Timeout disables the ceiling and lets the context
+// (set by the caller, e.g. scheduler.ChatWithAgent) be authoritative.
+//
+// SDK requests use http.NewRequestWithContext, so context cancellation
+// already propagates correctly through the transport.
+var noFieldTimeoutHTTPClient = &http.Client{}
+
 // NewAgentClient creates a client for communicating with a target agent.
 func NewAgentClient(ctx context.Context, card *a2a.AgentCard) (*AgentClient, error) {
-	client, err := a2aclient.NewFromCard(ctx, card)
+	client, err := a2aclient.NewFromCard(ctx, card,
+		a2aclient.WithJSONRPCTransport(noFieldTimeoutHTTPClient),
+	)
 	if err != nil {
 		return nil, fmt.Errorf("create client for %s: %w", card.Name, err)
 	}

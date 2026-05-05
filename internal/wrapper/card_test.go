@@ -87,6 +87,67 @@ func TestLoadAgentCardFileNotFound(t *testing.T) {
 	}
 }
 
+func TestLoadAgentCardRuntimeDefaults(t *testing.T) {
+	dir := t.TempDir()
+	yamlContent := `
+name: A
+version: "1.0.0"
+skills: []
+`
+	a2aDir := filepath.Join(dir, ".a2a")
+	os.MkdirAll(a2aDir, 0755)
+	os.WriteFile(filepath.Join(a2aDir, "agent-card.yaml"), []byte(yamlContent), 0644)
+
+	cfg, err := NewAgentCardBuilder(dir).Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Runtime.Command != "claude" {
+		t.Errorf("expected default command 'claude', got %q", cfg.Runtime.Command)
+	}
+	if len(cfg.Runtime.Args) == 0 || cfg.Runtime.Args[0] != "-p" {
+		t.Errorf("expected default args to start with -p, got %v", cfg.Runtime.Args)
+	}
+	if cfg.Runtime.Timeout != "120s" {
+		t.Errorf("expected default timeout 120s, got %q", cfg.Runtime.Timeout)
+	}
+}
+
+func TestLoadAgentCardRuntimeOverride(t *testing.T) {
+	dir := t.TempDir()
+	yamlContent := `
+name: A
+version: "1.0.0"
+skills: []
+runtime:
+  command: gemini
+  args: ["-p", "--model", "gemini-2.5-flash"]
+  env:
+    GOOGLE_API_KEY: "fake-key"
+  timeout: 30s
+`
+	a2aDir := filepath.Join(dir, ".a2a")
+	os.MkdirAll(a2aDir, 0755)
+	os.WriteFile(filepath.Join(a2aDir, "agent-card.yaml"), []byte(yamlContent), 0644)
+
+	cfg, err := NewAgentCardBuilder(dir).Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Runtime.Command != "gemini" {
+		t.Errorf("expected command 'gemini', got %q", cfg.Runtime.Command)
+	}
+	if len(cfg.Runtime.Args) != 3 || cfg.Runtime.Args[2] != "gemini-2.5-flash" {
+		t.Errorf("unexpected args: %v", cfg.Runtime.Args)
+	}
+	if cfg.Runtime.Env["GOOGLE_API_KEY"] != "fake-key" {
+		t.Errorf("expected env GOOGLE_API_KEY to be set, got %v", cfg.Runtime.Env)
+	}
+	if cfg.Runtime.Timeout != "30s" {
+		t.Errorf("expected timeout 30s, got %q", cfg.Runtime.Timeout)
+	}
+}
+
 func TestLoadAgentCardInvalidYAML(t *testing.T) {
 	dir := t.TempDir()
 	a2aDir := filepath.Join(dir, ".a2a")

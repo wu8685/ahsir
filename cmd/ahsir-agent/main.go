@@ -1,13 +1,13 @@
 package main
 
 import (
-	"bufio"
 	"context"
 	"flag"
 	"fmt"
 	"log"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"syscall"
 	"time"
 
@@ -18,24 +18,7 @@ func main() {
 	workspace := flag.String("workspace", "", "Workspace directory")
 	port := flag.Int("port", 0, "Listen port")
 	registry := flag.String("registry", "", "Registry URL")
-	fsMCP := flag.Bool("fs-mcp", false, "Run as filesystem MCP stdio server")
 	flag.Parse()
-
-	// --fs-mcp mode: run as a filesystem MCP stdio server for claude -p to spawn
-	if *fsMCP {
-		if *workspace == "" {
-			fmt.Fprintf(os.Stderr, "Usage: ahsir-agent --fs-mcp --workspace=<path>\n")
-			os.Exit(1)
-		}
-		builder := wrapper.NewAgentCardBuilder(*workspace)
-		cfg, err := builder.Load()
-		if err != nil {
-			log.Fatalf("Failed to load agent card: %v", err)
-		}
-		srv := wrapper.NewFSMCPServer(cfg.Filesystem.AllowedPaths, *workspace)
-		runStdioMCPServer(srv)
-		return
-	}
 
 	if *workspace == "" {
 		fmt.Fprintf(os.Stderr, "Usage: ahsir-agent --workspace=<path> [--port=<port>] [--registry=<url>]\n")
@@ -51,12 +34,22 @@ func main() {
 
 	runtimeCard := builder.BuildRuntime(cfg, *port)
 
+	// Resolve runtime config up-front so configuration mistakes (e.g. an
+	// unset ${MODEL_API_KEY}) fail before we bind the listening port and
+	// before any peer agent can hit a half-initialised endpoint.
+	var sessionCfg wrapper.SessionConfig
+	if *registry != "" {
+		var err error
+		sessionCfg, err = buildSessionConfig(cfg.Name, cfg.Runtime, cfg.Filesystem, *workspace)
+		if err != nil {
+			log.Fatalf("Invalid runtime config for agent %q: %v", cfg.Name, err)
+		}
+	}
+
 	wrapperCfg := wrapper.AgentWrapperConfig{
-		Port:         *port,
-		RegistryURL:  *registry,
-		AgentCard:    runtimeCard,
-		FSCfg:        cfg.Filesystem,
-		WorkspaceDir: *workspace,
+		Port:        *port,
+		RegistryURL: *registry,
+		AgentCard:   runtimeCard,
 	}
 
 	w := wrapper.NewAgentWrapper(wrapperCfg)
@@ -71,15 +64,9 @@ func main() {
 
 	// Setup executor if registry URL is configured
 	if *registry != "" {
-		sessionCfg := wrapper.SessionConfig{
-			Command: "claude",
-			Args:    []string{"-p", "--output-format", "text"},
-			WorkDir: *workspace,
-			Timeout: 120 * time.Second,
-		}
 		session := wrapper.NewSessionManager(sessionCfg)
 		if err := session.Start(ctx); err != nil {
-			log.Printf("Warning: Failed to start Claude Code session: %v", err)
+			log.Printf("Warning: Failed to start LLM session: %v", err)
 		} else {
 			defer session.Stop()
 
@@ -89,7 +76,7 @@ func main() {
 			basePrompt := cfg.Claude.SystemPrompt
 
 			w.SetupExecutor(session, listAgents, callAgent, maxCalls, basePrompt)
-			log.Printf("Executor wired: Claude Code session ready")
+			log.Printf("Executor wired: %s %v (timeout=%s)", sessionCfg.Command, sessionCfg.Args, sessionCfg.Timeout)
 		}
 	}
 
@@ -102,23 +89,76 @@ func main() {
 	w.Stop(ctx)
 }
 
-// runStdioMCPServer runs an MCP stdio server using the FSMCPServer.
-// It reads JSON-RPC requests from stdin and writes responses to stdout.
-func runStdioMCPServer(srv *wrapper.FSMCPServer) {
-	scanner := bufio.NewScanner(os.Stdin)
-	scanner.Buffer(make([]byte, 1024*1024), 1024*1024)
-
-	for scanner.Scan() {
-		data := scanner.Bytes()
-		if len(data) == 0 {
-			continue
-		}
-		resp, err := srv.HandleMessage(data)
+// buildSessionConfig translates a card RuntimeConfig + FilesystemConfig into a
+// SessionConfig.
+//
+// Filesystem access is granted to the underlying CLI (e.g. `claude -p`) by
+// emitting `--add-dir=<abs-path>` per entry in fs.AllowedPaths and a
+// read-only `--allowedTools=...` whitelist. This relies on Claude Code's
+// built-in Read/LS/Glob/Grep tools — no custom MCP server is involved.
+//
+// Convention: when adding any new flag to args here, ALWAYS use the
+// `--flag=value` form, never `--flag value`. Several Claude Code flags
+// (--add-dir, --allowedTools, ...) are variadic and the space-separated
+// form will greedily eat the next token. The prompt itself is fed via
+// stdin (see SessionManager.Send), so a runaway variadic flag can no
+// longer swallow it — but it can still eat *other* flag values and
+// produce confusing behaviour. Stick to `=` form to stay safe across
+// future Claude Code versions.
+//
+// Provider-derived env (ANTHROPIC_BASE_URL etc.) and explicit Env entries are
+// merged on top of the parent process env so the LLM CLI inherits PATH/HOME
+// /login credentials unless explicitly overridden.
+func buildSessionConfig(name string, rt wrapper.RuntimeConfig, fs wrapper.FilesystemConfig, workspace string) (wrapper.SessionConfig, error) {
+	timeout := 120 * time.Second
+	if rt.Timeout != "" {
+		d, err := time.ParseDuration(rt.Timeout)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "MCP error: %v\n", err)
-			continue
+			return wrapper.SessionConfig{}, fmt.Errorf("runtime.timeout %q: %w", rt.Timeout, err)
 		}
-		os.Stdout.Write(resp)
-		os.Stdout.Write([]byte("\n"))
+		timeout = d
 	}
+
+	extra, err := wrapper.ResolveProviderEnv(rt)
+	if err != nil {
+		return wrapper.SessionConfig{}, err
+	}
+
+	var env []string
+	if len(extra) > 0 {
+		env = append(env, os.Environ()...)
+		for k, v := range extra {
+			env = append(env, k+"="+v)
+		}
+	}
+
+	args := append([]string(nil), rt.Args...)
+	if fs.Enabled {
+		for _, p := range fs.AllowedPaths {
+			abs := p
+			if !filepath.IsAbs(abs) {
+				abs = filepath.Join(workspace, p)
+			}
+			// Use --add-dir=<path> form (one path per flag). claude's --add-dir
+			// is variadic — the space-separated form would greedily consume the
+			// trailing prompt positional as another directory and the CLI would
+			// then bail out with "Input must be provided ... when using --print".
+			args = append(args, "--add-dir="+abs)
+		}
+		// Read-only whitelist: model can inspect files but not modify them or
+		// run arbitrary shell. Drop this list (or swap to bypassPermissions)
+		// if write tools are needed.
+		// --allowedTools is variadic too — same trap as --add-dir; use the
+		// = form so it cannot consume the trailing prompt positional.
+		args = append(args, "--allowedTools=Read,LS,Glob,Grep")
+	}
+
+	return wrapper.SessionConfig{
+		Name:    name,
+		Command: rt.Command,
+		Args:    args,
+		Env:     env,
+		WorkDir: workspace,
+		Timeout: timeout,
+	}, nil
 }

@@ -107,20 +107,16 @@ func TestStudentDelegatesToTeacher(t *testing.T) {
 	// ---- Setup Student agent with executor ----
 	studentTasks := wrapper.NewTaskStore()
 	studentExec := wrapper.NewExecutor(wrapper.ExecutorConfig{
-		SendPrompt: func(ctx context.Context, prompt string) (<-chan string, error) {
-			ch := make(chan string, 10)
-			go func() {
-				defer close(ch)
-				if strings.Contains(prompt, "[Agent teacher returned:") {
-					ch <- "Based on the teacher's analysis, the article covers Go concurrency patterns."
-				} else {
-					ch <- "Let me ask the teacher about this."
-					ch <- "---A2A_CALL---"
-					ch <- `{"agent": "teacher", "task": "Please summarize the article about Go concurrency"}`
-					ch <- "---END---"
-				}
-			}()
-			return ch, nil
+		SendPrompt: func(ctx context.Context, prompt string) (string, error) {
+			if strings.Contains(prompt, "[Agent teacher returned:") {
+				return "Based on the teacher's analysis, the article covers Go concurrency patterns.\n", nil
+			}
+			return strings.Join([]string{
+				"Let me ask the teacher about this.",
+				"---A2A_CALL---",
+				`{"agent": "teacher", "task": "Please summarize the article about Go concurrency"}`,
+				"---END---",
+			}, "\n") + "\n", nil
 		},
 		ListAgents: func() []*a2a.AgentCard {
 			return []*a2a.AgentCard{{

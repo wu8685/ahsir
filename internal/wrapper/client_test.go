@@ -45,3 +45,15 @@ func TestTaskToStringNoMessages(t *testing.T) {
 		t.Errorf("expected 'completed', got '%s'", result)
 	}
 }
+
+// TestNoFieldTimeoutHTTPClient is the regression test for a bug where the
+// A2A SDK's default 3-minute http.Client.Timeout field would silently kill
+// long-running LLM round-trips even when the caller's context allowed more
+// time. We pin the shared http.Client to Timeout=0 so the context is the
+// only deadline source. If anyone "fixes" the var by adding a timeout
+// back, this test must fail loudly.
+func TestNoFieldTimeoutHTTPClient(t *testing.T) {
+	if noFieldTimeoutHTTPClient.Timeout != 0 {
+		t.Errorf("noFieldTimeoutHTTPClient must keep Timeout=0 so context drives deadlines; got %v", noFieldTimeoutHTTPClient.Timeout)
+	}
+}
