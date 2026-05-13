@@ -10,14 +10,15 @@ import (
 
 // ExecutorConfig configures the agent execution loop.
 type ExecutorConfig struct {
-	// SendPrompt invokes the underlying LLM CLI with the given prompt and
-	// returns the full stdout. An error here is fatal for the current task —
-	// the executor will mark the task failed and stop, so SendPrompt must
-	// surface non-zero exits / stderr (see SessionManager.Send) rather than
-	// returning ("", nil), which would silently produce an empty agent reply.
-	SendPrompt func(ctx context.Context, prompt string) (string, error)
-	ListAgents func() []*a2a.AgentCard
-	CallAgent  func(ctx context.Context, agentName string, task string) (string, error)
+	// OpenSession returns the Session to use for the current request. The
+	// contextID is the A2A contextID, which Step 2 uses to look up a long-
+	// running ClaudeSession from a pool; Step 1's OneshotSession backend
+	// ignores it. Implementations must surface non-zero exits / stderr via
+	// Session.Turn's returned error rather than returning ("", nil), which
+	// would silently produce an empty agent reply.
+	OpenSession func(ctx context.Context, contextID string) (Session, error)
+	ListAgents  func() []*a2a.AgentCard
+	CallAgent   func(ctx context.Context, agentName string, task string) (string, error)
 	// LookupHistory returns prior tasks belonging to a contextID, in
 	// chronological order. Used to give the underlying LLM short-term memory
 	// across separate message/send calls. May be nil — in that case each
@@ -30,7 +31,7 @@ type ExecutorConfig struct {
 // Executor runs the core agent loop: receive message → prompt the LLM →
 // parse A2A_CALL markers → execute sub-agent calls → inject results → return task.
 type Executor struct {
-	sendPrompt    func(ctx context.Context, prompt string) (string, error)
+	openSession   func(ctx context.Context, contextID string) (Session, error)
 	listAgents    func() []*a2a.AgentCard
 	callAgent     func(ctx context.Context, agentName string, task string) (string, error)
 	lookupHistory func(contextID string) []*a2a.Task
@@ -42,7 +43,7 @@ type Executor struct {
 // If MaxDepth is not set (0), it defaults to 5.
 func NewExecutor(cfg ExecutorConfig) *Executor {
 	return &Executor{
-		sendPrompt:    cfg.SendPrompt,
+		openSession:   cfg.OpenSession,
 		listAgents:    cfg.ListAgents,
 		callAgent:     cfg.CallAgent,
 		lookupHistory: cfg.LookupHistory,
@@ -58,6 +59,16 @@ func (e *Executor) Execute(ctx context.Context, msg *a2a.Message) (*a2a.Task, er
 	// conversation. NewSubmittedTask generates a fresh ContextID only if
 	// msg.ContextID is empty.
 	task := a2a.NewSubmittedTask(msg, msg)
+
+	// Open a Session for this request. Step 1's OneshotSession is per-request
+	// (defer Close); Step 2 will pool sessions by contextID and the defer
+	// becomes a no-op return-to-pool.
+	session, err := e.openSession(ctx, task.ContextID)
+	if err != nil {
+		task.Status = a2a.TaskStatus{State: a2a.TaskStateFailed}
+		return task, err
+	}
+	defer session.Close()
 
 	// Build the full system prompt with available agents
 	agents := e.listAgents()
@@ -86,7 +97,7 @@ func (e *Executor) Execute(ctx context.Context, msg *a2a.Message) (*a2a.Task, er
 	fullPrompt := sb.String()
 
 	// Run the agent interaction loop
-	resultText, history, err := e.interact(ctx, task, fullPrompt, 0, userText)
+	resultText, history, err := e.interact(ctx, session, task, fullPrompt, 0, userText)
 	if err != nil {
 		task.Status = a2a.TaskStatus{State: a2a.TaskStateFailed}
 		return task, err
@@ -131,11 +142,15 @@ func formatPriorHistory(prior []*a2a.Task) string {
 	return sb.String()
 }
 
-// interact runs the recursive agent interaction loop.
-func (e *Executor) interact(ctx context.Context, task *a2a.Task, prompt string, depth int, originalTask string) (string, []*a2a.Message, error) {
-	responseText, err := e.sendPrompt(ctx, prompt)
+// interact runs the recursive agent interaction loop. The session is threaded
+// through recursion so all turns in one Execute share the same Session
+// instance — Step 1 this just means the same OneshotSession (fresh process
+// per Turn anyway); Step 2 will let ClaudeSession's long-running process
+// span all turns and sub-agent injection rounds.
+func (e *Executor) interact(ctx context.Context, session Session, task *a2a.Task, prompt string, depth int, originalTask string) (string, []*a2a.Message, error) {
+	responseText, err := session.Turn(ctx, prompt)
 	if err != nil {
-		return "", task.History, fmt.Errorf("send prompt: %w", err)
+		return "", task.History, fmt.Errorf("session turn: %w", err)
 	}
 
 	// Record agent response in history
@@ -156,24 +171,24 @@ func (e *Executor) interact(ctx context.Context, task *a2a.Task, prompt string, 
 	if err := ValidateA2ACall(call); err != nil {
 		// Invalid call, but continue processing
 		errorMsg := fmt.Sprintf("\n[A2A_CALL error: %v]\n", err)
-		return e.interact(ctx, task, errorMsg, depth, originalTask)
+		return e.interact(ctx, session, task, errorMsg, depth, originalTask)
 	}
 
 	if e.callAgent == nil {
 		errorMsg := fmt.Sprintf("\n[Cannot call agent %s: no agent caller configured]\n", call.Agent)
-		return e.interact(ctx, task, errorMsg, depth, originalTask)
+		return e.interact(ctx, session, task, errorMsg, depth, originalTask)
 	}
 
 	// Execute the sub-agent call
 	agentResult, err := e.callAgent(ctx, call.Agent, call.Task)
 	if err != nil {
 		errorMsg := fmt.Sprintf("\n[Agent %s call failed: %v]\n", call.Agent, err)
-		return e.interact(ctx, task, errorMsg, depth, originalTask)
+		return e.interact(ctx, session, task, errorMsg, depth, originalTask)
 	}
 
 	// Inject the result and continue
 	injection := BuildInjectionPrompt(call.Agent, originalTask, agentResult)
-	return e.interact(ctx, task, injection, depth+1, originalTask)
+	return e.interact(ctx, session, task, injection, depth+1, originalTask)
 }
 
 // messageText extracts text content from a message's parts.

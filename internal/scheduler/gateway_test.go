@@ -30,16 +30,19 @@ import (
 func realAgent(t *testing.T, name, reply string, replyDelay time.Duration) string {
 	t.Helper()
 	taskStore := wrapper.NewTaskStore()
-	exec := wrapper.NewExecutor(wrapper.ExecutorConfig{
-		SendPrompt: func(ctx context.Context, prompt string) (string, error) {
-			if replyDelay > 0 {
-				select {
-				case <-ctx.Done():
-					return "", ctx.Err()
-				case <-time.After(replyDelay):
-				}
+	sender := func(ctx context.Context, prompt string) (string, error) {
+		if replyDelay > 0 {
+			select {
+			case <-ctx.Done():
+				return "", ctx.Err()
+			case <-time.After(replyDelay):
 			}
-			return reply + "\n", nil
+		}
+		return reply + "\n", nil
+	}
+	exec := wrapper.NewExecutor(wrapper.ExecutorConfig{
+		OpenSession: func(ctx context.Context, contextID string) (wrapper.Session, error) {
+			return wrapper.NewOneshotSession(sender), nil
 		},
 		ListAgents: func() []*a2a.AgentCard { return nil },
 		MaxDepth:   0,

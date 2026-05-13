@@ -75,7 +75,15 @@ func main() {
 			maxCalls := cfg.Claude.MaxAgentCalls
 			basePrompt := cfg.Claude.SystemPrompt
 
-			w.SetupExecutor(session, listAgents, callAgent, maxCalls, basePrompt)
+			// Step 1: every A2A request gets a fresh OneshotSession wrapping
+			// the shared SessionManager — preserves the existing per-request
+			// fork model. Step 2 replaces this closure with a SessionPool
+			// keyed by contextID, backed by long-running ClaudeSessions.
+			openSession := func(ctx context.Context, contextID string) (wrapper.Session, error) {
+				return wrapper.NewOneshotSession(session.Send), nil
+			}
+
+			w.SetupExecutor(openSession, listAgents, callAgent, maxCalls, basePrompt)
 			log.Printf("Executor wired: %s %v (timeout=%s)", sessionCfg.Command, sessionCfg.Args, sessionCfg.Timeout)
 		}
 	}

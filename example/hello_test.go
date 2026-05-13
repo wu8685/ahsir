@@ -106,17 +106,20 @@ func TestStudentDelegatesToTeacher(t *testing.T) {
 
 	// ---- Setup Student agent with executor ----
 	studentTasks := wrapper.NewTaskStore()
+	studentSender := func(ctx context.Context, prompt string) (string, error) {
+		if strings.Contains(prompt, "[Agent teacher returned:") {
+			return "Based on the teacher's analysis, the article covers Go concurrency patterns.\n", nil
+		}
+		return strings.Join([]string{
+			"Let me ask the teacher about this.",
+			"---A2A_CALL---",
+			`{"agent": "teacher", "task": "Please summarize the article about Go concurrency"}`,
+			"---END---",
+		}, "\n") + "\n", nil
+	}
 	studentExec := wrapper.NewExecutor(wrapper.ExecutorConfig{
-		SendPrompt: func(ctx context.Context, prompt string) (string, error) {
-			if strings.Contains(prompt, "[Agent teacher returned:") {
-				return "Based on the teacher's analysis, the article covers Go concurrency patterns.\n", nil
-			}
-			return strings.Join([]string{
-				"Let me ask the teacher about this.",
-				"---A2A_CALL---",
-				`{"agent": "teacher", "task": "Please summarize the article about Go concurrency"}`,
-				"---END---",
-			}, "\n") + "\n", nil
+		OpenSession: func(ctx context.Context, contextID string) (wrapper.Session, error) {
+			return wrapper.NewOneshotSession(studentSender), nil
 		},
 		ListAgents: func() []*a2a.AgentCard {
 			return []*a2a.AgentCard{{

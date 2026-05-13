@@ -81,21 +81,22 @@ func TestAgentWrapperContextMemoryAcrossRequests(t *testing.T) {
 	// Capture every prompt sent to the (mock) LLM.
 	var mu sync.Mutex
 	var prompts []string
-	mockSession := &SessionManager{cfg: SessionConfig{Command: "noop"}, running: true}
+	sender := func(ctx context.Context, prompt string) (string, error) {
+		mu.Lock()
+		prompts = append(prompts, prompt)
+		n := len(prompts)
+		mu.Unlock()
+		return "answer-" + fmt.Sprint(n) + "\n", nil
+	}
 	executor := NewExecutor(ExecutorConfig{
-		SendPrompt: func(ctx context.Context, prompt string) (string, error) {
-			mu.Lock()
-			prompts = append(prompts, prompt)
-			n := len(prompts)
-			mu.Unlock()
-			return "answer-" + fmt.Sprint(n) + "\n", nil
+		OpenSession: func(ctx context.Context, contextID string) (Session, error) {
+			return &OneshotSession{sender: sender}, nil
 		},
 		ListAgents:    func() []*a2a.AgentCard { return nil },
 		LookupHistory: w.taskStore.ListByContextID,
 		MaxDepth:      0, // no sub-agent calls
 		BasePrompt:    "you are a helper",
 	})
-	_ = mockSession
 	w.server.SetExecutor(executor.Execute)
 
 	time.Sleep(50 * time.Millisecond) // let server bind

@@ -43,13 +43,16 @@ func (w *AgentWrapper) TaskStore() *TaskStore {
 	return w.taskStore
 }
 
-// SetupExecutor wires the executor (LLM CLI session + agent calling + context
+// SetupExecutor wires the executor (Session factory + agent calling + context
 // memory) into the A2A server. The executor's history lookup is bound to the
 // wrapper's TaskStore, so completed tasks become short-term memory for
 // subsequent message/send calls sharing the same contextId.
-func (w *AgentWrapper) SetupExecutor(session *SessionManager, listAgents func() []*a2a.AgentCard, callAgent func(ctx context.Context, agentName, task string) (string, error), maxDepth int, basePrompt string) {
+//
+// openSession is the seam Step 2 will swap from per-request OneshotSession
+// to a contextID-keyed pool of long-running ClaudeSessions.
+func (w *AgentWrapper) SetupExecutor(openSession func(ctx context.Context, contextID string) (Session, error), listAgents func() []*a2a.AgentCard, callAgent func(ctx context.Context, agentName, task string) (string, error), maxDepth int, basePrompt string) {
 	executor := NewExecutor(ExecutorConfig{
-		SendPrompt:    session.Send,
+		OpenSession:   openSession,
 		ListAgents:    listAgents,
 		CallAgent:     callAgent,
 		LookupHistory: w.taskStore.ListByContextID,

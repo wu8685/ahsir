@@ -28,13 +28,22 @@ func (m *mockMessageSender) Send(ctx context.Context, prompt string) (string, er
 	return strings.Join(lines, "\n") + "\n", nil
 }
 
+// openSessionFromSender wraps a (ctx,prompt)→(string,error) sender into the
+// OpenSession factory shape expected by ExecutorConfig. Tests use this to
+// keep existing mock senders unchanged while exercising the Session interface.
+func openSessionFromSender(sender func(ctx context.Context, prompt string) (string, error)) func(ctx context.Context, contextID string) (Session, error) {
+	return func(ctx context.Context, contextID string) (Session, error) {
+		return &OneshotSession{sender: sender}, nil
+	}
+}
+
 func TestExecutorSimpleMessage(t *testing.T) {
 	sender := &mockMessageSender{
 		lineSets: [][]string{{"I'll help you with that.", "Here's the code:", "```go", "func main() {}", "```"}},
 	}
 
 	executor := NewExecutor(ExecutorConfig{
-		SendPrompt:  sender.Send,
+		OpenSession: openSessionFromSender(sender.Send),
 		ListAgents:  func() []*a2a.AgentCard { return nil },
 		CallAgent:   nil,
 		MaxDepth:    5,
@@ -89,7 +98,7 @@ func TestExecutorWithA2ACall(t *testing.T) {
 	var calledTask string
 
 	executor := NewExecutor(ExecutorConfig{
-		SendPrompt: sender.Send,
+		OpenSession: openSessionFromSender(sender.Send),
 		ListAgents: func() []*a2a.AgentCard {
 			return []*a2a.AgentCard{
 				{Name: "backend", URL: "http://127.0.0.1:9801/", Skills: []a2a.AgentSkill{{Name: "api-design"}}},
@@ -145,7 +154,7 @@ func TestExecutorMaxDepthExceeded(t *testing.T) {
 	}
 
 	executor := NewExecutor(ExecutorConfig{
-		SendPrompt: sender.Send,
+		OpenSession: openSessionFromSender(sender.Send),
 		ListAgents: func() []*a2a.AgentCard {
 			return []*a2a.AgentCard{
 				{Name: "backend", URL: "http://127.0.0.1:9801/"},
@@ -178,7 +187,7 @@ func TestExecutorNoA2ACallMarker(t *testing.T) {
 	}
 
 	executor := NewExecutor(ExecutorConfig{
-		SendPrompt:  sender.Send,
+		OpenSession: openSessionFromSender(sender.Send),
 		ListAgents:  func() []*a2a.AgentCard { return nil },
 		CallAgent:   nil,
 		MaxDepth:    5,
@@ -205,7 +214,7 @@ func TestExecutorNoA2ACallMarker(t *testing.T) {
 func TestExecutorPropagatesContextID(t *testing.T) {
 	sender := &mockMessageSender{lineSets: [][]string{{"ok"}}}
 	executor := NewExecutor(ExecutorConfig{
-		SendPrompt: sender.Send,
+		OpenSession: openSessionFromSender(sender.Send),
 		ListAgents: func() []*a2a.AgentCard { return nil },
 		MaxDepth:   3,
 		BasePrompt: "you are a helper",
@@ -243,7 +252,7 @@ func TestExecutorInjectsPriorHistory(t *testing.T) {
 	}}
 
 	executor := NewExecutor(ExecutorConfig{
-		SendPrompt:    sender,
+		OpenSession:   openSessionFromSender(sender),
 		ListAgents:    func() []*a2a.AgentCard { return nil },
 		LookupHistory: func(ctxID string) []*a2a.Task { return prior },
 		MaxDepth:      3,
@@ -276,7 +285,7 @@ func TestExecutorInjectsPriorHistory(t *testing.T) {
 func TestExecutorNoHistoryWhenLookupNil(t *testing.T) {
 	sender := &mockMessageSender{lineSets: [][]string{{"ok"}}}
 	executor := NewExecutor(ExecutorConfig{
-		SendPrompt: sender.Send,
+		OpenSession: openSessionFromSender(sender.Send),
 		ListAgents: func() []*a2a.AgentCard { return nil },
 		MaxDepth:   3,
 		BasePrompt: "you are a helper",
@@ -299,7 +308,7 @@ func TestExecutorInvalidA2ACallJSON(t *testing.T) {
 	}
 
 	executor := NewExecutor(ExecutorConfig{
-		SendPrompt: sender.Send,
+		OpenSession: openSessionFromSender(sender.Send),
 		ListAgents: func() []*a2a.AgentCard { return nil },
 		CallAgent:  nil,
 		MaxDepth:   5,
