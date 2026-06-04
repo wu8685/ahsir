@@ -1,7 +1,7 @@
 # AHSIR: Session Abstraction for Long-Running Agent Runtimes
 
-**Status:** Draft
-**Date:** 2026-05-12
+**Status:** Implemented (Step 1 + Step 2 landed in commits `e0fb3f2` / `22f7a2e`; see §8 for status of open questions)
+**Date:** 2026-05-12 (last updated 2026-06-05)
 **Version:** 0.1.0
 
 ## 1. Motivation
@@ -256,11 +256,20 @@ V2（未来工单）：序列化 `contextID → sessionID` 映射到磁盘（可
 
 ## 8. Open Questions
 
-1. **`--include-partial-messages`**：先不打开（拿整段 message）；什么时机打开？答：上层接入 A2A SSE 流式时再说，本期不做
-2. **进程异常恢复策略**：mid-turn crash 当前方案是 fail 当前 turn + EVICTED 等下次 resume。是否要在同一个 Stream 调用里**自动 retry** 一次？倾向不自动，让 caller 决策
-3. **资源上限**：pool 没有 max 容量限制。需要吗？高并发场景下可能要加 LRU；本期默认不加
-4. **EVICTED entry GC**：被 evict 后只保留 sessionID 在内存里，永不释放。需要给个二级 TTL（比如 24h）彻底删除？建议加，简单
-5. **`--resume` 在 zhipu / 第三方 gateway 下是否生效**：第三方 provider 通过 `ANTHROPIC_BASE_URL` 走，历史 checkpoint 是 claude 客户端本地的 `~/.claude/projects/`——理论上 provider-agnostic。需要实测确认
+Resolution status as of 2026-06-05:
+
+1. **`--include-partial-messages`** — **Deferred (still open)**. Confirmed the choice: integrate when wiring A2A SSE streaming. No work this iteration.
+2. **进程异常恢复策略** — **Resolved: no auto-retry**. Mid-turn crash fails the current turn + EVICTED; next request triggers transparent recreate-with-resume via `SessionPool` (see `IsHealthy()` on the Session interface, added 2026-06-05). Caller still owns the retry decision per turn.
+3. **资源上限** — **Deferred (still open)**. Pool has no max capacity. Adding LRU is the planned mitigation if process count becomes a real problem; not done yet.
+4. **EVICTED entry GC** — **Resolved ✅**. 24h secondary TTL implemented in `SessionPool.reapOnce` (`evictedTTL` field). Persistence layer (`<workspace>/.a2a/sessions.json`) also respects this — the file is rewritten on GC.
+5. **`--resume` 在第三方 gateway 下是否生效** — **Resolved ✅ for DeepSeek**. End-to-end verified on 2026-06-04: a cross-restart resume against `api.deepseek.com/anthropic` correctly recalls prior conversation state. Zhipu was the original target but the project moved to DeepSeek; if zhipu support is needed again, re-validate. The mechanism is provider-agnostic in principle (claude's local `~/.claude/projects/` holds the history), so other Anthropic-compatible providers should also work.
+
+### Beyond the original §8 (capabilities delivered after spec freeze)
+
+- **Persistence** (originally a "V2-future" item per the Step 2 plan): `FilePersistence` writes `contextID → sessionID` to `<workspace>/.a2a/sessions.json`, atomic tmp+rename. Cross-restart resume works.
+- **Self-healing on SIGKILL** (not in original spec): pool probes `Session.IsHealthy()` on the hot path. When a `claude` subprocess is externally killed, the next request transparently recreates with `--resume=<prior sessionID>`.
+- **contextID propagation through A2A_CALL**: when student delegates to teacher, the student's `task.ContextID` flows to teacher so the callee's pool reuses a session across multiple delegations within one conversation.
+- **Inter-agent logging**: `[X] receive`, `[X → Y] A2A_CALL`, `[X ← Y] reply` log markers for cross-agent traffic.
 
 ## 9. Test Plan (TDD outline)
 

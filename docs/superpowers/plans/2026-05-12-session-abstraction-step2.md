@@ -267,10 +267,17 @@ w.SetupExecutor(openSession, listAgents, callAgent, maxCalls, basePrompt)
 
 ## 9. 跨期遗留
 
-完成 Step 2 后，独立工单清单：
+Status as of 2026-06-05:
 
-- **V2-持久化**：contextID → sessionID 落盘，跨 ahsir-agent 重启可续接
-- **V2-SSE 流式**：打开 `--include-partial-messages`，把 EventText 增量推给 A2A 客户端
-- **V2-资源控制**：pool LRU 容量上限 + 超载时拒绝/排队策略
-- **V2-A2A_CALL → tool_call**：从文本标记换成 MCP tool 调用协议
-- **V2-多 provider**：基于 Session 接口加 `CodexSession` / `GeminiSession` 实现
+- **~~V2-持久化~~** ✅ **Done** (commit `22f7a2e`). `FilePersistence` writes `contextID → sessionID` to `<workspace>/.a2a/sessions.json` (atomic tmp+rename, corrupt-file recovery). End-to-end verified: scheduler restart, same `contextId`, claude `--resume`s prior conversation.
+- **V2-SSE 流式**：still open. `--include-partial-messages` + EventText delta into A2A SSE.
+- **V2-资源控制**：still open. Pool LRU + overload reject/queue.
+- **V2-A2A_CALL → tool_call**：still open. Replace text marker with MCP tool-call protocol.
+- **V2-多 provider**：still open. `CodexSession` / `GeminiSession` over the same `Session` interface.
+
+### Bonus capabilities delivered beyond original Step 2 scope (commit `22f7a2e`)
+
+- **HA self-healing**: `Session.IsHealthy()` added to the interface; `SessionPool` probes it on the hot path and transparently recreates a dead session with `--resume=<prior sessionID>`. Survives `kill -9` of the underlying `claude` process.
+- **contextID propagation through A2A_CALL**: `executor.interact` threads `task.ContextID` into `e.callAgent`, which `AgentClient.SendMessage` sets on the outgoing message. Callee's pool keys on the propagated id, reusing one session across multiple delegations within one conversation.
+- **Inter-agent log markers**: `[X] receive` / `[X → Y] A2A_CALL` / `[X ← Y] reply` lines for operator visibility into cross-agent traffic.
+- **Pool ctx fix**: `SessionPool` owns a long-lived `sessionCtx` and hands it to the factory, decoupled from per-request ctx. Without this fix, `exec.CommandContext` killed `claude` the moment the A2A response was sent.

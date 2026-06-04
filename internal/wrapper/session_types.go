@@ -3,7 +3,50 @@ package wrapper
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
+	"strings"
+	"time"
 )
+
+// SessionConfig configures a per-agent runtime invocation (typically the
+// `claude` CLI). Used by ClaudeSession and any other future Session backend
+// that needs to spawn an external process.
+type SessionConfig struct {
+	// Name is a human-readable identifier (typically the agent name) used
+	// only for log lines. Optional — empty Name just produces logs without
+	// the agent= field. Setting it makes grepping logs by agent trivial
+	// when multiple agents share the same scheduler tee.
+	Name    string
+	Command string
+	Args    []string
+	Env     []string
+	WorkDir string
+	Timeout time.Duration
+}
+
+// Validate checks the config for required fields.
+func (c SessionConfig) Validate() error {
+	if c.Command == "" {
+		return errors.New("command is required")
+	}
+	if c.Timeout < 0 {
+		return errors.New("timeout must be non-negative")
+	}
+	return nil
+}
+
+// truncateForLog produces a single-line, length-bounded version of s suitable
+// for inclusion in a log message. Newlines are replaced with literal `\n` so
+// the log stays grep-friendly; oversize content gets a `…(<N> bytes total)`
+// suffix instead of the truncated tail being silently dropped.
+func truncateForLog(s string, max int) string {
+	s = strings.ReplaceAll(s, "\n", `\n`)
+	if len(s) <= max {
+		return s
+	}
+	return s[:max] + fmt.Sprintf("…(%d bytes total)", len(s))
+}
 
 // Event is a turn-level event from an agent runtime. Implementations are
 // provider-neutral so future Session backends (claude stream-json, codex,

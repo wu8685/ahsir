@@ -22,8 +22,9 @@ type OneshotSession struct {
 }
 
 // NewOneshotSession constructs a OneshotSession over an arbitrary sender
-// function (e.g. SessionManager.Send for real fork-exec, or a mock in tests).
-// Each Turn invokes sender once.
+// function — typically a mock in tests, or any per-call exec helper a
+// future provider backend might want without the long-running-process
+// machinery of ClaudeSession. Each Turn invokes sender once.
 func NewOneshotSession(sender func(ctx context.Context, prompt string) (string, error)) *OneshotSession {
 	return &OneshotSession{sender: sender}
 }

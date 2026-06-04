@@ -35,7 +35,7 @@ fleet without speaking A2A directly.
                    │ ahsir-agent (9801)  │           │ ahsir-agent (9802)  │
                    │ A2A server  ◄────►  │  A2A      │ A2A server          │
                    │ wrapper / executor  │           │ wrapper / executor  │
-                   │   ↓ session.Send    │           │   ↓ session.Send    │
+                   │   ↓ SessionPool     │           │   ↓ SessionPool     │
                    │   claude -p (LLM)   │           │   claude -p (LLM)   │
                    └─────────────────────┘           └─────────────────────┘
 ```
@@ -48,7 +48,7 @@ fleet without speaking A2A directly.
 | `cmd/ahsir-agent/` | Per-agent process; loads agent-card, hosts A2A endpoint, drives the LLM CLI |
 | `internal/scheduler/` | Config, agent lifecycle, registry, HTTP gateway |
 | `internal/registry/` | Agent registration / heartbeat / lookup |
-| `internal/wrapper/` | A2A server, executor, session manager (claude subprocess), agent client |
+| `internal/wrapper/` | A2A server, executor, session pool (long-running `claude` subprocesses with persistence + HA), agent client |
 | `internal/mcp/` | MCP stdio server + scheduler HTTP client |
 | `example/` | Working two-agent setup (student delegates to teacher) |
 | `docs/superpowers/` | Specs, plans, and design notes |
@@ -142,22 +142,38 @@ response latency (a fast classifier vs. a deep researcher legitimately differ).
 
 ## Diagnostics: reading the logs
 
-Every LLM round-trip emits a correlated start/end pair on the agent process
-stdout (which the scheduler tees into its own terminal):
+The agent runs a long-lived `claude` subprocess per A2A `contextId`
+(`ClaudeSession` pooled by `SessionPool`). Each session-lifecycle event emits
+one line on the agent's stdout, which the scheduler tees into its own
+terminal:
 
 ```
-session.Send: claude starting (id=a3f9c1, agent=teacher, prompt=1366B, timeout=5m0s)
-session.Send: claude ok in 2m17.8s (id=a3f9c1, agent=teacher, prompt=1366B, stdout=7979B, stderr=0B)
+claude session: started pid=59108 cmd=claude args=[-p --input-format=stream-json --output-format=stream-json --verbose]
+```
+
+When the pool resumes an evicted (or unhealthy) session, the same line
+carries the `--resume=<id>` flag:
+
+```
+claude session: started pid=67914 cmd=claude args=[... --resume=4a038c6b-f0cb-4ea6-ad1c-05eb7741511c]
+```
+
+Inter-agent traffic and per-request receive markers:
+
+```
+[teacher] receive: contextID=demo msgID=... text="..."
+[student → teacher] A2A_CALL: task="..."
+[student ← teacher] reply: took=12.3s bytes=... preview="..."
 ```
 
 Useful greps:
 
 | Grep | What it tells you |
 |---|---|
-| `agent=teacher` | All LLM calls made by a specific agent |
-| `id=a3f9c1` | Match a start ↔ end pair under concurrency |
-| `stderr-on-success` | Calls that "succeeded" but the CLI wrote to stderr (hook noise, deprecation warnings) |
-| `FAILED` | Failed calls; the same line carries `signal: killed` / `exit status N` |
+| `pid=` | Every new `claude` subprocess (one per contextId, per agent, until idle eviction) |
+| `--resume=` | Pool eviction recovery, cross-restart resume, or self-healing on SIGKILL |
+| `[teacher]` / `[student]` | Per-agent request/log filtering |
+| `[X → Y] A2A_CALL` | Cross-agent delegations |
 
 If you suspect the time is being spent outside the LLM (in scheduler / MCP
 shim / serialization), compare the elapsed sum across all agent log lines
