@@ -182,17 +182,42 @@ chain, not in the model.
 
 ## Run the tests
 
+### Default suite (mocks, no API key required)
+
 ```bash
 go test ./...
 ```
 
-The suite includes:
+Includes:
 
 - Unit tests for registry, wrapper, scheduler, MCP server.
 - An end-to-end gateway test (`internal/scheduler/gateway_test.go`) that spins
   up a real A2A server with a mock executor and exercises both the direct A2A
-  path (Option A) and the scheduler-gateway path (Option B).
+  path and the scheduler-gateway path.
 
-No `MODEL_API_KEY` or live `claude` CLI is required — the suite uses mocks.
-The hands-on example flow in `example/README.md` is what exercises the real
-LLM path.
+No `MODEL_API_KEY` or live `claude` CLI required — the default suite uses mocks.
+
+### End-to-end with a real LLM (opt-in)
+
+The `e2e/` package holds top-to-bottom integration tests that spawn the real
+scheduler subprocess against real `claude` CLIs and a real DeepSeek
+(or other Anthropic-compat) endpoint. Build-tagged `e2e` so they never run
+in the default pipeline.
+
+```bash
+# Build binaries first
+go build -o bin/ahsir ./cmd/ahsir
+go build -o bin/ahsir-agent ./cmd/ahsir-agent
+
+# Run the e2e suite
+AHSIR_E2E_CLAUDE=1 MODEL_API_KEY=<your-deepseek-key> \
+  go test -tags=e2e -timeout=5m -v ./e2e/
+```
+
+Tests skip gracefully if `bin/ahsir(-agent)` isn't built, `claude` isn't on
+PATH, or `AHSIR_E2E_CLAUDE` / `MODEL_API_KEY` aren't set — so the same
+command can be wired into CI conditionally without manual gating.
+
+There's also a lower-level e2e at `internal/wrapper/session_claude_e2e_test.go`
+that exercises `ClaudeSession` directly against real claude (no scheduler /
+A2A layer). Same env-var + build-tag gates.
