@@ -66,6 +66,14 @@ type Session interface {
 	// claude --resume). Returns "" when the session has no persistent id.
 	SessionID() string
 
+	// IsHealthy reports whether this Session can still serve Stream/Turn
+	// calls. Returns false once the underlying runtime is gone — for
+	// ClaudeSession this means the claude process exited or was killed
+	// (stdout EOF). SessionPool consults this on every reuse so a
+	// `kill -9`'d claude triggers a transparent recreate-with-resume on
+	// the next request rather than serving up a zombie session.
+	IsHealthy() bool
+
 	// Close releases resources held by the session. Must be idempotent.
 	Close() error
 }

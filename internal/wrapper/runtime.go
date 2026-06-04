@@ -11,11 +11,16 @@ import (
 const (
 	ProviderAnthropic = "anthropic"
 	ProviderZhipu     = "zhipu"
+	ProviderDeepSeek  = "deepseek"
 )
 
 // zhipuDefaultBaseURL is the Anthropic-compatible endpoint published by
 // Zhipu/智谱 for use with `claude -p` and other Anthropic SDK clients.
 const zhipuDefaultBaseURL = "https://open.bigmodel.cn/api/anthropic"
+
+// deepseekDefaultBaseURL is the Anthropic-compatible endpoint published by
+// DeepSeek (parallel to zhipu — same ANTHROPIC_* env wiring).
+const deepseekDefaultBaseURL = "https://api.deepseek.com/anthropic"
 
 // ResolveProviderEnv translates the high-level provider/baseURL/apiKey/model
 // fields into the env-var shape the underlying CLI expects, then layers any
@@ -50,11 +55,15 @@ func ResolveProviderEnv(rt RuntimeConfig) (map[string]string, error) {
 	out := map[string]string{}
 
 	switch provider {
-	case ProviderAnthropic, ProviderZhipu:
-		// Zhipu uses the Anthropic-compatible endpoint, so the env var names
-		// are identical — only the default URL differs.
-		if provider == ProviderZhipu && baseURL == "" {
+	case ProviderAnthropic, ProviderZhipu, ProviderDeepSeek:
+		// Zhipu / DeepSeek both expose Anthropic-compatible endpoints, so the
+		// env var names are identical to upstream Anthropic — only the default
+		// URL differs per provider.
+		switch {
+		case provider == ProviderZhipu && baseURL == "":
 			baseURL = zhipuDefaultBaseURL
+		case provider == ProviderDeepSeek && baseURL == "":
+			baseURL = deepseekDefaultBaseURL
 		}
 		if baseURL != "" {
 			out["ANTHROPIC_BASE_URL"] = baseURL
@@ -62,7 +71,7 @@ func ResolveProviderEnv(rt RuntimeConfig) (map[string]string, error) {
 		if apiKey != "" {
 			// Anthropic-compat clients accept either ANTHROPIC_API_KEY or
 			// ANTHROPIC_AUTH_TOKEN; AUTH_TOKEN is what Zhipu's docs use and
-			// also works for upstream Anthropic.
+			// also works for upstream Anthropic and DeepSeek.
 			out["ANTHROPIC_AUTH_TOKEN"] = apiKey
 		}
 		if model != "" {
@@ -72,7 +81,7 @@ func ResolveProviderEnv(rt RuntimeConfig) (map[string]string, error) {
 		// Unknown provider — refuse silently translating high-level fields,
 		// but tolerate the case where the user only set Env explicitly.
 		if baseURL != "" || apiKey != "" || model != "" {
-			return nil, fmt.Errorf("unknown runtime.provider %q (high-level baseURL/apiKey/model fields can only be used with provider=anthropic|zhipu); use runtime.env for custom providers", rt.Provider)
+			return nil, fmt.Errorf("unknown runtime.provider %q (high-level baseURL/apiKey/model fields can only be used with provider=anthropic|zhipu|deepseek); use runtime.env for custom providers", rt.Provider)
 		}
 	}
 
@@ -86,10 +95,11 @@ func ResolveProviderEnv(rt RuntimeConfig) (map[string]string, error) {
 		out[k] = expanded
 	}
 
-	// For Anthropic-compat providers (anthropic/zhipu), if the user wrote a
-	// non-default baseURL (i.e. talking to a third-party gateway), an empty
-	// auth token will silently produce 401s downstream — fail fast instead.
-	if provider == ProviderAnthropic || provider == ProviderZhipu {
+	// For Anthropic-compat providers (anthropic/zhipu/deepseek), if the user
+	// wrote a non-default baseURL (i.e. talking to a third-party gateway), an
+	// empty auth token will silently produce 401s downstream — fail fast
+	// instead.
+	if provider == ProviderAnthropic || provider == ProviderZhipu || provider == ProviderDeepSeek {
 		if out["ANTHROPIC_BASE_URL"] != "" && out["ANTHROPIC_AUTH_TOKEN"] == "" {
 			return nil, fmt.Errorf("runtime.apiKey is required when runtime.baseURL is set (provider=%s)", provider)
 		}

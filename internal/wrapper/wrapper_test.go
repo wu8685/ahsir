@@ -55,10 +55,12 @@ func TestAgentWrapperStartStop(t *testing.T) {
 	}
 }
 
-// TestAgentWrapperContextMemoryAcrossRequests is the end-to-end test for
-// cross-request session memory: two message/send calls sharing a contextId
-// should result in the second LLM prompt containing the first turn.
-func TestAgentWrapperContextMemoryAcrossRequests(t *testing.T) {
+// TestAgentWrapperReusesSessionAcrossRequests verifies the linchpin of
+// cross-request memory in the new architecture: two message/send calls
+// sharing the same contextID must be routed to the same Session instance
+// (via SessionPool), so the underlying claude process — not the wrapper —
+// retains conversation history.
+func TestAgentWrapperReusesSessionAcrossRequests(t *testing.T) {
 	listener, _ := net.Listen("tcp", "127.0.0.1:0")
 	port := listener.Addr().(*net.TCPAddr).Port
 	listener.Close()
@@ -78,28 +80,38 @@ func TestAgentWrapperContextMemoryAcrossRequests(t *testing.T) {
 	}
 	defer w.Stop(ctx)
 
-	// Capture every prompt sent to the (mock) LLM.
+	// Build a SessionPool with a factory that records how many distinct
+	// Sessions it had to produce.
 	var mu sync.Mutex
+	var factoryCalls int
 	var prompts []string
-	sender := func(ctx context.Context, prompt string) (string, error) {
+	factory := func(ctx context.Context, contextID, resumeID string) (Session, error) {
 		mu.Lock()
-		prompts = append(prompts, prompt)
-		n := len(prompts)
+		factoryCalls++
 		mu.Unlock()
-		return "answer-" + fmt.Sprint(n) + "\n", nil
+		// Sender accumulates prompts so we can also verify history is NOT
+		// stuffed into the prompt (history belongs to claude now).
+		sender := func(ctx context.Context, prompt string) (string, error) {
+			mu.Lock()
+			prompts = append(prompts, prompt)
+			n := len(prompts)
+			mu.Unlock()
+			return "answer-" + fmt.Sprint(n) + "\n", nil
+		}
+		return NewOneshotSession(sender), nil
 	}
+	pool := NewSessionPool(factory, 30*time.Minute, 24*time.Hour)
+	defer pool.Stop()
+
 	executor := NewExecutor(ExecutorConfig{
-		OpenSession: func(ctx context.Context, contextID string) (Session, error) {
-			return &OneshotSession{sender: sender}, nil
-		},
-		ListAgents:    func() []*a2a.AgentCard { return nil },
-		LookupHistory: w.taskStore.ListByContextID,
-		MaxDepth:      0, // no sub-agent calls
-		BasePrompt:    "you are a helper",
+		OpenSession: pool.LookupOrCreate,
+		ListAgents:  func() []*a2a.AgentCard { return nil },
+		MaxDepth:    0,
+		BasePrompt:  "you are a helper",
 	})
 	w.server.SetExecutor(executor.Execute)
 
-	time.Sleep(50 * time.Millisecond) // let server bind
+	time.Sleep(50 * time.Millisecond)
 
 	send := func(text, contextID string) *a2a.Task {
 		t.Helper()
@@ -136,22 +148,16 @@ func TestAgentWrapperContextMemoryAcrossRequests(t *testing.T) {
 
 	mu.Lock()
 	defer mu.Unlock()
+	if factoryCalls != 1 {
+		t.Errorf("expected 1 factory call for two requests with same contextID, got %d", factoryCalls)
+	}
 	if len(prompts) != 2 {
 		t.Fatalf("expected 2 prompts captured, got %d", len(prompts))
 	}
-	// First call: no prior history yet.
-	if strings.Contains(prompts[0], "Conversation so far") {
-		t.Errorf("first prompt should not contain prior history:\n%s", prompts[0])
-	}
-	// Second call: must reference first turn.
-	if !strings.Contains(prompts[1], "Conversation so far") {
-		t.Errorf("second prompt missing history block:\n%s", prompts[1])
-	}
-	if !strings.Contains(prompts[1], "what is a goroutine") {
-		t.Errorf("second prompt missing first user turn:\n%s", prompts[1])
-	}
-	if !strings.Contains(prompts[1], "answer-1") {
-		t.Errorf("second prompt missing first agent reply:\n%s", prompts[1])
+	for i, p := range prompts {
+		if strings.Contains(p, "Conversation so far") {
+			t.Errorf("prompt %d should not contain wrapper-injected history:\n%s", i, p)
+		}
 	}
 }
 

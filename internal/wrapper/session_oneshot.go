@@ -6,17 +6,15 @@ import (
 	"sync"
 )
 
-// OneshotSession adapts the legacy per-request fork-and-exec model
-// (SessionManager.Send) to the Session interface. Each Turn invokes the
-// sender once; no state persists across turns.
+// OneshotSession is a fork-per-Turn Session implementation: each Turn
+// invokes the configured sender once and no state persists across turns.
 //
-// Purpose: keeps existing wrapper behavior unchanged while the Session
-// abstraction is plumbed through Executor. Step 2 introduces ClaudeSession
-// (stream-json, long-running) as the real provider; OneshotSession remains
-// as a fallback / test double.
+// Production wires ClaudeSession (long-running, stream-json) — OneshotSession
+// is retained as a lightweight Session impl for tests that want to inject a
+// fake sender function without spinning up the full protocol machinery, and
+// as a reference implementation for future provider backends that don't
+// support session continuity.
 type OneshotSession struct {
-	// sender performs one round-trip with the underlying runtime. Production
-	// code wires this to SessionManager.Send; tests inject a fake.
 	sender func(ctx context.Context, prompt string) (string, error)
 
 	mu     sync.Mutex
@@ -24,8 +22,8 @@ type OneshotSession struct {
 }
 
 // NewOneshotSession constructs a OneshotSession over an arbitrary sender
-// function. Production code typically passes SessionManager.Send; tests and
-// alternative backends pass their own. Each Turn invokes sender once.
+// function (e.g. SessionManager.Send for real fork-exec, or a mock in tests).
+// Each Turn invokes sender once.
 func NewOneshotSession(sender func(ctx context.Context, prompt string) (string, error)) *OneshotSession {
 	return &OneshotSession{sender: sender}
 }
@@ -70,6 +68,15 @@ func (s *OneshotSession) Turn(ctx context.Context, userText string) (string, err
 // SessionID returns "" — oneshot mode has no persistent runtime session.
 // ClaudeSession (Step 2) is where session_id comes from.
 func (s *OneshotSession) SessionID() string { return "" }
+
+// IsHealthy returns false once Close has been called. OneshotSession has
+// no long-lived underlying process to fail, so the only "unhealthy" state
+// is the explicitly-closed one.
+func (s *OneshotSession) IsHealthy() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return !s.closed
+}
 
 // Close is a no-op (nothing to release) but tracks the closed flag so
 // concurrent Close calls don't race on future state additions.

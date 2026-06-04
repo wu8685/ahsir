@@ -104,7 +104,7 @@ func TestExecutorWithA2ACall(t *testing.T) {
 				{Name: "backend", URL: "http://127.0.0.1:9801/", Skills: []a2a.AgentSkill{{Name: "api-design"}}},
 			}
 		},
-		CallAgent: func(ctx context.Context, agentName, task string) (string, error) {
+		CallAgent: func(ctx context.Context, agentName, contextID, task string) (string, error) {
 			callRecorded = true
 			calledAgent = agentName
 			calledTask = task
@@ -136,6 +136,52 @@ func TestExecutorWithA2ACall(t *testing.T) {
 	}
 }
 
+// TestExecutorPropagatesContextIDToDelegate is the regression test for the
+// "agent-to-agent calls reset contextID" bug. The executor must thread its
+// task.ContextID through to the sub-agent call so the callee's pool can
+// reuse a session across multiple delegations from the same conversation.
+//
+// Concretely: when student gets a curl with contextID=X and delegates to
+// teacher, teacher's pool must be keyed on X (not on empty / not on a
+// newly-generated id). Otherwise teacher spawns a new claude process for
+// every delegation, even within one conversation.
+func TestExecutorPropagatesContextIDToDelegate(t *testing.T) {
+	sender := &mockMessageSender{
+		lineSets: [][]string{
+			{
+				"---A2A_CALL---",
+				`{"agent": "backend", "task": "design API"}`,
+				"---END---",
+			},
+			{"OK, done."},
+		},
+	}
+
+	var capturedContextID string
+	executor := NewExecutor(ExecutorConfig{
+		OpenSession: openSessionFromSender(sender.Send),
+		ListAgents: func() []*a2a.AgentCard {
+			return []*a2a.AgentCard{{Name: "backend", URL: "http://127.0.0.1:9801/"}}
+		},
+		CallAgent: func(ctx context.Context, agentName, contextID, task string) (string, error) {
+			capturedContextID = contextID
+			return "done", nil
+		},
+		MaxDepth: 5,
+	})
+
+	msg := a2a.NewMessage(a2a.MessageRoleUser, a2a.TextPart{Text: "build"})
+	msg.ContextID = "outer-conv-xyz"
+
+	if _, err := executor.Execute(context.Background(), msg); err != nil {
+		t.Fatal(err)
+	}
+
+	if capturedContextID != "outer-conv-xyz" {
+		t.Errorf("sub-agent contextID: got %q want outer-conv-xyz", capturedContextID)
+	}
+}
+
 func TestExecutorMaxDepthExceeded(t *testing.T) {
 	callCount := 0
 	sender := &mockMessageSender{
@@ -160,7 +206,7 @@ func TestExecutorMaxDepthExceeded(t *testing.T) {
 				{Name: "backend", URL: "http://127.0.0.1:9801/"},
 			}
 		},
-		CallAgent: func(ctx context.Context, agentName, task string) (string, error) {
+		CallAgent: func(ctx context.Context, agentName, contextID, task string) (string, error) {
 			callCount++
 			return "result", nil
 		},
@@ -232,68 +278,32 @@ func TestExecutorPropagatesContextID(t *testing.T) {
 	}
 }
 
-// TestExecutorInjectsPriorHistory verifies that LookupHistory results are
-// rendered into the prompt sent to the LLM, giving the agent short-term
-// memory across separate message/send calls.
-func TestExecutorInjectsPriorHistory(t *testing.T) {
+// TestExecutorOmitsPriorHistoryFromPrompt verifies that the wrapper no
+// longer prepends a "Conversation so far" block to the prompt — claude
+// itself maintains conversation history across turns of the same Session.
+func TestExecutorOmitsPriorHistoryFromPrompt(t *testing.T) {
 	var capturedPrompt string
 	sender := func(ctx context.Context, prompt string) (string, error) {
 		capturedPrompt = prompt
-		return "follow-up answer\n", nil
+		return "ok\n", nil
 	}
-
-	prior := []*a2a.Task{{
-		ID:        "earlier",
-		ContextID: "ctx-1",
-		History: []*a2a.Message{
-			a2a.NewMessage(a2a.MessageRoleUser, a2a.TextPart{Text: "what is a goroutine?"}),
-			a2a.NewMessage(a2a.MessageRoleAgent, a2a.TextPart{Text: "a lightweight thread."}),
-		},
-	}}
-
 	executor := NewExecutor(ExecutorConfig{
-		OpenSession:   openSessionFromSender(sender),
-		ListAgents:    func() []*a2a.AgentCard { return nil },
-		LookupHistory: func(ctxID string) []*a2a.Task { return prior },
-		MaxDepth:      3,
-		BasePrompt:    "you are a helper",
+		OpenSession: openSessionFromSender(sender),
+		ListAgents:  func() []*a2a.AgentCard { return nil },
+		MaxDepth:    3,
+		BasePrompt:  "you are a helper",
 	})
-
 	msg := a2a.NewMessage(a2a.MessageRoleUser, a2a.TextPart{Text: "and a channel?"})
 	msg.ContextID = "ctx-1"
 
 	if _, err := executor.Execute(context.Background(), msg); err != nil {
 		t.Fatal(err)
 	}
-
-	if !strings.Contains(capturedPrompt, "Conversation so far") {
-		t.Errorf("prompt missing history header:\n%s", capturedPrompt)
-	}
-	if !strings.Contains(capturedPrompt, "what is a goroutine") {
-		t.Errorf("prompt missing prior user turn:\n%s", capturedPrompt)
-	}
-	if !strings.Contains(capturedPrompt, "lightweight thread") {
-		t.Errorf("prompt missing prior agent turn:\n%s", capturedPrompt)
+	if strings.Contains(capturedPrompt, "Conversation so far") {
+		t.Errorf("prompt must not contain history header, got:\n%s", capturedPrompt)
 	}
 	if !strings.Contains(capturedPrompt, "and a channel?") {
 		t.Errorf("prompt missing current user turn:\n%s", capturedPrompt)
-	}
-}
-
-// TestExecutorNoHistoryWhenLookupNil verifies that omitting LookupHistory does
-// not break Execute (backwards-compatible default).
-func TestExecutorNoHistoryWhenLookupNil(t *testing.T) {
-	sender := &mockMessageSender{lineSets: [][]string{{"ok"}}}
-	executor := NewExecutor(ExecutorConfig{
-		OpenSession: openSessionFromSender(sender.Send),
-		ListAgents: func() []*a2a.AgentCard { return nil },
-		MaxDepth:   3,
-		BasePrompt: "you are a helper",
-	})
-
-	msg := a2a.NewMessage(a2a.MessageRoleUser, a2a.TextPart{Text: "hi"})
-	if _, err := executor.Execute(context.Background(), msg); err != nil {
-		t.Fatal(err)
 	}
 }
 

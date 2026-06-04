@@ -20,6 +20,10 @@ type A2AServer struct {
 	handler  http.Handler
 	executor ProcessMessageFunc
 	tasks    *TaskStore
+	// selfName is the receiving agent's name, surfaced in receive logs so the
+	// scheduler tee makes inter-agent traffic readable. Optional — empty means
+	// no name in log output.
+	selfName string
 }
 
 // NewA2AServer creates a new A2A JSON-RPC server.
@@ -35,6 +39,13 @@ func NewA2AServer(taskStore *TaskStore, executor ProcessMessageFunc) *A2AServer 
 // SetExecutor sets the message processor function.
 func (s *A2AServer) SetExecutor(executor ProcessMessageFunc) {
 	s.executor = executor
+}
+
+// SetSelfName tags this server with the agent name it represents. Used only
+// in log messages so operators can see "[teacher] receive: ..." in the
+// scheduler terminal.
+func (s *A2AServer) SetSelfName(name string) {
+	s.selfName = name
 }
 
 // ServeHTTP handles incoming JSON-RPC requests.
@@ -70,6 +81,17 @@ func (s *A2AServer) OnCancelTask(ctx context.Context, id *a2a.TaskIDParams) (*a2
 
 // OnSendMessage handles 'message/send'.
 func (s *A2AServer) OnSendMessage(ctx context.Context, params *a2a.MessageSendParams) (a2a.SendMessageResult, error) {
+	// One log line per inbound A2A message so operators can see who is being
+	// hit, with which contextID, and a preview of the user/peer text. A2A
+	// messages don't carry sender identity, so caller name is only visible
+	// from the peer's outbound log (executor "[X → Y] A2A_CALL").
+	name := s.selfName
+	if name == "" {
+		name = "agent"
+	}
+	preview := truncateForLog(messageText(params.Message), 300)
+	log.Printf("[%s] receive: contextID=%s msgID=%s text=%q", name, params.Message.ContextID, params.Message.ID, preview)
+
 	if s.executor != nil {
 		task, err := s.executor(ctx, params.Message)
 		if err != nil {

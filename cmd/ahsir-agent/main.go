@@ -64,28 +64,29 @@ func main() {
 
 	// Setup executor if registry URL is configured
 	if *registry != "" {
-		session := wrapper.NewSessionManager(sessionCfg)
-		if err := session.Start(ctx); err != nil {
-			log.Printf("Warning: Failed to start LLM session: %v", err)
-		} else {
-			defer session.Stop()
+		listAgents := wrapper.RegistryAgentLister(*registry)
+		callAgent := wrapper.RegistryAgentCaller(*registry)
+		maxCalls := cfg.Claude.MaxAgentCalls
+		basePrompt := cfg.Claude.SystemPrompt
 
-			listAgents := wrapper.RegistryAgentLister(*registry)
-			callAgent := wrapper.RegistryAgentCaller(*registry)
-			maxCalls := cfg.Claude.MaxAgentCalls
-			basePrompt := cfg.Claude.SystemPrompt
-
-			// Step 1: every A2A request gets a fresh OneshotSession wrapping
-			// the shared SessionManager — preserves the existing per-request
-			// fork model. Step 2 replaces this closure with a SessionPool
-			// keyed by contextID, backed by long-running ClaudeSessions.
-			openSession := func(ctx context.Context, contextID string) (wrapper.Session, error) {
-				return wrapper.NewOneshotSession(session.Send), nil
-			}
-
-			w.SetupExecutor(openSession, listAgents, callAgent, maxCalls, basePrompt)
-			log.Printf("Executor wired: %s %v (timeout=%s)", sessionCfg.Command, sessionCfg.Args, sessionCfg.Timeout)
+		// Long-running stream-json claude session per A2A contextID, pooled
+		// with sliding 30-minute idle TTL. Evicted entries keep their
+		// sessionID for 24h so a returning conversation can `--resume`.
+		factory := func(ctx context.Context, contextID, resumeID string) (wrapper.Session, error) {
+			return wrapper.NewClaudeSession(ctx, sessionCfg, resumeID)
 		}
+		// Persist contextID → sessionID mappings so a restart of this agent
+		// process can `--resume` prior conversations instead of starting
+		// fresh. File lives in the workspace next to agent-card.yaml; a
+		// corrupt or missing file falls back to "no prior state" so the
+		// agent always boots.
+		persistPath := filepath.Join(*workspace, ".a2a", "sessions.json")
+		persist := wrapper.NewFilePersistence(persistPath)
+		pool := wrapper.NewSessionPoolWithPersistence(factory, 30*time.Minute, 24*time.Hour, persist)
+		defer pool.Stop()
+
+		w.SetupExecutor(pool.LookupOrCreate, listAgents, callAgent, maxCalls, basePrompt)
+		log.Printf("Executor wired: stream-json SessionPool (%s %v, timeout=%s, persist=%s)", sessionCfg.Command, sessionCfg.Args, sessionCfg.Timeout, persistPath)
 	}
 
 	// Wait for signal

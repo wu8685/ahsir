@@ -43,23 +43,30 @@ func (w *AgentWrapper) TaskStore() *TaskStore {
 	return w.taskStore
 }
 
-// SetupExecutor wires the executor (Session factory + agent calling + context
-// memory) into the A2A server. The executor's history lookup is bound to the
-// wrapper's TaskStore, so completed tasks become short-term memory for
-// subsequent message/send calls sharing the same contextId.
-//
-// openSession is the seam Step 2 will swap from per-request OneshotSession
-// to a contextID-keyed pool of long-running ClaudeSessions.
-func (w *AgentWrapper) SetupExecutor(openSession func(ctx context.Context, contextID string) (Session, error), listAgents func() []*a2a.AgentCard, callAgent func(ctx context.Context, agentName, task string) (string, error), maxDepth int, basePrompt string) {
+// SetupExecutor wires the executor (Session factory + agent calling) into
+// the A2A server. openSession is typically SessionPool.LookupOrCreate so
+// multiple message/send calls sharing a contextID hit the same long-running
+// claude process — conversation history is held by claude itself, not by
+// the wrapper.
+func (w *AgentWrapper) SetupExecutor(openSession func(ctx context.Context, contextID string) (Session, error), listAgents func() []*a2a.AgentCard, callAgent func(ctx context.Context, agentName, contextID, task string) (string, error), maxDepth int, basePrompt string) {
 	executor := NewExecutor(ExecutorConfig{
-		OpenSession:   openSession,
-		ListAgents:    listAgents,
-		CallAgent:     callAgent,
-		LookupHistory: w.taskStore.ListByContextID,
-		MaxDepth:      maxDepth,
-		BasePrompt:    basePrompt,
+		OpenSession: openSession,
+		ListAgents:  listAgents,
+		CallAgent:   callAgent,
+		MaxDepth:    maxDepth,
+		BasePrompt:  basePrompt,
+		SelfName:    w.agentName(),
 	})
 	w.server.SetExecutor(executor.Execute)
+}
+
+// agentName returns the agent's own name from the configured card, or "" if
+// no card was supplied. Used to tag inter-agent log lines.
+func (w *AgentWrapper) agentName() string {
+	if w.cfg.AgentCard == nil {
+		return ""
+	}
+	return w.cfg.AgentCard.Name
 }
 
 // Start starts the HTTP server and begins registry heartbeat.
@@ -74,6 +81,7 @@ func (w *AgentWrapper) Start(ctx context.Context) error {
 	ctx, w.cancel = context.WithCancel(ctx)
 
 	w.server = NewA2AServer(w.taskStore, nil)
+	w.server.SetSelfName(w.agentName())
 
 	mux := http.NewServeMux()
 	mux.Handle("/", w.server)

@@ -74,6 +74,8 @@ claude -p --input-format stream-json --output-format stream-json --verbose [--re
 | 助手输出 | `assistant` | `message.content[]` 数组，逐 part：`text` / `tool_use` 等 |
 | 轮次结束 | `result` | 本轮终结信号；含 `is_error`, `api_error_status`, `usage`, `total_cost_usd`, `session_id` |
 
+**⚠️ 启动时序修正（2026-05-15 实测发现）**：claude 在 stream-json 模式下**不会自动 emit `system/init`** ——它会一直等 stdin 的第一条 user message 才开始产事件流。所以握手不能在构造期阻塞等 init，得在第一个 turn 的事件流里被动捕获 session_id。这一点和 Python SDK 反推出来的描述不一致；实现以实测为准。
+
 **关键约束**：caller 必须读完一轮的 `result` 才能发下一条 user message（Python SDK 同样这么做）。
 
 **错误语义**：
@@ -177,13 +179,13 @@ type Session interface {
 
 1. `exec.CommandContext` 起进程，args 含 `--input-format stream-json --output-format stream-json --verbose`
 2. 启动 stdout reader goroutine
-3. 阻塞等待首个 `system/init` 事件，记 `sessionID`；超时 → CLOSED
-4. drop 任何前置 `hook_started/response` 噪音
+3. **不阻塞**等 init——claude 直到收到第一条 user message 才会 emit。状态直接转 READY，session_id 在第一个 turn 的事件流里被动捕获
+4. drop 任何 `hook_started/response` 噪音（出现在 init 前后都可能）
 
 **Resume（EVICTED → READY）**：
 
 1. 同"新建"，但 args 多 `--resume <sessionID>`
-2. init 事件返回的 sessionID 必须等于原 sessionID（不等 → 视为初始化失败）
+2. 第一个 turn 的 init 事件返回的 sessionID 应等于原 sessionID；不等 → 当前 turn 的 `EventTurnDone.Err` 携带 resume mismatch 错误（不在构造期拒绝，因为构造期不读 stdout）
 
 **Stream 一轮**：
 

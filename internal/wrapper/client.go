@@ -42,11 +42,17 @@ func NewAgentClient(ctx context.Context, card *a2a.AgentCard) (*AgentClient, err
 	return &AgentClient{client: client, card: card}, nil
 }
 
-// SendMessage sends a text message to the agent.
-func (c *AgentClient) SendMessage(ctx context.Context, text string) (string, error) {
-	params := &a2a.MessageSendParams{
-		Message: a2a.NewMessage(a2a.MessageRoleUser, a2a.TextPart{Text: text}),
+// SendMessage sends a text message to the agent. contextID, when non-empty,
+// is set on the outgoing A2A Message so the callee's SessionPool can route
+// the request to an existing session for that contextID. Empty contextID
+// means "no conversation continuity" — callee will auto-generate one and
+// each call starts a fresh session.
+func (c *AgentClient) SendMessage(ctx context.Context, contextID, text string) (string, error) {
+	msg := a2a.NewMessage(a2a.MessageRoleUser, a2a.TextPart{Text: text})
+	if contextID != "" {
+		msg.ContextID = contextID
 	}
+	params := &a2a.MessageSendParams{Message: msg}
 	result, err := c.client.SendMessage(ctx, params)
 	if err != nil {
 		return "", fmt.Errorf("send message to %s: %w", c.card.Name, err)

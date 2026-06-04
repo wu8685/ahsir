@@ -46,6 +46,26 @@ func TestResolveProviderEnv_ZhipuDefaultsBaseURL(t *testing.T) {
 	}
 }
 
+func TestResolveProviderEnv_DeepSeekDefaultsBaseURL(t *testing.T) {
+	got, err := ResolveProviderEnv(RuntimeConfig{
+		Provider: "deepseek",
+		APIKey:   "ds-fake",
+		Model:    "deepseek-v4-pro",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got["ANTHROPIC_BASE_URL"] != deepseekDefaultBaseURL {
+		t.Errorf("expected DeepSeek default baseURL, got %q", got["ANTHROPIC_BASE_URL"])
+	}
+	if got["ANTHROPIC_AUTH_TOKEN"] != "ds-fake" {
+		t.Errorf("auth token wrong: %v", got)
+	}
+	if got["ANTHROPIC_MODEL"] != "deepseek-v4-pro" {
+		t.Errorf("model wrong: %v", got)
+	}
+}
+
 func TestResolveProviderEnv_ZhipuExplicitBaseURLWins(t *testing.T) {
 	got, _ := ResolveProviderEnv(RuntimeConfig{
 		Provider: "Zhipu", // also tests case-insensitivity

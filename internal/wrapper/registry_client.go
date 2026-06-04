@@ -23,9 +23,13 @@ func RegistryAgentLister(registryURL string) func() []*a2a.AgentCard {
 	}
 }
 
-// RegistryAgentCaller returns a function that calls an agent looked up from a registry.
-func RegistryAgentCaller(registryURL string) func(ctx context.Context, agentName string, task string) (string, error) {
-	return func(ctx context.Context, agentName string, task string) (string, error) {
+// RegistryAgentCaller returns a function that calls an agent looked up from
+// a registry. The returned function takes contextID — the caller's current
+// task contextID — and forwards it on the A2A message so the callee's
+// SessionPool can reuse a session across this and future delegations
+// within the same conversation.
+func RegistryAgentCaller(registryURL string) func(ctx context.Context, agentName, contextID, task string) (string, error) {
+	return func(ctx context.Context, agentName, contextID, task string) (string, error) {
 		// Look up agent from registry
 		req, err := http.NewRequestWithContext(ctx, http.MethodGet, registryURL+"/agents/"+agentName, nil)
 		if err != nil {
@@ -44,11 +48,12 @@ func RegistryAgentCaller(registryURL string) func(ctx context.Context, agentName
 			return "", fmt.Errorf("decode agent card: %w", err)
 		}
 
-		// Create A2A client and send message
+		// Create A2A client and send message — propagate contextID so the
+		// callee's pool keys on the same conversation.
 		client, err := NewAgentClient(ctx, &card)
 		if err != nil {
 			return "", err
 		}
-		return client.SendMessage(ctx, task)
+		return client.SendMessage(ctx, contextID, task)
 	}
 }

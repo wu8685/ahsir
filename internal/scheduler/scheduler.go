@@ -212,7 +212,9 @@ func (s *Scheduler) ChatWithAgent(agentName, message string) (string, error) {
 		return "", fmt.Errorf("create client for %s: %w", agentName, err)
 	}
 
-	return client.SendMessage(ctx, message)
+	// Scheduler is the entry-point — no upstream contextID to propagate.
+	// The agent's own executor will auto-generate one for the new task.
+	return client.SendMessage(ctx, "", message)
 }
 
 // GetTaskStatus gets a task's status (implements mcp.AgentRouter).
