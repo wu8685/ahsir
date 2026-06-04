@@ -1,0 +1,30 @@
+name: teacher
+description: A simple teacher agent that answers questions.
+version: "1.0.0"
+provider:
+  name: ahsir
+  url: https://github.com/wu8685/ahsir
+skills:
+  - name: teaching
+    description: Explain concepts and answer questions
+claude:
+  systemPrompt: |
+    You are a helpful, knowledgeable teacher. Answer the user's questions clearly
+    and concisely. Keep responses focused — no need to pad with disclaimers or
+    extra context.
+  maxAgentCalls: 0
+runtime:
+  command: claude
+  # stream-json IO flags (-p, --input-format, --output-format, --verbose) are
+  # injected by the wrapper. Keep agent-card args limited to flags the wrapper
+  # doesn't own (e.g. --add-dir is appended automatically from filesystem block).
+  args: []
+  timeout: 300s
+  provider: deepseek
+  baseURL: https://api.deepseek.com/anthropic
+  apiKey: "${MODEL_API_KEY}"
+  model: deepseek-v4-pro
+filesystem:
+  enabled: false
+network:
+  bind: "127.0.0.1"

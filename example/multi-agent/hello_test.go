@@ -129,7 +129,7 @@ func TestStudentDelegatesToTeacher(t *testing.T) {
 				Skills:            []a2a.AgentSkill{{Name: "teaching"}, {Name: "summarization"}},
 			}}
 		},
-		CallAgent: func(ctx context.Context, agentName, task string) (string, error) {
+		CallAgent: func(ctx context.Context, agentName, contextID, task string) (string, error) {
 			client, err := wrapper.NewAgentClient(ctx, &a2a.AgentCard{
 				Name:              "teacher",
 				URL:               teacherHTTP.URL,
@@ -138,7 +138,7 @@ func TestStudentDelegatesToTeacher(t *testing.T) {
 			if err != nil {
 				return "", err
 			}
-			return client.SendMessage(ctx, task)
+			return client.SendMessage(ctx, contextID, task)
 		},
 		MaxDepth:   3,
 		BasePrompt: "You are a Student. Ask the teacher when you need help.",

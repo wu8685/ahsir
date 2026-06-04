@@ -1,9 +1,9 @@
 agents:
   - name: teacher
-    workspace: example/workspaces/teacher
+    workspace: example/multi-agent/workspaces/teacher
     port: 0
   - name: student
-    workspace: example/workspaces/student
+    workspace: example/multi-agent/workspaces/student
     port: 0
 
 registry:

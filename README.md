@@ -60,11 +60,11 @@ fleet without speaking A2A directly.
 go build -o bin/ahsir ./cmd/ahsir
 go build -o bin/ahsir-agent ./cmd/ahsir-agent
 
-# Provide an LLM endpoint (Zhipu / 智谱 used in the example)
-export MODEL_API_KEY=<your-zhipu-key>
+# Provide an LLM endpoint (DeepSeek used in the bundled examples)
+export MODEL_API_KEY=<your-deepseek-key>
 
-# Start the scheduler with the example config
-./bin/ahsir start example/ahsir.yaml
+# Start the scheduler with the multi-agent example config
+./bin/ahsir start example/multi-agent/ahsir.yaml
 ```
 
 Then either curl the agents directly, hit the scheduler gateway, or drive the
@@ -80,10 +80,10 @@ Two YAML files drive everything:
 ```yaml
 agents:
   - name: teacher
-    workspace: example/workspaces/teacher
+    workspace: example/multi-agent/workspaces/teacher
     port: 0          # 0 = auto-allocate from port_range
   - name: student
-    workspace: example/workspaces/student
+    workspace: example/multi-agent/workspaces/student
     port: 0
 
 registry:

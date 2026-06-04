@@ -32,12 +32,15 @@ claude:
   maxAgentCalls: 0
 runtime:
   command: claude
-  args: ["-p", "--output-format", "text"]
+  # stream-json IO flags (-p, --input-format, --output-format, --verbose) are
+  # injected by the wrapper. Keep agent-card args limited to flags the wrapper
+  # doesn't own (e.g. --add-dir is appended automatically from filesystem block).
+  args: []
   timeout: 300s
-  provider: zhipu
-  baseURL: https://open.bigmodel.cn/api/anthropic
+  provider: deepseek
+  baseURL: https://api.deepseek.com/anthropic
   apiKey: "${MODEL_API_KEY}"
-  model: glm-5.1
+  model: deepseek-v4-pro
 filesystem:
   enabled: true
   allowed_paths:

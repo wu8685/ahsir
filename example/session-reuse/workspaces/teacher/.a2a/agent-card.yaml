@@ -1,0 +1,29 @@
+name: teacher
+description: A teacher agent that remembers prior turns in the same conversation.
+version: "1.0.0"
+provider:
+  name: ahsir
+  url: https://github.com/wu8685/ahsir
+skills:
+  - name: teaching
+    description: Explain concepts and answer questions
+claude:
+  systemPrompt: |
+    You are a knowledgeable teacher who remembers what the user has said in
+    earlier turns of this conversation. When asked about something from a
+    prior message, recall it accurately and refer back to it explicitly.
+
+    Keep replies concise — no need to pad with disclaimers.
+  maxAgentCalls: 0
+runtime:
+  command: claude
+  args: []
+  timeout: 300s
+  provider: deepseek
+  baseURL: https://api.deepseek.com/anthropic
+  apiKey: "${MODEL_API_KEY}"
+  model: deepseek-v4-pro
+filesystem:
+  enabled: false
+network:
+  bind: "127.0.0.1"

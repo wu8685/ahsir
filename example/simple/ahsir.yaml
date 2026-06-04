@@ -1,0 +1,20 @@
+agents:
+  - name: teacher
+    workspace: example/simple/workspaces/teacher
+    port: 0
+
+registry:
+  host: "127.0.0.1"
+  port: 9800
+  heartbeat_interval: 10s
+  heartbeat_timeout: 30s
+
+mcp: {}
+
+timeouts:
+  chat: 10m
+  task_status: 30s
+
+port_range:
+  start: 9801
+  end: 9810
