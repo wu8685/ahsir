@@ -125,7 +125,7 @@ func setupE2E(t *testing.T) *e2eFixture {
 	writeAgentCard(t, studentWS, studentCardYAML)
 
 	cfgPath := filepath.Join(tmp, "ahsir.yaml")
-	writeSchedulerConfig(t, cfgPath, registryPort, teacherPort, teacherWS, studentWS)
+	writeSchedulerConfig(t, cfgPath, registryPort, teacherPort, studentPort, teacherWS, studentWS)
 
 	// Spawn the scheduler. Use a context we control so t.Cleanup can
 	// cancel + kill deterministically.
@@ -356,20 +356,26 @@ func writeAgentCard(t *testing.T, workspace, body string) {
 	}
 }
 
-// writeSchedulerConfig emits a minimal ahsir.yaml at path. teacherWS and
-// studentWS are absolute paths to the per-agent workspace dirs (relative
-// paths in the config would be interpreted relative to cmd.Dir, which is
-// noisy across test runs). port_range is wide enough to allow the
-// scheduler's port allocator some slack even though we pin to one start.
-func writeSchedulerConfig(t *testing.T, path string, registryPort, agentPortStart int, teacherWS, studentWS string) {
+// writeSchedulerConfig emits a minimal ahsir.yaml at path with EXPLICIT
+// per-agent ports (port != 0). Don't use the scheduler's auto-allocation
+// here — its allocator just increments port_range.start sequentially
+// without consulting the OS, so the third "free" port the test harness
+// picked is not necessarily the port student will end up on. Pinning
+// each agent to the exact port allocateFreePorts handed us keeps the
+// harness and the scheduler in lockstep.
+//
+// teacherWS and studentWS are absolute paths to the per-agent workspace
+// dirs — relative paths would be interpreted relative to cmd.Dir, which
+// would surface in log lines noisily across test runs.
+func writeSchedulerConfig(t *testing.T, path string, registryPort, teacherPort, studentPort int, teacherWS, studentWS string) {
 	t.Helper()
 	content := fmt.Sprintf(`agents:
   - name: teacher
     workspace: %s
-    port: 0
+    port: %d
   - name: student
     workspace: %s
-    port: 0
+    port: %d
 
 registry:
   host: "127.0.0.1"
@@ -383,10 +389,12 @@ timeouts:
   chat: 10m
   task_status: 30s
 
+# port_range is required by the scheduler config but unused — every agent
+# above has an explicit port set, so the auto-allocator path never fires.
 port_range:
   start: %d
   end: %d
-`, teacherWS, studentWS, registryPort, agentPortStart, agentPortStart+20)
+`, teacherWS, teacherPort, studentWS, studentPort, registryPort, teacherPort, teacherPort+100)
 	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
 		t.Fatalf("write ahsir.yaml: %v", err)
 	}
