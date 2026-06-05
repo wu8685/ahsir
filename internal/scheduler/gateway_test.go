@@ -203,6 +203,94 @@ func TestGatewayChat_AgentNotFound(t *testing.T) {
 	}
 }
 
+// TestAdminStart_RejectsBadBody verifies the /admin/agents endpoint
+// returns 400 for malformed input — no name, no workspace, broken JSON.
+// We don't drive the full subprocess-spawn path in unit tests because
+// that requires a real ahsir-agent binary; the spawn path is covered by
+// the end-to-end CLI smoke run on a built binary tree.
+func TestAdminStart_RejectsBadBody(t *testing.T) {
+	sch, gwURL := newTestScheduler(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	if err := sch.Start(ctx); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer sch.Stop()
+
+	cases := []struct {
+		name   string
+		body   string
+		want   int
+		errSub string
+	}{
+		{"missing-name", `{"workspace":"/tmp/ws"}`, http.StatusBadRequest, "name"},
+		{"missing-workspace", `{"name":"foo"}`, http.StatusBadRequest, "workspace"},
+		{"malformed-json", `{not json`, http.StatusBadRequest, "invalid"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			req, _ := http.NewRequest(http.MethodPost, gwURL+"/admin/agents", bytes.NewReader([]byte(tc.body)))
+			req.Header.Set("Content-Type", "application/json")
+			resp, err := http.DefaultClient.Do(req)
+			if err != nil {
+				t.Fatalf("POST: %v", err)
+			}
+			defer resp.Body.Close()
+			if resp.StatusCode != tc.want {
+				body, _ := io.ReadAll(resp.Body)
+				t.Errorf("status: got %d want %d; body=%s", resp.StatusCode, tc.want, body)
+			}
+		})
+	}
+}
+
+// TestAdminStart_RejectsBeforeRun verifies that calling /admin/agents on
+// a scheduler that hasn't called Start() yet returns 500 with a clear
+// "not running" message. This is the case that surfaces when the CLI
+// races against scheduler startup.
+func TestAdminStart_RejectsBeforeRun(t *testing.T) {
+	_, gwURL := newTestScheduler(t)
+	// Note: NOT calling sch.Start() — emulates "scheduler is alive enough
+	// to serve HTTP but never finished initialization".
+	body := `{"name":"foo","workspace":"/tmp/ws"}`
+	req, _ := http.NewRequest(http.MethodPost, gwURL+"/admin/agents", bytes.NewReader([]byte(body)))
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("POST: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusInternalServerError {
+		raw, _ := io.ReadAll(resp.Body)
+		t.Errorf("status: got %d want 500; body=%s", resp.StatusCode, raw)
+	}
+}
+
+// TestAdminStop_IdempotentOnMissing verifies that DELETE on an agent
+// the scheduler doesn't know about returns 204, not 404. The contract:
+// stop is idempotent so the CLI / scripts can safely call it during
+// cleanup without checking-then-deleting.
+func TestAdminStop_IdempotentOnMissing(t *testing.T) {
+	sch, gwURL := newTestScheduler(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	if err := sch.Start(ctx); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer sch.Stop()
+
+	req, _ := http.NewRequest(http.MethodDelete, gwURL+"/admin/agents/never-started", nil)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("DELETE: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusNoContent {
+		raw, _ := io.ReadAll(resp.Body)
+		t.Errorf("status: got %d want 204; body=%s", resp.StatusCode, raw)
+	}
+}
+
 // TestGatewayChat_BadBody covers malformed JSON and missing message field.
 func TestGatewayChat_BadBody(t *testing.T) {
 	_, gwURL := newTestScheduler(t)

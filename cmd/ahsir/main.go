@@ -32,6 +32,8 @@ func main() {
 		statusCmd(os.Args[2:])
 	case "ping":
 		pingCmd(os.Args[2:])
+	case "agent":
+		agentCmd(os.Args[2:])
 	case "mcp":
 		mcpCmd(os.Args[2:])
 	case "stop":
@@ -55,6 +57,11 @@ func usage() {
 	fmt.Println("                                       Send a message, print the reply")
 	fmt.Println("  status <agent> <task-id>             Print a task's status JSON")
 	fmt.Println("  ping                                 Check whether scheduler is reachable (exit 0/2)")
+	fmt.Println()
+	fmt.Println("Persona management:")
+	fmt.Println("  agent new <name> [flags]             Scaffold + start an agent")
+	fmt.Println("  agent delete <name>                  Stop a running agent (files preserved)")
+	fmt.Println("  agent list-configs                   Show agents in ahsir.yaml")
 	fmt.Println()
 	fmt.Println("Integration:")
 	fmt.Println("  mcp --scheduler <url>                Run an MCP stdio shim (used by Claude Code .mcp.json)")

@@ -25,7 +25,12 @@ type Scheduler struct {
 	httpSrv  *http.Server
 	mu       sync.Mutex
 	running  bool
-	cancel   context.CancelFunc
+	// ctx is the scheduler-lifetime context derived inside Start. It is
+	// the parent of every agent's per-process context — needed so
+	// post-boot StartAgent calls (from the admin API) can spawn children
+	// of the same lifecycle as boot-time agents.
+	ctx    context.Context
+	cancel context.CancelFunc
 }
 
 type agentProcess struct {
@@ -64,6 +69,7 @@ func (s *Scheduler) Start(ctx context.Context) error {
 	}
 
 	ctx, s.cancel = context.WithCancel(ctx)
+	s.ctx = ctx
 
 	// Wrap the registry handler with a gateway router that intercepts the
 	// chat / tasks endpoints first and forwards everything else (the bare
@@ -97,6 +103,67 @@ func (s *Scheduler) Start(ctx context.Context) error {
 	return nil
 }
 
+// StartAgent spins up a new agent post-Start (callable from the admin
+// HTTP endpoint). The scheduler must already be running. cfg.Port=0
+// allocates from the configured range; cfg.Name must be unique among
+// running agents.
+//
+// Returns the allocated port so callers (CLI / HTTP admin) can report it.
+// Unlike the boot-time startAgent loop, this acquires s.mu so it's safe
+// to invoke from a request goroutine.
+func (s *Scheduler) StartAgent(cfg AgentConfig) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if !s.running {
+		return 0, fmt.Errorf("scheduler not running")
+	}
+	if cfg.Name == "" {
+		return 0, fmt.Errorf("agent name is required")
+	}
+	if cfg.Workspace == "" {
+		return 0, fmt.Errorf("agent workspace is required")
+	}
+	if _, exists := s.agents[cfg.Name]; exists {
+		return 0, fmt.Errorf("agent %q already running", cfg.Name)
+	}
+
+	if err := s.startAgent(s.ctx, cfg); err != nil {
+		return 0, err
+	}
+	return s.agents[cfg.Name].cfg.Port, nil
+}
+
+// StopAgent tears down a running agent. Idempotent on "not running" —
+// returns nil if the name isn't in the map. Files in the workspace are
+// preserved (this is dynamic deregistration only). To remove files,
+// the caller (CLI) handles that separately.
+func (s *Scheduler) StopAgent(name string) error {
+	s.mu.Lock()
+	proc, ok := s.agents[name]
+	if !ok {
+		s.mu.Unlock()
+		return nil
+	}
+	// Cancel ctx first so exec.CommandContext kills the process, then
+	// release the lock — the monitor goroutine in startAgent will see
+	// the process exit, reacquire s.mu, and delete from the map.
+	proc.cancel()
+	s.mu.Unlock()
+
+	// Best-effort unregister from registry so subsequent /agents listing
+	// doesn't show the now-stopped agent.
+	_ = s.registry.Unregister(name)
+	return nil
+}
+
+// startAgent is the unexported per-agent spawn. Both Start (boot loop)
+// and StartAgent (admin endpoint) funnel through it. The caller must
+// hold s.mu so the agents map mutation is atomic with the exec.Start.
+//
+// IMPORTANT: cfg.Port is mutated to record the actually-allocated port
+// before being stored in s.agents — callers reading s.agents[name].cfg.Port
+// rely on this.
 func (s *Scheduler) startAgent(ctx context.Context, cfg AgentConfig) error {
 	port := cfg.Port
 	if port == 0 {
@@ -106,6 +173,9 @@ func (s *Scheduler) startAgent(ctx context.Context, cfg AgentConfig) error {
 			return err
 		}
 	}
+	// Persist the resolved port into cfg so s.agents[name].cfg.Port reflects
+	// the actually-allocated value (callers — admin API, tests — read this).
+	cfg.Port = port
 
 	agentCtx, cancel := context.WithCancel(ctx)
 

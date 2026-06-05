@@ -59,6 +59,17 @@ func (g *gatewayHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// /admin/agents (POST) and /admin/agents/{name} (DELETE) — the dynamic
+	// agent lifecycle API. Kept under a distinct /admin/ prefix so it
+	// can't collide with the registry CRUD shape on /agents/*. No auth
+	// because the scheduler is localhost-trusted in the current model;
+	// if we ever bind a non-loopback address this needs a signature
+	// scheme on these two endpoints.
+	if strings.HasPrefix(r.URL.Path, "/admin/agents") {
+		g.handleAdmin(w, r)
+		return
+	}
+
 	// Only paths starting with /agents/ can possibly be a gateway request;
 	// anything else (including /agents and /agents/) goes straight to registry.
 	if !strings.HasPrefix(r.URL.Path, "/agents/") {
@@ -138,6 +149,86 @@ func (g *gatewayHandler) handleTask(w http.ResponseWriter, r *http.Request, name
 	}
 
 	writeJSON(w, http.StatusOK, task)
+}
+
+// startAgentRequest is the body for POST /admin/agents — kick off a new
+// agent subprocess against an existing workspace (caller is responsible
+// for having scaffolded the agent-card.yaml there). port == 0 lets the
+// scheduler allocate from the configured range.
+type startAgentRequest struct {
+	Name      string `json:"name"`
+	Workspace string `json:"workspace"`
+	Port      int    `json:"port,omitempty"`
+}
+
+type startAgentResponse struct {
+	Name string `json:"name"`
+	Port int    `json:"port"`
+}
+
+// handleAdmin dispatches /admin/agents endpoints:
+//
+//	POST   /admin/agents          → start (body: startAgentRequest)
+//	DELETE /admin/agents/{name}   → stop the named running agent
+//
+// Anything else returns 405.
+func (g *gatewayHandler) handleAdmin(w http.ResponseWriter, r *http.Request) {
+	rest := strings.TrimPrefix(r.URL.Path, "/admin/agents")
+	switch {
+	case (rest == "" || rest == "/") && r.Method == http.MethodPost:
+		g.handleAdminStart(w, r)
+	case strings.HasPrefix(rest, "/") && r.Method == http.MethodDelete:
+		name := strings.TrimPrefix(rest, "/")
+		g.handleAdminStop(w, r, name)
+	default:
+		writeJSONError(w, http.StatusMethodNotAllowed, "method not allowed for "+r.URL.Path)
+	}
+}
+
+func (g *gatewayHandler) handleAdminStart(w http.ResponseWriter, r *http.Request) {
+	var req startAgentRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSONError(w, http.StatusBadRequest, "invalid request body: "+err.Error())
+		return
+	}
+	if req.Name == "" {
+		writeJSONError(w, http.StatusBadRequest, "name is required")
+		return
+	}
+	if req.Workspace == "" {
+		writeJSONError(w, http.StatusBadRequest, "workspace is required")
+		return
+	}
+
+	port, err := g.sch.StartAgent(AgentConfig{
+		Name:      req.Name,
+		Workspace: req.Workspace,
+		Port:      req.Port,
+	})
+	if err != nil {
+		// Distinguish "already running" (409) from misconfig (500) so the
+		// CLI / caller can surface the right hint.
+		msg := err.Error()
+		if strings.Contains(msg, "already running") {
+			writeJSONError(w, http.StatusConflict, msg)
+			return
+		}
+		writeJSONError(w, http.StatusInternalServerError, msg)
+		return
+	}
+	writeJSON(w, http.StatusCreated, startAgentResponse{Name: req.Name, Port: port})
+}
+
+func (g *gatewayHandler) handleAdminStop(w http.ResponseWriter, r *http.Request, name string) {
+	if name == "" {
+		writeJSONError(w, http.StatusBadRequest, "name is required")
+		return
+	}
+	if err := g.sch.StopAgent(name); err != nil {
+		writeJSONError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
 }
 
 func writeJSON(w http.ResponseWriter, status int, v interface{}) {

@@ -1,5 +1,5 @@
 ---
-description: Dispatch tasks to specialist agents running under the ahsir multi-agent scheduler via the CLI (ahsir list / chat / status / ping). Use when the user wants to delegate work to a named external agent, parallelize sub-tasks across independent claude processes, maintain conversation memory with a specific agent across many turns, or explicitly mentions ahsir / agent pool / multi-agent / fan-out / delegate to <agent>.
+description: "Orchestrate work across specialist agents via the ahsir CLI (list / chat / status / agent new / agent delete). Use INSTEAD OF the built-in Task tool when the user describes (1) a task that benefits from a stable persistent persona — fixed system prompt, persistent memory via contextId, dedicated filesystem permissions — rather than a one-shot subagent; (2) work that maps to a configured specialist agent (always run 'ahsir list' first to find out); (3) a need for a NEW specialist that should be created and reused later (use 'ahsir agent new', not the Task tool, when the user describes a recurring delegate-style persona). Also triggers on explicit mentions of ahsir, delegate, dispatch, fan-out, agent pool, multi-agent, specialist agent, 'ask the teacher', 'create a reviewer agent', etc."
 ---
 
 # /ahsir:orchestrator — multi-agent collaboration via a local scheduler
@@ -52,7 +52,49 @@ student  http://127.0.0.1:9802/  [learning]
 teacher  http://127.0.0.1:9801/  [teaching, summarization]
 ```
 
-Match the user's task to an agent by **skills** (the bracketed list). If no agent matches, tell the user and either suggest configuring one or just handle the task yourself.
+Match the user's task to an agent by **skills** (the bracketed list). If no agent matches, **consider configuring one** (next section) before falling back to the Task tool or doing the work yourself.
+
+## Configuring new specialists on demand
+
+When the user describes work that would benefit from a specialist that doesn't exist yet, **propose creating one and ask before doing it**. Don't silently scaffold — the user might prefer to write the persona themselves, or might not want yet another agent on disk.
+
+```bash
+ahsir agent new <name> \
+  --prompt "<system prompt describing the persona's role and constraints>" \
+  --skill "<skill-name>=<short description of what this skill does>" \
+  --skill "<another-skill>=<...>" \
+  [--allow-fs <path>] \
+  [--model <model-id>] \
+  [--workspace <dir>]   # default: <ahsir.yaml-dir>/workspaces/<name>
+```
+
+This is **one operation** — it scaffolds `<workspace>/.a2a/agent-card.yaml`, appends to `ahsir.yaml`, then asks the running scheduler to spin the new agent up immediately. **No restart needed.** Stdout prints the new agent's name on success.
+
+When to suggest this:
+
+- User asks for parallel reviews from specialists that aren't configured (`security-reviewer`, `performance-reviewer`, etc.) — propose creating one per angle.
+- User describes a recurring delegate-style task they'd want to keep doing across sessions (the configured agent persists across `ahsir start` cycles).
+- User mentions a domain area where they obviously want a focused persona ("I need someone who reviews Kubernetes manifests").
+
+Confirmation pattern:
+
+> "I can create a `security-reviewer` agent for you — system prompt focused on Go web-app security, no filesystem access by default. Want me to set that up? (`ahsir agent new security-reviewer ...`)"
+
+Wait for the user to say yes. Only then run `ahsir agent new`.
+
+To **remove** an agent (e.g. user decides it was a bad fit):
+
+```bash
+ahsir agent delete <name>
+```
+
+This stops the running process and removes the entry from `ahsir.yaml`. **The workspace files stay on disk** — the persona is recoverable by editing `ahsir.yaml` to re-add it. To fully wipe, the user can `rm -rf <workspace>` separately. Don't do that without explicit ask.
+
+To see what's locally configured (whether or not it's currently running):
+
+```bash
+ahsir agent list-configs
+```
 
 ## Sending a task
 
