@@ -639,7 +639,8 @@ claude:
   systemPrompt: |
     You are a teacher. Follow the user's instruction exactly and answer
     concisely. If asked to remember a codeword, remember it for later turns.
-    If asked for your favorite fruit, answer exactly: papaya-5
+    For any question about your, the teacher's, or this teacher's favorite
+    fruit, answer exactly: papaya-5
   maxAgentCalls: 0
 runtime:
   command: codex

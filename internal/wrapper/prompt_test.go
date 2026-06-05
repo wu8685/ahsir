@@ -55,6 +55,23 @@ Some text after`
 	}
 }
 
+func TestParseA2ACallTool(t *testing.T) {
+	call, ok := ParseA2ACallTool("a2a_call", []byte(`{"agent":"backend","task":"design API"}`))
+	if !ok {
+		t.Fatal("expected tool call to parse")
+	}
+	if call.Agent != "backend" || call.Task != "design API" {
+		t.Fatalf("unexpected call: %+v", call)
+	}
+}
+
+func TestParseA2ACallToolRejectsUnknownTool(t *testing.T) {
+	_, ok := ParseA2ACallTool("Bash", []byte(`{"agent":"backend","task":"design API"}`))
+	if ok {
+		t.Fatal("Bash tool must not be treated as an agent call")
+	}
+}
+
 func TestParseA2ACallNoCall(t *testing.T) {
 	output := "Just normal output, no A2A call here."
 	_, ok := ParseA2ACall(output)

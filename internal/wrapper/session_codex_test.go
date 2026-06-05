@@ -73,6 +73,29 @@ func TestParseCodexJSONL(t *testing.T) {
 	}
 }
 
+func TestParseCodexJSONL_A2AToolCall(t *testing.T) {
+	in := strings.NewReader(strings.Join([]string{
+		`{"type":"thread.started","thread_id":"thread-abc"}`,
+		`{"type":"item.completed","item":{"id":"item_1","type":"tool_call","name":"a2a_call","input":{"agent":"backend","task":"design API"}}}`,
+		`{"type":"turn.completed","usage":{"input_tokens":12,"output_tokens":5}}`,
+	}, "\n"))
+
+	got, err := parseCodexJSONL(in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got.AgentCalls) != 1 {
+		t.Fatalf("want 1 agent call, got %+v", got.AgentCalls)
+	}
+	call := got.AgentCalls[0]
+	if call.Agent != "backend" || call.Task != "design API" {
+		t.Fatalf("unexpected agent call: %+v", call)
+	}
+	if len(got.Tools) != 0 {
+		t.Fatalf("a2a_call should not be emitted as generic tool: %+v", got.Tools)
+	}
+}
+
 func TestParseCodexJSONL_ErrorEvent(t *testing.T) {
 	got, err := parseCodexJSONL(strings.NewReader(`{"type":"turn.failed","message":"no auth"}` + "\n"))
 	if err == nil || !strings.Contains(err.Error(), "no auth") {

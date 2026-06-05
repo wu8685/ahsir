@@ -26,17 +26,18 @@ type ExecutorConfig struct {
 	// callee's SessionPool reuse a single claude process across multiple
 	// delegations within one conversation. Empty contextID means "no
 	// conversation continuity" (callee will auto-generate one).
-	CallAgent func(ctx context.Context, agentName, contextID, task string) (string, error)
-	MaxDepth    int
-	BasePrompt  string
-	// SelfName is the agent name running this executor — surfaced in A2A_CALL
-	// dispatch / reply logs so operators can read inter-agent traffic. Optional;
-	// empty falls back to "agent".
+	CallAgent  func(ctx context.Context, agentName, contextID, task string) (string, error)
+	MaxDepth   int
+	BasePrompt string
+	// SelfName is the agent name running this executor — surfaced in
+	// agent-call dispatch / reply logs so operators can read inter-agent
+	// traffic. Optional; empty falls back to "agent".
 	SelfName string
 }
 
 // Executor runs the core agent loop: receive message → prompt the LLM →
-// parse A2A_CALL markers → execute sub-agent calls → inject results → return task.
+// handle structured agent calls (or legacy A2A_CALL markers) → execute
+// sub-agent calls → inject results → return task.
 type Executor struct {
 	openSession func(ctx context.Context, contextID string) (Session, error)
 	listAgents  func() []*a2a.AgentCard
@@ -103,7 +104,7 @@ func (e *Executor) Execute(ctx context.Context, msg *a2a.Message) (*a2a.Task, er
 // handles the initial user turn and any sub-agent injection rounds, with
 // claude's own memory of intermediate state intact.
 func (e *Executor) interact(ctx context.Context, session Session, task *a2a.Task, prompt string, depth int, originalTask string) (string, []*a2a.Message, error) {
-	responseText, err := session.Turn(ctx, prompt)
+	responseText, call, err := e.runTurn(ctx, session, prompt, nil)
 	if err != nil {
 		return "", task.History, fmt.Errorf("session turn: %w", err)
 	}
@@ -112,9 +113,7 @@ func (e *Executor) interact(ctx context.Context, session Session, task *a2a.Task
 	respMsg := a2a.NewMessage(a2a.MessageRoleAgent, a2a.TextPart{Text: responseText})
 	task.History = append(task.History, respMsg)
 
-	// Check for A2A_CALL markers
-	call, ok := ParseA2ACall(responseText)
-	if !ok {
+	if call == nil {
 		return responseText, task.History, nil
 	}
 
@@ -123,7 +122,7 @@ func (e *Executor) interact(ctx context.Context, session Session, task *a2a.Task
 		return responseText, task.History, nil
 	}
 
-	if err := ValidateA2ACall(call); err != nil {
+	if err := ValidateA2ACall(*call); err != nil {
 		// Invalid call, but continue processing
 		errorMsg := fmt.Sprintf("\n[A2A_CALL error: %v]\n", err)
 		return e.interact(ctx, session, task, errorMsg, depth, originalTask)
@@ -156,6 +155,42 @@ func (e *Executor) interact(ctx context.Context, session Session, task *a2a.Task
 	// Inject the result and continue
 	injection := BuildInjectionPrompt(call.Agent, originalTask, agentResult)
 	return e.interact(ctx, session, task, injection, depth+1, originalTask)
+}
+
+func (e *Executor) runTurn(ctx context.Context, session Session, prompt string, onDelta func(string) bool) (string, *A2ACall, error) {
+	ch, err := session.Stream(ctx, prompt)
+	if err != nil {
+		return "", nil, err
+	}
+
+	var fullText strings.Builder
+	var turnErr error
+	var call *A2ACall
+	stopDeltas := false
+	for ev := range ch {
+		switch x := ev.(type) {
+		case EventTextDelta:
+			if onDelta != nil && !stopDeltas {
+				if !onDelta(x.Text) {
+					stopDeltas = true
+				}
+			}
+		case EventText:
+			fullText.WriteString(x.Text)
+		case EventAgentCall:
+			c := A2ACall{Agent: x.Agent, Task: x.Task}
+			call = &c
+		case EventTurnDone:
+			turnErr = x.Err
+		}
+	}
+	responseText := fullText.String()
+	if call == nil {
+		if parsed, ok := ParseA2ACall(responseText); ok {
+			call = &parsed
+		}
+	}
+	return responseText, call, turnErr
 }
 
 // ExecuteStream is the streaming counterpart of Execute. It runs the same
@@ -205,40 +240,18 @@ func (e *Executor) ExecuteStream(ctx context.Context, msg *a2a.Message) iter.Seq
 // after the streaming turn drains. Returns false when the consumer rejected a
 // yield (so the caller can stop the outer iteration cleanly).
 func (e *Executor) interactStream(ctx context.Context, session Session, task *a2a.Task, prompt string, depth int, originalTask string, yield func(a2a.Event, error) bool) bool {
-	ch, err := session.Stream(ctx, prompt)
-	if err != nil {
-		task.Status = a2a.TaskStatus{State: a2a.TaskStateFailed}
-		yield(task, fmt.Errorf("session stream: %w", err))
-		return false
-	}
-
-	var fullText strings.Builder
-	var turnErr error
-	// Drain the channel fully even if yield is rejected mid-stream — otherwise
-	// the underlying ClaudeSession stays in stateInFlight and the next request
-	// against the same contextID errors out with "previous turn not drained".
 	stopYielding := false
-	for ev := range ch {
-		switch e := ev.(type) {
-		case EventTextDelta:
-			if stopYielding {
-				continue
-			}
-			deltaMsg := a2a.NewMessage(a2a.MessageRoleAgent, a2a.TextPart{Text: e.Text})
-			if !yield(a2a.NewStatusUpdateEvent(task, a2a.TaskStateWorking, deltaMsg), nil) {
-				stopYielding = true
-			}
-		case EventText:
-			fullText.WriteString(e.Text)
-		case EventTurnDone:
-			turnErr = e.Err
+	responseText, call, turnErr := e.runTurn(ctx, session, prompt, func(delta string) bool {
+		deltaMsg := a2a.NewMessage(a2a.MessageRoleAgent, a2a.TextPart{Text: delta})
+		if !yield(a2a.NewStatusUpdateEvent(task, a2a.TaskStateWorking, deltaMsg), nil) {
+			stopYielding = true
+			return false
 		}
-	}
+		return true
+	})
 	if stopYielding {
 		return false
 	}
-
-	responseText := fullText.String()
 	if turnErr != nil {
 		task.Status = a2a.TaskStatus{State: a2a.TaskStateFailed}
 		yield(task, fmt.Errorf("session turn: %w", turnErr))
@@ -248,14 +261,13 @@ func (e *Executor) interactStream(ctx context.Context, session Session, task *a2
 	respMsg := a2a.NewMessage(a2a.MessageRoleAgent, a2a.TextPart{Text: responseText})
 	task.History = append(task.History, respMsg)
 
-	call, ok := ParseA2ACall(responseText)
-	if !ok {
+	if call == nil {
 		return true
 	}
 	if depth >= e.maxDepth {
 		return true
 	}
-	if err := ValidateA2ACall(call); err != nil {
+	if err := ValidateA2ACall(*call); err != nil {
 		errorMsg := fmt.Sprintf("\n[A2A_CALL error: %v]\n", err)
 		return e.interactStream(ctx, session, task, errorMsg, depth, originalTask, yield)
 	}

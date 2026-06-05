@@ -267,13 +267,13 @@ w.SetupExecutor(openSession, listAgents, callAgent, maxCalls, basePrompt)
 
 ## 9. 跨期遗留
 
-Status as of 2026-06-05:
+Status as of 2026-06-06:
 
 - **~~V2-持久化~~** ✅ **Done** (commit `22f7a2e`). `FilePersistence` writes `contextID → sessionID` to `<workspace>/.a2a/sessions.json` (atomic tmp+rename, corrupt-file recovery). End-to-end verified: scheduler restart, same `contextId`, claude `--resume`s prior conversation.
-- **V2-SSE 流式**：still open. `--include-partial-messages` + EventText delta into A2A SSE.
-- **V2-资源控制**：still open. Pool LRU + overload reject/queue.
-- **V2-A2A_CALL → tool_call**：still open. Replace text marker with MCP tool-call protocol.
-- **V2-多 provider**：partially done. `CodexSession` landed after this plan; `GeminiSession` still open over the same `Session` interface.
+- **~~V2-SSE 流式~~** ✅ **Done**. `--include-partial-messages` + `EventTextDelta` now flow through A2A `message/stream`; CLI streaming e2e covers it.
+- **~~V2-资源控制~~** ✅ **Done**. `pool.max_active` plus overload policies `reject` / `evict-lru`.
+- **V2-A2A_CALL → tool_call**：partially done. Runtime tool-use events named `a2a_call` / `call_agent` are promoted to provider-neutral `EventAgentCall`; legacy `---A2A_CALL---` text markers remain as fallback until prompts/providers can rely on structured tools everywhere.
+- **V2-多 provider**：partially done. `CodexSession` landed after this plan and is verified with Codex-only plus mixed Claude+Codex e2e; `GeminiSession` still open over the same `Session` interface.
 
 ### Bonus capabilities delivered beyond original Step 2 scope (commit `22f7a2e`)
 

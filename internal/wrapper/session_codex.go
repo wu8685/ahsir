@@ -37,10 +37,11 @@ type CodexSession struct {
 type codexRunner func(ctx context.Context, cfg SessionConfig, resumeID, prompt string) (codexRunResult, error)
 
 type codexRunResult struct {
-	ThreadID string
-	Text     string
-	Stats    TurnStats
-	Tools    []EventToolUse
+	ThreadID   string
+	Text       string
+	Stats      TurnStats
+	Tools      []EventToolUse
+	AgentCalls []EventAgentCall
 }
 
 // NewCodexSession constructs a Codex-backed Session. resumeID, when non-empty,
@@ -125,6 +126,9 @@ func (s *CodexSession) Stream(ctx context.Context, userText string) (<-chan Even
 		result, err := s.runner(runCtx, s.cfg, resumeID, userText)
 		for _, tool := range result.Tools {
 			ch <- tool
+		}
+		for _, call := range result.AgentCalls {
+			ch <- call
 		}
 		if result.Text != "" {
 			ch <- EventText{Text: result.Text}
@@ -356,6 +360,10 @@ func applyCodexCompletedItem(result *codexRunResult, raw json.RawMessage) {
 		input := head.Input
 		if len(input) == 0 {
 			input = json.RawMessage(`{}`)
+		}
+		if call, ok := ParseA2ACallTool(name, input); ok {
+			result.AgentCalls = append(result.AgentCalls, EventAgentCall{Agent: call.Agent, Task: call.Task})
+			return
 		}
 		result.Tools = append(result.Tools, EventToolUse{Name: name, Input: input})
 	}

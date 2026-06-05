@@ -81,6 +81,16 @@ type EventToolUse struct {
 	Input json.RawMessage
 }
 
+// EventAgentCall is a structured request from the runtime to call another
+// ahsir agent. It is the provider-neutral successor to the legacy
+// ---A2A_CALL--- text marker. Sessions emit it when their runtime surfaces a
+// matching tool-call shape; Executor still falls back to parsing text markers
+// for older prompts/providers.
+type EventAgentCall struct {
+	Agent string
+	Task  string
+}
+
 // EventTurnDone is the last event delivered before the channel closes.
 // Channel closure is the canonical "turn finished" signal; Err carries any
 // LLM/runtime error so callers can react without inspecting raw protocol.
@@ -101,6 +111,7 @@ type TurnStats struct {
 func (EventText) isEvent()      {}
 func (EventTextDelta) isEvent() {}
 func (EventToolUse) isEvent()   {}
+func (EventAgentCall) isEvent() {}
 func (EventTurnDone) isEvent()  {}
 
 // Session is a long-running conversation with one agent runtime instance.

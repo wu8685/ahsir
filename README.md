@@ -43,7 +43,7 @@ drive the fleet without speaking A2A directly.
  ┌───────────────────────────────┐                    ┌───────────────────────────────┐
  │ ahsir-agent: student          │                    │ ahsir-agent: teacher          │
  │ - A2A server + task store     │                    │ - A2A server + task store     │
- │ - executor parses A2A_CALL    │── peer A2A call ──►│ - executor handles request    │
+ │ - executor handles agent calls│── peer A2A call ──►│ - executor handles request    │
  │ - SessionPool by contextId    │                    │ - SessionPool by contextId    │
  │ - provider session backend:   │                    │ - provider session backend:   │
  │   ClaudeSession / CodexSession│                    │   ClaudeSession / CodexSession│
@@ -324,6 +324,11 @@ Inter-agent traffic and per-request receive markers:
 [student → teacher] A2A_CALL: task="..."
 [student ← teacher] reply: took=12.3s bytes=... preview="..."
 ```
+
+Agent-to-agent dispatch prefers structured runtime tool-use events named
+`a2a_call` / `call_agent` with JSON input `{"agent":"...","task":"..."}`.
+The legacy `---A2A_CALL---` text block is still supported as a fallback for
+providers or prompts that cannot emit structured tool calls.
 
 Useful greps:
 

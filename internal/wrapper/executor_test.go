@@ -110,8 +110,8 @@ func TestExecutorWithA2ACall(t *testing.T) {
 			calledTask = task
 			return "API designed successfully", nil
 		},
-		MaxDepth:    5,
-		BasePrompt:  "You are a Go developer.",
+		MaxDepth:   5,
+		BasePrompt: "You are a Go developer.",
 	})
 
 	ctx := context.Background()
@@ -133,6 +133,73 @@ func TestExecutorWithA2ACall(t *testing.T) {
 	}
 	if task == nil {
 		t.Fatal("expected non-nil task")
+	}
+}
+
+type fakeAgentCallSession struct {
+	calls []EventAgentCall
+	idx   int
+}
+
+func (f *fakeAgentCallSession) Stream(ctx context.Context, _ string) (<-chan Event, error) {
+	ch := make(chan Event, 4)
+	turn := f.idx
+	f.idx++
+	go func() {
+		defer close(ch)
+		if turn < len(f.calls) {
+			ch <- f.calls[turn]
+		}
+		if turn == 0 {
+			ch <- EventText{Text: "delegating via structured tool"}
+		} else {
+			ch <- EventText{Text: "final answer"}
+		}
+		ch <- EventTurnDone{}
+	}()
+	return ch, nil
+}
+
+func (f *fakeAgentCallSession) Turn(ctx context.Context, userText string) (string, error) {
+	ch, err := f.Stream(ctx, userText)
+	if err != nil {
+		return "", err
+	}
+	var sb strings.Builder
+	for ev := range ch {
+		if t, ok := ev.(EventText); ok {
+			sb.WriteString(t.Text)
+		}
+	}
+	return sb.String(), nil
+}
+
+func (f *fakeAgentCallSession) SessionID() string { return "" }
+func (f *fakeAgentCallSession) IsHealthy() bool   { return true }
+func (f *fakeAgentCallSession) Close() error      { return nil }
+
+func TestExecutorWithStructuredAgentCall(t *testing.T) {
+	fake := &fakeAgentCallSession{calls: []EventAgentCall{{Agent: "backend", Task: "design a user API"}}}
+	var calledAgent, calledTask string
+	executor := NewExecutor(ExecutorConfig{
+		OpenSession: func(ctx context.Context, contextID string) (Session, error) { return fake, nil },
+		ListAgents: func() []*a2a.AgentCard {
+			return []*a2a.AgentCard{{Name: "backend", URL: "http://127.0.0.1:9801/"}}
+		},
+		CallAgent: func(ctx context.Context, agentName, contextID, task string) (string, error) {
+			calledAgent = agentName
+			calledTask = task
+			return "API designed successfully", nil
+		},
+		MaxDepth: 5,
+	})
+
+	msg := a2a.NewMessage(a2a.MessageRoleUser, a2a.TextPart{Text: "build"})
+	if _, err := executor.Execute(context.Background(), msg); err != nil {
+		t.Fatal(err)
+	}
+	if calledAgent != "backend" || calledTask != "design a user API" {
+		t.Fatalf("unexpected delegate call: agent=%q task=%q", calledAgent, calledTask)
 	}
 }
 
@@ -210,8 +277,8 @@ func TestExecutorMaxDepthExceeded(t *testing.T) {
 			callCount++
 			return "result", nil
 		},
-		MaxDepth:    0,
-		BasePrompt:  "You are a helper.",
+		MaxDepth:   0,
+		BasePrompt: "You are a helper.",
 	})
 
 	ctx := context.Background()
@@ -261,9 +328,9 @@ func TestExecutorPropagatesContextID(t *testing.T) {
 	sender := &mockMessageSender{lineSets: [][]string{{"ok"}}}
 	executor := NewExecutor(ExecutorConfig{
 		OpenSession: openSessionFromSender(sender.Send),
-		ListAgents: func() []*a2a.AgentCard { return nil },
-		MaxDepth:   3,
-		BasePrompt: "you are a helper",
+		ListAgents:  func() []*a2a.AgentCard { return nil },
+		MaxDepth:    3,
+		BasePrompt:  "you are a helper",
 	})
 
 	msg := a2a.NewMessage(a2a.MessageRoleUser, a2a.TextPart{Text: "hi"})
@@ -319,10 +386,10 @@ func TestExecutorInvalidA2ACallJSON(t *testing.T) {
 
 	executor := NewExecutor(ExecutorConfig{
 		OpenSession: openSessionFromSender(sender.Send),
-		ListAgents: func() []*a2a.AgentCard { return nil },
-		CallAgent:  nil,
-		MaxDepth:   5,
-		BasePrompt: "You are a helper.",
+		ListAgents:  func() []*a2a.AgentCard { return nil },
+		CallAgent:   nil,
+		MaxDepth:    5,
+		BasePrompt:  "You are a helper.",
 	})
 
 	ctx := context.Background()
@@ -522,6 +589,42 @@ func TestExecutor_ExecuteStream_A2ACallRecurses(t *testing.T) {
 	// raw A2A_CALL block — that's the canonical record of what the LLM said.
 	if len(finalTask.History) < 2 {
 		t.Fatalf("want >=2 history entries after recursion, got %d", len(finalTask.History))
+	}
+}
+
+func TestExecutor_ExecuteStream_StructuredAgentCallRecurses(t *testing.T) {
+	fake := &fakeAgentCallSession{calls: []EventAgentCall{{Agent: "backend", Task: "stream API"}}}
+	var called bool
+	executor := NewExecutor(ExecutorConfig{
+		OpenSession: func(ctx context.Context, contextID string) (Session, error) { return fake, nil },
+		ListAgents: func() []*a2a.AgentCard {
+			return []*a2a.AgentCard{{Name: "backend", URL: "http://127.0.0.1:9801/"}}
+		},
+		CallAgent: func(ctx context.Context, agentName, contextID, task string) (string, error) {
+			called = true
+			if agentName != "backend" || task != "stream API" {
+				t.Fatalf("unexpected call: agent=%q task=%q", agentName, task)
+			}
+			return "stream result", nil
+		},
+		MaxDepth: 5,
+	})
+
+	msg := a2a.NewMessage(a2a.MessageRoleUser, a2a.TextPart{Text: "build"})
+	var finalTask *a2a.Task
+	for ev, err := range executor.ExecuteStream(context.Background(), msg) {
+		if err != nil {
+			t.Fatalf("yield err: %v", err)
+		}
+		if task, ok := ev.(*a2a.Task); ok {
+			finalTask = task
+		}
+	}
+	if !called {
+		t.Fatal("expected structured agent call to recurse")
+	}
+	if finalTask == nil || finalTask.Status.State != a2a.TaskStateCompleted {
+		t.Fatalf("expected completed final task, got %+v", finalTask)
 	}
 }
 

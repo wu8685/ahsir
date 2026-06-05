@@ -323,6 +323,41 @@ func TestClaudeSession_AssistantToolUseEmitsEvent(t *testing.T) {
 	}
 }
 
+func TestClaudeSession_A2AToolUseEmitsAgentCall(t *testing.T) {
+	f := newFakeClaudeTransport()
+	defer f.close()
+
+	go f.writeLine(t, initEvent("sess-a2a-tool"))
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	s, err := newClaudeSessionWithTransport(ctx, SessionConfig{}, "", f.tr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+
+	ch, err := s.Stream(ctx, "delegate")
+	if err != nil {
+		t.Fatal(err)
+	}
+	go func() {
+		f.writeLine(t, assistantToolUse("a2a_call", `{"agent":"backend","task":"design API"}`))
+		f.writeLine(t, resultOK("sess-a2a-tool"))
+	}()
+
+	var got []Event
+	for ev := range ch {
+		got = append(got, ev)
+	}
+	call, ok := got[0].(EventAgentCall)
+	if !ok {
+		t.Fatalf("want EventAgentCall, got %T %+v", got[0], got[0])
+	}
+	if call.Agent != "backend" || call.Task != "design API" {
+		t.Fatalf("unexpected call: %+v", call)
+	}
+}
+
 func TestClaudeSession_AssistantMixedTextAndToolUse(t *testing.T) {
 	f := newFakeClaudeTransport()
 	defer f.close()

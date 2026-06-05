@@ -40,7 +40,9 @@ func BuildSystemPrompt(basePrompt string, agents []*a2a.AgentCard, maxCalls int)
 			sb.WriteString(fmt.Sprintf("- name: %q, skills: %v, endpoint: %q\n",
 				a.Name, skills, a.URL))
 		}
-		sb.WriteString("\nWhen you need another agent's help, append to your response:\n")
+		sb.WriteString("\nWhen you need another agent's help, prefer a structured tool call named `a2a_call` with JSON input:\n")
+		sb.WriteString(`{"agent": "<name>", "task": "<description of what you need>"}` + "\n")
+		sb.WriteString("\nIf your runtime cannot emit that tool call, append this fallback text block to your response:\n")
 		sb.WriteString("---A2A_CALL---\n")
 		sb.WriteString(`{"agent": "<name>", "task": "<description of what you need>"}` + "\n")
 		sb.WriteString("---END---\n")
@@ -48,6 +50,22 @@ func BuildSystemPrompt(basePrompt string, agents []*a2a.AgentCard, maxCalls int)
 	}
 
 	return sb.String()
+}
+
+// ParseA2ACallTool extracts an A2ACall from a runtime tool-call event. It
+// accepts a small set of stable names so different providers can expose the
+// same operation with their local naming conventions.
+func ParseA2ACallTool(name string, input json.RawMessage) (A2ACall, bool) {
+	switch strings.ToLower(strings.TrimSpace(name)) {
+	case "a2a_call", "a2a-call", "agent_call", "agent-call", "call_agent", "call-agent":
+	default:
+		return A2ACall{}, false
+	}
+	var call A2ACall
+	if err := json.Unmarshal(input, &call); err != nil {
+		return A2ACall{}, false
+	}
+	return call, true
 }
 
 // ParseA2ACall extracts an ---A2A_CALL--- block from Claude Code output.

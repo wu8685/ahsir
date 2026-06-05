@@ -1,7 +1,7 @@
 # AHSIR: Session Abstraction for Long-Running Agent Runtimes
 
 **Status:** Implemented (Step 1 + Step 2 landed in commits `e0fb3f2` / `22f7a2e`; see §8 for status of open questions)
-**Date:** 2026-05-12 (last updated 2026-06-05)
+**Date:** 2026-05-12 (last updated 2026-06-06)
 **Version:** 0.1.0
 
 ## 1. Motivation
@@ -18,7 +18,7 @@ ahsir 当前 agent 执行机制（`internal/wrapper/session.go`）：
 - **进程开销**：每条请求都是一次 fork + 初始化（model 加载、MCP 启动、hooks）
 - **难以扩展到 streaming**：oneshot exec 拿到完整 stdout 才返回，无法做增量 SSE
 
-迁移目标：用**单进程长驻 + stream-json IO** 替代，让 claude 进程自己管历史；同时把 Session 抽象成 provider 中立接口，未来可以塞 codex / gemini-cli / 其他 SDK。
+迁移目标：用**单进程长驻 + stream-json IO** 替代，让 claude 进程自己管历史；同时把 Session 抽象成 provider 中立接口，后续可以塞 codex / gemini-cli / 其他 SDK。当前已落地 `ClaudeSession` 与 `CodexSession`。
 
 ## 2. Goals / Non-Goals
 
@@ -34,9 +34,7 @@ ahsir 当前 agent 执行机制（`internal/wrapper/session.go`）：
 **Non-Goals (本 spec 不涵盖)**
 
 - 单进程多会话多路复用（明确不需要）
-- `---A2A_CALL---` 文本标记协议替换（独立工单，未来可以换成 tool_call）
-- ahsir-agent 进程跨重启的 contextID→sessionID 持久化（默认内存级，未来工单）
-- A2A SSE 流式回吐客户端（基础设施先就位，路由层后做）
+- `---A2A_CALL---` 文本标记协议完全删除（2026-06-06 已先落地结构化 `EventAgentCall` / tool-call 优先路径；文本块仍作为兼容 fallback）
 - 替换 `formatPriorHistory` 的 TaskStore 历史落盘逻辑（Step 2 才动）
 
 ## 3. Protocol Reference (Claude stream-json)
@@ -106,6 +104,13 @@ type EventText struct{ Text string }
 type EventToolUse struct {
     Name  string
     Input json.RawMessage
+}
+
+// EventAgentCall is a structured request to call another ahsir agent.
+// It is emitted when a provider surfaces an a2a_call / call_agent tool-use.
+type EventAgentCall struct {
+    Agent string
+    Task  string
 }
 
 // EventTurnDone is the last event delivered before the channel closes.
@@ -256,11 +261,11 @@ V2（未来工单）：序列化 `contextID → sessionID` 映射到磁盘（可
 
 ## 8. Open Questions
 
-Resolution status as of 2026-06-05:
+Resolution status as of 2026-06-06:
 
-1. **`--include-partial-messages`** — **Deferred (still open)**. Confirmed the choice: integrate when wiring A2A SSE streaming. No work this iteration.
+1. **`--include-partial-messages` / A2A SSE** — **Resolved ✅**. `streaming.partial_messages: true` appends `--include-partial-messages`; `ClaudeSession` emits `EventTextDelta`; `ExecuteStream` forwards deltas as A2A `message/stream` status updates; `ahsir chat --stream` is covered by e2e.
 2. **进程异常恢复策略** — **Resolved: no auto-retry**. Mid-turn crash fails the current turn + EVICTED; next request triggers transparent recreate-with-resume via `SessionPool` (see `IsHealthy()` on the Session interface, added 2026-06-05). Caller still owns the retry decision per turn.
-3. **资源上限** — **Deferred (still open)**. Pool has no max capacity. Adding LRU is the planned mitigation if process count becomes a real problem; not done yet.
+3. **资源上限** — **Resolved ✅**. `pool.max_active` caps ACTIVE sessions; `pool.overload_policy` supports `reject` and `evict-lru`.
 4. **EVICTED entry GC** — **Resolved ✅**. 24h secondary TTL implemented in `SessionPool.reapOnce` (`evictedTTL` field). Persistence layer (`<workspace>/.a2a/sessions.json`) also respects this — the file is rewritten on GC.
 5. **`--resume` 在第三方 gateway 下是否生效** — **Resolved ✅ for DeepSeek**. End-to-end verified on 2026-06-04: a cross-restart resume against `api.deepseek.com/anthropic` correctly recalls prior conversation state. Zhipu was the original target but the project moved to DeepSeek; if zhipu support is needed again, re-validate. The mechanism is provider-agnostic in principle (claude's local `~/.claude/projects/` holds the history), so other Anthropic-compatible providers should also work.
 
@@ -270,6 +275,8 @@ Resolution status as of 2026-06-05:
 - **Self-healing on SIGKILL** (not in original spec): pool probes `Session.IsHealthy()` on the hot path. When a `claude` subprocess is externally killed, the next request transparently recreates with `--resume=<prior sessionID>`.
 - **contextID propagation through A2A_CALL**: when student delegates to teacher, the student's `task.ContextID` flows to teacher so the callee's pool reuses a session across multiple delegations within one conversation.
 - **Inter-agent logging**: `[X] receive`, `[X → Y] A2A_CALL`, `[X ← Y] reply` log markers for cross-agent traffic.
+- **Structured agent calls**: provider tool-use events named `a2a_call` / `call_agent` are promoted to `EventAgentCall` and handled before falling back to legacy `---A2A_CALL---` text parsing.
+- **Codex provider**: `CodexSession` runs `codex exec --json`, persists Codex `thread_id`, resumes with `codex exec resume <thread_id>`, and is covered by Codex-only plus mixed Claude+Codex e2e.
 
 ## 9. Test Plan (TDD outline)
 

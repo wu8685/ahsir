@@ -75,7 +75,6 @@ const (
 	stateClosed
 )
 
-
 // NewClaudeSession spawns a real `claude` subprocess in stream-json mode
 // and returns a ready Session. resumeID, when non-empty, is passed as
 // --resume so claude rehydrates the prior conversation from its local
@@ -206,7 +205,6 @@ func drainClaudeStderr(name string, r io.Reader) {
 		}
 	}
 }
-
 
 // newClaudeSessionWithTransport is the test seam: callers (production code
 // or tests) provide a ready-to-read claudeTransport. Construction returns
@@ -482,6 +480,10 @@ func (s *ClaudeSession) emitAssistant(ch chan<- Event, raw []byte) {
 				Input json.RawMessage `json:"input"`
 			}
 			if err := json.Unmarshal(part, &p); err == nil {
+				if call, ok := ParseA2ACallTool(p.Name, p.Input); ok {
+					ch <- EventAgentCall{Agent: call.Agent, Task: call.Task}
+					continue
+				}
 				ch <- EventToolUse{Name: p.Name, Input: p.Input}
 			}
 		}
@@ -490,10 +492,10 @@ func (s *ClaudeSession) emitAssistant(ch chan<- Event, raw []byte) {
 
 func (s *ClaudeSession) emitResult(ch chan<- Event, raw []byte) {
 	var r struct {
-		IsError        bool   `json:"is_error"`
-		Result         string `json:"result"`
-		APIErrorStatus int    `json:"api_error_status"`
-		DurationMS     int64  `json:"duration_ms"`
+		IsError        bool    `json:"is_error"`
+		Result         string  `json:"result"`
+		APIErrorStatus int     `json:"api_error_status"`
+		DurationMS     int64   `json:"duration_ms"`
 		TotalCostUSD   float64 `json:"total_cost_usd"`
 		Usage          struct {
 			InputTokens  int `json:"input_tokens"`
