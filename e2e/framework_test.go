@@ -27,6 +27,7 @@
 package e2e
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -38,6 +39,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"sync"
 	"syscall"
 	"testing"
@@ -280,6 +282,115 @@ func (f *e2eFixture) sendMessage(agentPort int, messageID, contextID, text strin
 // "[student → teacher] A2A_CALL" to prove a delegation actually happened.
 func (f *e2eFixture) schedulerLog() string { return f.logBuf.String() }
 
+// streamEvent is one parsed entry from a `message/stream` SSE response.
+// Kind mirrors the A2A event marshaller's `kind` field on the result object:
+//   - "status-update" — TaskStatusUpdateEvent (per-delta updates)
+//   - "task"          — Task (terminal — emitted once)
+//   - "message"       — Message (alternative terminal shape)
+//
+// Raw is the result object (one level below the JSON-RPC envelope), so
+// tests can unmarshal into the precise a2a type if needed. ArrivedAt is
+// captured as soon as the SSE `data:` line is read from the wire, so tests
+// can assert temporal properties (e.g. deltas arrived incrementally rather
+// than as one buffered chunk).
+type streamEvent struct {
+	Kind      string
+	Raw       json.RawMessage
+	ArrivedAt time.Time
+}
+
+// sendMessageStream POSTs an A2A `message/stream` JSON-RPC request and reads
+// the SSE response body until the underlying iter completes. Each SSE
+// `data: <json>` line is parsed as a JSON-RPC response envelope and the
+// inner `result.kind` is extracted so the caller can assert on event order
+// and the terminal state without re-implementing SSE parsing per test.
+//
+// Timeout is bounded so a stuck claude process can't hang the whole test
+// run — same shape as sendMessage.
+func (f *e2eFixture) sendMessageStream(agentPort int, messageID, contextID, text string) ([]streamEvent, error) {
+	f.t.Helper()
+	payload := map[string]any{
+		"jsonrpc": "2.0",
+		"method":  "message/stream",
+		"params": map[string]any{
+			"message": map[string]any{
+				"messageId": messageID,
+				"contextId": contextID,
+				"role":      "user",
+				"parts":     []map[string]any{{"kind": "text", "text": text}},
+			},
+		},
+		"id": 1,
+	}
+	body, _ := json.Marshal(payload)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	defer cancel()
+
+	url := fmt.Sprintf("http://127.0.0.1:%d/", agentPort)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
+	if err != nil {
+		return nil, fmt.Errorf("build request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "text/event-stream")
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("POST %s: %w", url, err)
+	}
+	defer resp.Body.Close()
+
+	if ct := resp.Header.Get("Content-Type"); ct != "text/event-stream" {
+		// Read whatever did come back so the test can see the JSON-RPC error
+		// (e.g. method-not-found if the server forgot to register stream).
+		raw, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("expected SSE content-type, got %q; body: %s", ct, string(raw))
+	}
+
+	// The SDK's SSE format is one event per blank-line-separated block:
+	//   id: <uuid>
+	//   data: {"jsonrpc":"2.0","id":1,"result":{...}}
+	//
+	// Read line-by-line and extract `data:` payloads. The Scanner buffer is
+	// bumped from the default 64KB because terminal Task events with a
+	// populated history can easily exceed that.
+	scanner := bufio.NewScanner(resp.Body)
+	scanner.Buffer(make([]byte, 64*1024), 4*1024*1024)
+
+	var events []streamEvent
+	for scanner.Scan() {
+		line := scanner.Text()
+		if !strings.HasPrefix(line, "data:") {
+			continue
+		}
+		data := strings.TrimPrefix(line, "data:")
+		data = strings.TrimPrefix(data, " ") // SSE allows either "data:foo" or "data: foo"
+		var env struct {
+			Result json.RawMessage `json:"result"`
+			Error  *struct {
+				Code    int    `json:"code"`
+				Message string `json:"message"`
+			} `json:"error"`
+		}
+		if err := json.Unmarshal([]byte(data), &env); err != nil {
+			return events, fmt.Errorf("parse SSE envelope: %w; raw=%s", err, data)
+		}
+		if env.Error != nil {
+			return events, fmt.Errorf("JSON-RPC error %d: %s", env.Error.Code, env.Error.Message)
+		}
+		var head struct {
+			Kind string `json:"kind"`
+		}
+		_ = json.Unmarshal(env.Result, &head)
+		events = append(events, streamEvent{Kind: head.Kind, Raw: env.Result, ArrivedAt: time.Now()})
+	}
+	if err := scanner.Err(); err != nil {
+		return events, fmt.Errorf("read SSE body: %w", err)
+	}
+	return events, nil
+}
+
 // --- helpers ---
 
 // findRepoRoot walks up from this file's directory looking for go.mod.
@@ -403,6 +514,11 @@ port_range:
 // teacherCardYAML is the minimal teacher card for e2e: no filesystem access,
 // no delegation, just answer questions. Filesystem is deliberately disabled
 // so the test doesn't require any particular host directories.
+//
+// streaming.partial_messages is on so the SSE test can observe content
+// deltas. The non-streaming send tests (delegation_test, session_reuse_test)
+// continue to work because Turn() ignores EventTextDelta and only reads
+// EventText.
 const teacherCardYAML = `name: teacher
 description: e2e teacher agent
 version: "1.0.0"
@@ -428,6 +544,8 @@ filesystem:
   enabled: false
 network:
   bind: "127.0.0.1"
+streaming:
+  partial_messages: true
 `
 
 // studentCardYAML is the minimal student card for e2e: delegate every user

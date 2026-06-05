@@ -24,6 +24,27 @@ type AgentCardConfig struct {
 	Network    NetworkConfig    `yaml:"network"`
 	Filesystem FilesystemConfig `yaml:"filesystem"`
 	Pool       PoolConfig       `yaml:"pool"`
+	Streaming  StreamingConfig  `yaml:"streaming"`
+}
+
+// StreamingConfig toggles per-turn partial-message emission. Off by default
+// to preserve the historical single-EventText behavior.
+//
+// Example:
+//
+//	streaming:
+//	  partial_messages: true
+//
+// When enabled and the runtime is claude, buildSessionConfig appends
+// --include-partial-messages so claude emits stream_event NDJSON lines with
+// content_block_delta payloads. ClaudeSession surfaces them as
+// EventTextDelta and the A2A server's OnSendMessageStream relays them as
+// TaskStatusUpdateEvents to subscribers.
+type StreamingConfig struct {
+	// PartialMessages enables incremental delta delivery. Required for
+	// useful output on `message/stream` JSON-RPC calls; `message/send`
+	// callers continue to get the final aggregated text regardless.
+	PartialMessages bool `yaml:"partial_messages"`
 }
 
 // PoolConfig caps the agent's SessionPool. Optional — all fields default

@@ -392,7 +392,40 @@ func (s *ClaudeSession) dispatchEvent(env protocolEnvelope, raw []byte) {
 		s.emitAssistant(ch, raw)
 	case "result":
 		s.emitResult(ch, raw)
+	case "stream_event":
+		s.emitStreamEvent(ch, raw)
 	}
+}
+
+// emitStreamEvent parses a `stream_event` envelope emitted by claude when run
+// with --include-partial-messages and surfaces text-delta increments as
+// EventTextDelta. Non-text stream_event payloads (content_block_start /
+// content_block_stop / message_start etc.) are dropped — the canonical final
+// text still arrives separately as a `type: assistant` event so callers that
+// only care about full turns can ignore deltas safely.
+func (s *ClaudeSession) emitStreamEvent(ch chan<- Event, raw []byte) {
+	var msg struct {
+		Event struct {
+			Type  string `json:"type"`
+			Delta struct {
+				Type string `json:"type"`
+				Text string `json:"text"`
+			} `json:"delta"`
+		} `json:"event"`
+	}
+	if err := json.Unmarshal(raw, &msg); err != nil {
+		return
+	}
+	if msg.Event.Type != "content_block_delta" {
+		return
+	}
+	if msg.Event.Delta.Type != "text_delta" {
+		return
+	}
+	if msg.Event.Delta.Text == "" {
+		return
+	}
+	ch <- EventTextDelta{Text: msg.Event.Delta.Text}
 }
 
 func (s *ClaudeSession) handleInit(env protocolEnvelope) {

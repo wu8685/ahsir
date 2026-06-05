@@ -28,3 +28,9 @@ filesystem:
   enabled: false
 network:
   bind: "127.0.0.1"
+streaming:
+  # When true, the spawned claude is launched with --include-partial-messages
+  # and the wrapper relays token-level deltas as A2A status-update events on
+  # the message/stream JSON-RPC method. Non-streaming callers (message/send)
+  # are unaffected — they keep receiving the full aggregated response.
+  partial_messages: true

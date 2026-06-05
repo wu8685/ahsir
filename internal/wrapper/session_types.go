@@ -53,11 +53,22 @@ func truncateForLog(s string, max int) string {
 // gemini, ...) can emit the same envelope.
 type Event interface{ isEvent() }
 
-// EventText is an assistant text part. In non-streaming-deltas mode (the
-// current default) the entire assistant text for a turn arrives as a single
-// EventText. When partial-messages streaming is enabled later, multiple
-// EventText events may be emitted per turn.
+// EventText is an assistant text part. When partial-messages streaming is
+// disabled (default), the entire assistant text for a turn arrives as a
+// single EventText. When partial-messages streaming is enabled, the runtime
+// still emits one final EventText carrying the canonical full text — the
+// per-chunk increments arrive as EventTextDelta and are not summed into
+// EventText (so Turn() can ignore deltas and return the authoritative full
+// text without double-counting).
 type EventText struct {
+	Text string
+}
+
+// EventTextDelta is an incremental text chunk emitted while a turn is in
+// progress. Only produced when the runtime is configured for partial-message
+// streaming (e.g. claude --include-partial-messages). Callers that only need
+// the final text should ignore EventTextDelta and read EventText.
+type EventTextDelta struct {
 	Text string
 }
 
@@ -86,9 +97,10 @@ type TurnStats struct {
 	DurationMS   int64
 }
 
-func (EventText) isEvent()     {}
-func (EventToolUse) isEvent()  {}
-func (EventTurnDone) isEvent() {}
+func (EventText) isEvent()      {}
+func (EventTextDelta) isEvent() {}
+func (EventToolUse) isEvent()   {}
+func (EventTurnDone) isEvent()  {}
 
 // Session is a long-running conversation with one agent runtime instance.
 //

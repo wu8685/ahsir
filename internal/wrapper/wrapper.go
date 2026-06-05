@@ -58,6 +58,10 @@ func (w *AgentWrapper) SetupExecutor(openSession func(ctx context.Context, conte
 		SelfName:    w.agentName(),
 	})
 	w.server.SetExecutor(executor.Execute)
+	// Stream path uses the SAME Executor (and therefore the same Session via
+	// pool lookup), so streaming and non-streaming requests on one contextID
+	// share conversation state inside the underlying claude process.
+	w.server.SetExecutorStream(executor.ExecuteStream)
 }
 
 // agentName returns the agent's own name from the configured card, or "" if

@@ -112,11 +112,12 @@ func listCmd(args []string) {
 	}
 }
 
-// chatCmd: `ahsir chat <agent> "<message>" [--scheduler URL] [--context ID]`
+// chatCmd: `ahsir chat <agent> "<message>" [--scheduler URL] [--context ID] [--stream]`
 func chatCmd(args []string) {
 	fs := flag.NewFlagSet("chat", flag.ExitOnError)
 	schedulerURL := fs.String("scheduler", defaultSchedulerURL, "Scheduler base URL")
 	contextID := fs.String("context", "", "ContextID for session reuse across calls (omit for isolated turns)")
+	streamMode := fs.Bool("stream", false, "Stream the response token-by-token via SSE (requires agent's streaming.partial_messages=true)")
 	fs.Usage = func() {
 		fmt.Fprintf(os.Stderr, "Usage: ahsir chat <agent> \"<message>\" [flags]\n")
 		fs.PrintDefaults()
@@ -140,6 +141,23 @@ func chatCmd(args []string) {
 	message := strings.Join(positionals[1:], " ")
 
 	client := newSchedulerClient(*schedulerURL)
+
+	if *streamMode {
+		// Stream mode prints each delta as it arrives so the user gets a
+		// typewriter effect. The final aggregated reply returned by
+		// StreamWithAgent is discarded — the deltas already covered it.
+		// A trailing newline closes the rendered line.
+		_, err := client.StreamWithAgent(agent, *contextID, message, func(delta string) {
+			fmt.Print(delta)
+		})
+		fmt.Println()
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "stream chat failed: %v\n", err)
+			os.Exit(1)
+		}
+		return
+	}
+
 	reply, err := client.ChatWithAgent(agent, *contextID, message)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "chat failed: %v\n", err)

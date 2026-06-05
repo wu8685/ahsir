@@ -690,3 +690,99 @@ func TestClaudeSession_StdinIncludesSessionID(t *testing.T) {
 		t.Errorf("stdin missing session_id on turn-2, got: %s", raw)
 	}
 }
+
+// TestClaudeSession_StreamEventDeltas verifies that stream_event lines (emitted
+// when claude is run with --include-partial-messages) surface as
+// EventTextDelta while the canonical final EventText still arrives from the
+// trailing `type:assistant` event. Non-text stream_event payloads
+// (content_block_start / message_delta) must be dropped.
+func TestClaudeSession_StreamEventDeltas(t *testing.T) {
+	f := newFakeClaudeTransport()
+	defer f.close()
+
+	go f.writeLine(t, initEvent("sess-delta"))
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	s, err := newClaudeSessionWithTransport(ctx, SessionConfig{}, "", f.tr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+
+	ch, err := s.Stream(ctx, "hi")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Synthetic protocol shape: a content_block_start (no text), three text
+	// deltas, then a stop frame, then the canonical assistant event, then
+	// result. Mirrors what claude emits with --include-partial-messages.
+	go func() {
+		f.writeLine(t, `{"type":"stream_event","event":{"type":"content_block_start","content_block":{"type":"text"}},"session_id":"sess-delta"}`)
+		f.writeLine(t, `{"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"Hel"}},"session_id":"sess-delta"}`)
+		f.writeLine(t, `{"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"lo "}},"session_id":"sess-delta"}`)
+		f.writeLine(t, `{"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"world"}},"session_id":"sess-delta"}`)
+		f.writeLine(t, `{"type":"stream_event","event":{"type":"content_block_stop"},"session_id":"sess-delta"}`)
+		f.writeLine(t, assistantText("Hello world"))
+		f.writeLine(t, resultOK("sess-delta"))
+	}()
+
+	var deltas []string
+	var full string
+	var doneSeen bool
+	for ev := range ch {
+		switch e := ev.(type) {
+		case EventTextDelta:
+			deltas = append(deltas, e.Text)
+		case EventText:
+			full = e.Text
+		case EventTurnDone:
+			doneSeen = true
+			if e.Err != nil {
+				t.Errorf("turn done err: %v", e.Err)
+			}
+		}
+	}
+	if !doneSeen {
+		t.Fatal("EventTurnDone not delivered")
+	}
+	wantDeltas := []string{"Hel", "lo ", "world"}
+	if !equalStrings(deltas, wantDeltas) {
+		t.Errorf("want deltas %v, got %v", wantDeltas, deltas)
+	}
+	if full != "Hello world" {
+		t.Errorf("want final EventText='Hello world', got %q", full)
+	}
+}
+
+// TestClaudeSession_TurnIgnoresDeltas ensures Turn() returns only the final
+// EventText concatenation — deltas are dropped to keep non-streaming callers
+// from receiving doubled text when --include-partial-messages is enabled.
+func TestClaudeSession_TurnIgnoresDeltas(t *testing.T) {
+	f := newFakeClaudeTransport()
+	defer f.close()
+
+	go f.writeLine(t, initEvent("sess-turn-d"))
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	s, err := newClaudeSessionWithTransport(ctx, SessionConfig{}, "", f.tr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+
+	go func() {
+		f.writeLine(t, `{"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"par"}},"session_id":"sess-turn-d"}`)
+		f.writeLine(t, `{"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"tial"}},"session_id":"sess-turn-d"}`)
+		f.writeLine(t, assistantText("partial answer"))
+		f.writeLine(t, resultOK("sess-turn-d"))
+	}()
+
+	got, err := s.Turn(ctx, "go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != "partial answer" {
+		t.Errorf("want full text 'partial answer', got %q", got)
+	}
+}

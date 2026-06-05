@@ -40,7 +40,7 @@ func main() {
 	var sessionCfg wrapper.SessionConfig
 	if *registry != "" {
 		var err error
-		sessionCfg, err = buildSessionConfig(cfg.Name, cfg.Runtime, cfg.Filesystem, *workspace)
+		sessionCfg, err = buildSessionConfig(cfg.Name, cfg.Runtime, cfg.Filesystem, cfg.Streaming, *workspace)
 		if err != nil {
 			log.Fatalf("Invalid runtime config for agent %q: %v", cfg.Name, err)
 		}
@@ -132,7 +132,7 @@ func main() {
 // Provider-derived env (ANTHROPIC_BASE_URL etc.) and explicit Env entries are
 // merged on top of the parent process env so the LLM CLI inherits PATH/HOME
 // /login credentials unless explicitly overridden.
-func buildSessionConfig(name string, rt wrapper.RuntimeConfig, fs wrapper.FilesystemConfig, workspace string) (wrapper.SessionConfig, error) {
+func buildSessionConfig(name string, rt wrapper.RuntimeConfig, fs wrapper.FilesystemConfig, stream wrapper.StreamingConfig, workspace string) (wrapper.SessionConfig, error) {
 	timeout := 120 * time.Second
 	if rt.Timeout != "" {
 		d, err := time.ParseDuration(rt.Timeout)
@@ -174,6 +174,13 @@ func buildSessionConfig(name string, rt wrapper.RuntimeConfig, fs wrapper.Filesy
 		// --allowedTools is variadic too — same trap as --add-dir; use the
 		// = form so it cannot consume the trailing prompt positional.
 		args = append(args, "--allowedTools=Read,LS,Glob,Grep")
+	}
+	if stream.PartialMessages {
+		// Tell claude to interleave incremental content_block_delta lines into
+		// the NDJSON stream so subscribers can see assistant text as it is
+		// produced. The wrapper surfaces these as EventTextDelta and the A2A
+		// server forwards them as TaskStatusUpdateEvent on message/stream.
+		args = append(args, "--include-partial-messages")
 	}
 
 	return wrapper.SessionConfig{
