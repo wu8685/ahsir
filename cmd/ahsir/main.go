@@ -8,6 +8,7 @@ import (
 	"log"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"syscall"
 
 	"github.com/wu8685/ahsir/internal/mcp"
@@ -45,6 +46,29 @@ func main() {
 	}
 }
 
+// resolveDefaultConfig picks the most appropriate config path when the
+// user doesn't pass one. CWD wins if a project-local file exists —
+// preserves the existing convention for `ahsir start` from a project
+// dir — otherwise falls back to the global file under ~/.ahsir/.
+func resolveDefaultConfig() string {
+	const localName = "ahsir.yaml"
+	if _, err := os.Stat(localName); err == nil {
+		return localName
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return localName
+	}
+	global := filepath.Join(home, ".ahsir", "ahsir.yaml")
+	if _, err := os.Stat(global); err == nil {
+		return global
+	}
+	// Neither exists — return the local name so the LoadConfig error
+	// points at the conventional location rather than something deep
+	// in $HOME.
+	return localName
+}
+
 func usage() {
 	fmt.Println("Usage: ahsir <command> [flags]")
 	fmt.Println()
@@ -73,7 +97,15 @@ func startCmd(args []string) {
 		os.Exit(1)
 	}
 
-	configPath := "ahsir.yaml"
+	// Resolution order, when no positional arg:
+	//   1. ./ahsir.yaml         (project-scoped — e.g. running from
+	//                            example/multi-agent/)
+	//   2. ~/.ahsir/ahsir.yaml  (global — agents created via
+	//                            `ahsir agent new` without --config)
+	//   3. ./ahsir.yaml         (final fallback so the error message
+	//                            points at the conventional location
+	//                            even when neither exists)
+	configPath := resolveDefaultConfig()
 	if rest := fs.Args(); len(rest) > 0 {
 		configPath = rest[0]
 	}

@@ -34,6 +34,36 @@ import (
 	"github.com/wu8685/ahsir/internal/scheduler"
 )
 
+// Default file layout when neither --config nor --workspace is given.
+// Putting state under ~/.ahsir keeps agent files OUT of the user's
+// current directory — running `ahsir agent new` from a git repo
+// shouldn't drop generated yaml + workspace dirs into that repo.
+//
+//   ~/.ahsir/
+//   ├── ahsir.yaml                         # scheduler config (auto-created)
+//   └── agents/
+//       └── <name>/.a2a/agent-card.yaml    # per-agent workspace
+//
+// Users with project-scoped configs (e.g. example/multi-agent/ahsir.yaml)
+// pass --config explicitly.
+func defaultConfigPath() string {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		// Pathological case (no $HOME): fall back to CWD so commands still
+		// run, even though they'll drop files in the local directory.
+		return "ahsir.yaml"
+	}
+	return filepath.Join(home, ".ahsir", "ahsir.yaml")
+}
+
+func defaultWorkspaceDir(name string) string {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return filepath.Join("workspaces", name)
+	}
+	return filepath.Join(home, ".ahsir", "agents", name)
+}
+
 // repeatStringFlag captures a flag that may be specified multiple times,
 // accumulating its values into a slice. Used for --skill / --allow-fs.
 type repeatStringFlag struct {
@@ -88,7 +118,7 @@ func agentNewCmd(args []string) {
 
 	fs := flag.NewFlagSet("agent new", flag.ExitOnError)
 
-	cfgPath := fs.String("config", "ahsir.yaml", "Path to ahsir.yaml")
+	cfgPath := fs.String("config", defaultConfigPath(), "Path to ahsir.yaml (created if missing under ~/.ahsir/)")
 	schedulerURL := fs.String("scheduler", defaultSchedulerURL, "Scheduler admin URL")
 	prompt := fs.String("prompt", "", "System prompt (the persona's instructions)")
 	model := fs.String("model", "deepseek-v4-pro", "LLM model identifier")
@@ -96,7 +126,7 @@ func agentNewCmd(args []string) {
 	baseURL := fs.String("base-url", "https://api.deepseek.com/anthropic", "Provider base URL")
 	apiKeyEnv := fs.String("api-key-env", "${MODEL_API_KEY}", "API key (literal or ${ENV_VAR})")
 	timeoutDur := fs.String("timeout", "300s", "Per-LLM-call timeout")
-	wsOverride := fs.String("workspace", "", "Workspace directory (default: <config-dir>/workspaces/<name>)")
+	wsOverride := fs.String("workspace", "", "Workspace directory (default: ~/.ahsir/agents/<name>)")
 	skipStart := fs.Bool("skip-start", false, "Only scaffold files; don't ask the scheduler to start the agent")
 
 	var skills repeatStringFlag
@@ -122,11 +152,18 @@ func agentNewCmd(args []string) {
 
 	workspace := *wsOverride
 	if workspace == "" {
-		workspace = filepath.Join(filepath.Dir(cfgAbs), "workspaces", name)
+		workspace = defaultWorkspaceDir(name)
 	}
 	workspace, err = filepath.Abs(workspace)
 	if err != nil {
 		fatal("resolve workspace: %v", err)
+	}
+
+	// Bootstrap ~/.ahsir/ahsir.yaml on first use so the user (or Claude)
+	// doesn't have to manually scaffold it before running `agent new`.
+	// No-op if the file already exists.
+	if err := ensureConfigExists(cfgAbs); err != nil {
+		fatal("init %s: %v", cfgAbs, err)
 	}
 
 	// Parse --skill name=desc pairs once before any side-effects so a
@@ -186,7 +223,7 @@ func agentDeleteCmd(args []string) {
 	}
 
 	fs := flag.NewFlagSet("agent delete", flag.ExitOnError)
-	cfgPath := fs.String("config", "ahsir.yaml", "Path to ahsir.yaml")
+	cfgPath := fs.String("config", defaultConfigPath(), "Path to ahsir.yaml")
 	schedulerURL := fs.String("scheduler", defaultSchedulerURL, "Scheduler admin URL")
 	if err := fs.Parse(flagArgs); err != nil {
 		os.Exit(2)
@@ -209,7 +246,7 @@ func agentDeleteCmd(args []string) {
 // running scheduler's registry.
 func agentListConfigsCmd(args []string) {
 	fs := flag.NewFlagSet("agent list-configs", flag.ExitOnError)
-	cfgPath := fs.String("config", "ahsir.yaml", "Path to ahsir.yaml")
+	cfgPath := fs.String("config", defaultConfigPath(), "Path to ahsir.yaml")
 	if err := fs.Parse(args); err != nil {
 		os.Exit(2)
 	}
@@ -228,6 +265,43 @@ func agentListConfigsCmd(args []string) {
 }
 
 // --- helpers ---
+
+// ensureConfigExists creates a minimal ahsir.yaml at path if it doesn't
+// exist yet. Used to bootstrap ~/.ahsir/ahsir.yaml on first `agent new`
+// so the user doesn't have to scaffold the scheduler config manually.
+// No-op when the file is already there.
+//
+// The template matches the example/multi-agent/ahsir.yaml shape: empty
+// agents list, registry on the default localhost port, sensible
+// timeouts, port range. `ahsir start <this-path>` works out of the box
+// against this default — no further edits needed.
+func ensureConfigExists(path string) error {
+	if _, err := os.Stat(path); err == nil {
+		return nil
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return fmt.Errorf("mkdir parent: %w", err)
+	}
+	const tmpl = `agents: []
+
+registry:
+  host: "127.0.0.1"
+  port: 9800
+  heartbeat_interval: 10s
+  heartbeat_timeout: 30s
+
+mcp: {}
+
+timeouts:
+  chat: 10m
+  task_status: 30s
+
+port_range:
+  start: 9801
+  end: 9900
+`
+	return os.WriteFile(path, []byte(tmpl), 0o644)
+}
 
 // extractPositionalName pulls the first non-flag-looking arg off the
 // front of args so flag.Parse can handle the rest as pure flags. Without

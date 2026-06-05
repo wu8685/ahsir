@@ -64,11 +64,12 @@ ahsir agent new <name> \
   --skill "<skill-name>=<short description of what this skill does>" \
   --skill "<another-skill>=<...>" \
   [--allow-fs <path>] \
-  [--model <model-id>] \
-  [--workspace <dir>]   # default: <ahsir.yaml-dir>/workspaces/<name>
+  [--model <model-id>]
 ```
 
-This is **one operation** — it scaffolds `<workspace>/.a2a/agent-card.yaml`, appends to `ahsir.yaml`, then asks the running scheduler to spin the new agent up immediately. **No restart needed.** Stdout prints the new agent's name on success.
+This is **one operation** — it scaffolds `~/.ahsir/agents/<name>/.a2a/agent-card.yaml`, appends to `~/.ahsir/ahsir.yaml` (auto-creating both on first use), then asks the running scheduler to spin the new agent up immediately. **No restart needed.** Stdout prints the new agent's name on success.
+
+**Defaults are intentional**: state lives under `~/.ahsir/` so the command leaves the user's current directory alone. Don't pass `--workspace` or `--config` unless the user has explicitly asked for a project-scoped setup (e.g. `--config ./ahsir.yaml` to manage a repo's own agents).
 
 When to suggest this:
 
