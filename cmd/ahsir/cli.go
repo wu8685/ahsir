@@ -60,10 +60,14 @@ func listCmd(args []string) {
 	}
 
 	if len(agents) == 0 {
-		fmt.Fprintln(os.Stderr, "no agents registered with scheduler at "+*schedulerURL)
-		fmt.Fprintln(os.Stderr, "  - is the scheduler running? `ahsir start <config.yaml>`")
-		fmt.Fprintln(os.Stderr, "  - is anything wrong with the registry? try `ahsir ping --scheduler "+*schedulerURL+"`")
-		os.Exit(1)
+		// Empty registry is a legitimate state, not an error — the scheduler
+		// is running fine, there just aren't any agents configured yet. Exit
+		// 0 so shell chains (and Claude Code's Bash tool) don't treat it as
+		// a failure. Informational hint goes to stderr; stdout stays empty
+		// so callers parsing list output get an unambiguous "no agents"
+		// (zero lines) rather than a noise message they have to filter.
+		fmt.Fprintln(os.Stderr, "(no agents registered — use `ahsir agent new <name>` to configure one)")
+		return
 	}
 
 	// Plain text: one agent per line. Skills are comma-separated so the
