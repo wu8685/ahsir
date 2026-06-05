@@ -3,6 +3,7 @@ package scheduler
 import (
 	"encoding/json"
 	"fmt"
+	"log"
 	"net/http"
 	"strings"
 )
@@ -200,12 +201,19 @@ func (g *gatewayHandler) handleAdminStart(w http.ResponseWriter, r *http.Request
 		return
 	}
 
+	// Log the inbound request BEFORE attempting the spawn so a stuck
+	// startAgent (slow exec, port conflict, missing binary) is still
+	// visible in the scheduler tee. The success line is already emitted
+	// by startAgent itself ("Agent X started on port Y (pid: Z)").
+	log.Printf("admin: start agent %q (workspace=%s, port=%d)", req.Name, req.Workspace, req.Port)
+
 	port, err := g.sch.StartAgent(AgentConfig{
 		Name:      req.Name,
 		Workspace: req.Workspace,
 		Port:      req.Port,
 	})
 	if err != nil {
+		log.Printf("admin: start agent %q failed: %v", req.Name, err)
 		// Distinguish "already running" (409) from misconfig (500) so the
 		// CLI / caller can surface the right hint.
 		msg := err.Error()
@@ -224,7 +232,14 @@ func (g *gatewayHandler) handleAdminStop(w http.ResponseWriter, r *http.Request,
 		writeJSONError(w, http.StatusBadRequest, "name is required")
 		return
 	}
+	// Log before StopAgent so we see the intent even if the cleanup hangs.
+	// StopAgent itself is intentionally idempotent on missing agents, so
+	// this line fires for both real stops and no-op cleanup calls — the
+	// monitor goroutine in startAgent will emit its own "Agent X exited"
+	// line when the subprocess actually dies.
+	log.Printf("admin: stop agent %q", name)
 	if err := g.sch.StopAgent(name); err != nil {
+		log.Printf("admin: stop agent %q failed: %v", name, err)
 		writeJSONError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
