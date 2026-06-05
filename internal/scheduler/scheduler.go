@@ -198,7 +198,7 @@ func (s *Scheduler) ListAgents() []*a2a.AgentCard {
 // before getting a reply. The agent itself is still the authoritative
 // per-call deadline — the gateway timeout is just an upper bound to avoid
 // hanging callers if an agent never responds.
-func (s *Scheduler) ChatWithAgent(agentName, message string) (string, error) {
+func (s *Scheduler) ChatWithAgent(agentName, contextID, message string) (string, error) {
 	card, ok := s.registry.Get(agentName)
 	if !ok {
 		return "", fmt.Errorf("agent %s not found", agentName)
@@ -212,9 +212,11 @@ func (s *Scheduler) ChatWithAgent(agentName, message string) (string, error) {
 		return "", fmt.Errorf("create client for %s: %w", agentName, err)
 	}
 
-	// Scheduler is the entry-point — no upstream contextID to propagate.
-	// The agent's own executor will auto-generate one for the new task.
-	return client.SendMessage(ctx, "", message)
+	// contextID is propagated when the caller wants session reuse across
+	// multiple chats (e.g. CLI users with --context, or MCP tool callers
+	// passing a contextId). Empty string means each call is isolated —
+	// the agent's executor will auto-generate a fresh contextID for the task.
+	return client.SendMessage(ctx, contextID, message)
 }
 
 // GetTaskStatus gets a task's status (implements mcp.AgentRouter).

@@ -71,6 +71,80 @@ Then either curl the agents directly, hit the scheduler gateway, or drive the
 fleet from your local Claude Code via the bundled `.mcp.json`. Full hands-on
 instructions live in [`example/README.md`](example/README.md).
 
+## Install as a Claude Code plugin
+
+ahsir ships as a Claude Code plugin so you can install it once and use it from inside any Claude Code session — without remembering `--scheduler` URLs or absolute binary paths.
+
+The plugin bundles:
+
+- The `ahsir` and `ahsir-agent` CLI binaries (pre-built per platform under `plugin/bin/<os>-<arch>/`).
+- A small wrapper at `plugin/bin/ahsir` that auto-detects platform.
+- A skill at `plugin/skills/ahsir/SKILL.md` that teaches Claude **when** to use ahsir (parallel sub-tasks, specialist agents, multi-turn with a specific agent) and **how** to invoke it (`ahsir list`, `ahsir chat`, etc).
+
+### Install (current option: local plugin directory)
+
+```bash
+# 1. Clone the repo (or `git pull` to update an existing clone).
+git clone https://github.com/wu8685/ahsir.git
+cd ahsir
+
+# 2. Build the bundled binaries for your platform.
+make plugin-current     # builds plugin/bin/<os>-<arch>/{ahsir,ahsir-agent}
+
+# 3. Point your Claude Code at the plugin directory.
+#    Either start Claude Code with --plugin-dir:
+claude --plugin-dir "$(pwd)/plugin"
+
+#    Or install via the /plugin slash command from inside an existing
+#    Claude Code session and point it at this repo's plugin/ subdirectory.
+
+# 4. (Optional) Add the wrapper to your shell PATH so `ahsir` works from
+#    a normal terminal too — not just from Claude Code's Bash tool.
+echo 'export PATH="$HOME/path/to/ahsir/plugin/bin:$PATH"' >> ~/.zshrc
+exec zsh   # reload
+```
+
+For multi-platform release builds: `make plugin` cross-compiles darwin-arm64, darwin-amd64, linux-amd64, and linux-arm64 into `plugin/bin/<os>-<arch>/`.
+
+### What you get inside Claude Code
+
+Once the plugin is loaded, two things happen automatically:
+
+1. **The skill auto-loads** — Claude Code reads `plugin/skills/ahsir/SKILL.md` and consults its `description` whenever you describe a task. When the description matches (you ask about delegation, multi-agent, parallel sub-tasks, specialist agents, or mention "ahsir" explicitly), Claude proposes using it.
+
+2. **The CLI is on Claude's Bash path** (once you set PATH per step 4). Claude can shell out:
+
+   ```bash
+   ahsir ping                                # is the scheduler up?
+   ahsir list                                # what agents are available?
+   ahsir chat teacher "<task>" --context T1  # send a task, get reply
+   ```
+
+### Explicit invocation
+
+Talk to Claude naturally — the skill teaches it the patterns. Examples:
+
+> "Use ahsir to have the teacher summarize this article."
+>
+> "Spin up three reviewers via ahsir, each critiquing the code from a different angle (security, performance, maintainability)."
+>
+> "Talk to the researcher agent across the next few messages — keep using contextId `design-experiment-1`."
+
+### Automatic invocation
+
+Even without saying "ahsir", Claude will reach for it when the task shape matches. For example, if you ask "I need three independent code reviews from different perspectives" and Claude knows you have an ahsir scheduler running with reviewer agents, the skill will guide it to fan out via `ahsir chat`.
+
+### Running the scheduler
+
+The plugin does NOT auto-start a scheduler — that's left to you (or to Claude, if you ask). Start one in a separate terminal:
+
+```bash
+export MODEL_API_KEY=<your-deepseek-or-anthropic-key>
+ahsir start path/to/your/ahsir.yaml
+```
+
+Claude can detect the scheduler isn't running (via `ahsir ping` returning exit 2) and ask whether to start it.
+
 ## Configuration
 
 Two YAML files drive everything:

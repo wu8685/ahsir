@@ -97,8 +97,17 @@ func (c *SchedulerHTTPClient) ListAgents() []*a2a.AgentCard {
 // ChatWithAgent forwards the message to the scheduler, which then forwards
 // it to the agent over A2A. The response text is whatever the agent's
 // reply renders to as a string.
-func (c *SchedulerHTTPClient) ChatWithAgent(agentName, message string) (string, error) {
-	body, err := json.Marshal(map[string]string{"message": message})
+//
+// contextID, when non-empty, is set on the gateway request so the agent's
+// SessionPool can reuse an existing session for that conversation. Empty
+// contextID means each call is isolated (the agent's executor will
+// auto-generate a fresh contextID per task).
+func (c *SchedulerHTTPClient) ChatWithAgent(agentName, contextID, message string) (string, error) {
+	payload := map[string]string{"message": message}
+	if contextID != "" {
+		payload["contextId"] = contextID
+	}
+	body, err := json.Marshal(payload)
 	if err != nil {
 		return "", err
 	}

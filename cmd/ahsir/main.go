@@ -24,6 +24,14 @@ func main() {
 	switch cmd {
 	case "start":
 		startCmd(os.Args[2:])
+	case "list":
+		listCmd(os.Args[2:])
+	case "chat":
+		chatCmd(os.Args[2:])
+	case "status":
+		statusCmd(os.Args[2:])
+	case "ping":
+		pingCmd(os.Args[2:])
 	case "mcp":
 		mcpCmd(os.Args[2:])
 	case "stop":
@@ -36,11 +44,20 @@ func main() {
 }
 
 func usage() {
-	fmt.Println("Usage: ahsir <command>")
-	fmt.Println("Commands:")
-	fmt.Println("  start [config]              Start the scheduler (long-running). Default config: ahsir.yaml")
-	fmt.Println("  mcp --scheduler <url>       Run an MCP stdio shim that forwards to a running scheduler")
-	fmt.Println("  stop                        Stop the scheduler")
+	fmt.Println("Usage: ahsir <command> [flags]")
+	fmt.Println()
+	fmt.Println("Scheduler:")
+	fmt.Println("  start [config]                       Start the scheduler (long-running). Default config: ahsir.yaml")
+	fmt.Println()
+	fmt.Println("Interact with a running scheduler (default --scheduler http://127.0.0.1:9800):")
+	fmt.Println("  list [--json]                        List registered agents")
+	fmt.Println("  chat <agent> \"<message>\" [--context ID]")
+	fmt.Println("                                       Send a message, print the reply")
+	fmt.Println("  status <agent> <task-id>             Print a task's status JSON")
+	fmt.Println("  ping                                 Check whether scheduler is reachable (exit 0/2)")
+	fmt.Println()
+	fmt.Println("Integration:")
+	fmt.Println("  mcp --scheduler <url>                Run an MCP stdio shim (used by Claude Code .mcp.json)")
 }
 
 func startCmd(args []string) {

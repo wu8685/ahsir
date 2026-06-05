@@ -16,7 +16,10 @@ func (m *mockAgentRouter) ListAgents() []*a2a.AgentCard {
 	return m.agents
 }
 
-func (m *mockAgentRouter) ChatWithAgent(agentName, message string) (string, error) {
+func (m *mockAgentRouter) ChatWithAgent(agentName, contextID, message string) (string, error) {
+	if contextID != "" {
+		return "response from " + agentName + " (ctx=" + contextID + "): " + message, nil
+	}
 	return "response from " + agentName + ": " + message, nil
 }
 

@@ -126,7 +126,7 @@ func TestSchedulerChatWithAgent(t *testing.T) {
 
 	sch := New(cfg)
 
-	_, err := sch.ChatWithAgent("nonexistent", "hello")
+	_, err := sch.ChatWithAgent("nonexistent", "", "hello")
 	if err == nil {
 		t.Error("expected error for non-existent agent")
 	}
@@ -141,7 +141,7 @@ func TestSchedulerChatWithAgent(t *testing.T) {
 		URL:               mockURL,
 		PreferredTransport: a2a.TransportProtocolJSONRPC,
 	})
-	resp, err := sch.ChatWithAgent("test-agent", "hello")
+	resp, err := sch.ChatWithAgent("test-agent", "", "hello")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -288,7 +288,7 @@ func TestIntegrationFullFlow(t *testing.T) {
 	}
 
 	// Step 4: Chat with agent via scheduler
-	msg, err := sch.ChatWithAgent("integration-agent", "hello integration")
+	msg, err := sch.ChatWithAgent("integration-agent", "", "hello integration")
 	if err != nil {
 		t.Fatalf("chat with agent: %v", err)
 	}

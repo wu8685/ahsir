@@ -8,9 +8,14 @@ import (
 )
 
 // AgentRouter is the interface the MCP server uses to communicate with agents.
+//
+// ChatWithAgent's contextID parameter is propagated as the A2A message's
+// contextId so the agent's SessionPool can reuse a session across multiple
+// calls in the same conversation. Empty contextID means each call is
+// isolated (executor auto-generates a fresh contextID per task).
 type AgentRouter interface {
 	ListAgents() []*a2a.AgentCard
-	ChatWithAgent(agentName, message string) (string, error)
+	ChatWithAgent(agentName, contextID, message string) (string, error)
 	GetTaskStatus(agentName, taskID string) (*a2a.Task, error)
 }
 
@@ -73,12 +78,13 @@ func (s *Server) handleToolsList(id json.RawMessage) ([]byte, error) {
 		},
 		{
 			"name":        "agent_chat",
-			"description": "Send a message to a specific agent and return the response",
+			"description": "Send a message to a specific agent and return the response. Pass context_id to reuse a prior conversation (the agent's SessionPool keys on it).",
 			"inputSchema": map[string]interface{}{
 				"type": "object",
 				"properties": map[string]interface{}{
 					"agent_name": map[string]string{"type": "string"},
 					"message":    map[string]string{"type": "string"},
+					"context_id": map[string]string{"type": "string"},
 				},
 				"required": []string{"agent_name", "message"},
 			},
@@ -114,7 +120,8 @@ func (s *Server) handleToolsCall(id json.RawMessage, params json.RawMessage) ([]
 	case "agent_chat":
 		agentName, _ := call.Arguments["agent_name"].(string)
 		message, _ := call.Arguments["message"].(string)
-		return s.handleAgentChat(id, agentName, message)
+		contextID, _ := call.Arguments["context_id"].(string)
+		return s.handleAgentChat(id, agentName, contextID, message)
 	case "agent_task_status":
 		agentName, _ := call.Arguments["agent_name"].(string)
 		taskID, _ := call.Arguments["task_id"].(string)
@@ -158,8 +165,8 @@ func (s *Server) handleAgentList(id json.RawMessage) ([]byte, error) {
 	return s.resultResponse(id, map[string]interface{}{"content": content})
 }
 
-func (s *Server) handleAgentChat(id json.RawMessage, agentName, message string) ([]byte, error) {
-	response, err := s.router.ChatWithAgent(agentName, message)
+func (s *Server) handleAgentChat(id json.RawMessage, agentName, contextID, message string) ([]byte, error) {
+	response, err := s.router.ChatWithAgent(agentName, contextID, message)
 	if err != nil {
 		return s.errorResponse(id, -32603, err.Error())
 	}

@@ -1,0 +1,57 @@
+#!/bin/sh
+# Wrapper that picks the right platform-specific binary out of the plugin's
+# bin/ tree and execs it. Lets a single `ahsir` symlink (or PATH entry) work
+# across darwin/linux × arm64/amd64.
+#
+# Layout the wrapper expects (matches what `make plugin` produces):
+#
+#   <this-dir>/
+#   ├── ahsir                 # this file
+#   ├── ahsir-agent           # sibling wrapper
+#   ├── darwin-arm64/
+#   │   ├── ahsir
+#   │   └── ahsir-agent
+#   ├── darwin-amd64/...
+#   ├── linux-amd64/...
+#   └── linux-arm64/...
+set -e
+
+# Normalize uname output to the strings GOOS/GOARCH use.
+os=$(uname -s | tr '[:upper:]' '[:lower:]')
+case "$os" in
+  darwin|linux) ;;
+  *) echo "ahsir: unsupported OS '$os' (need darwin or linux)" >&2; exit 1 ;;
+esac
+
+arch=$(uname -m)
+case "$arch" in
+  x86_64|amd64) arch=amd64 ;;
+  arm64|aarch64) arch=arm64 ;;
+  *) echo "ahsir: unsupported arch '$arch' (need amd64 or arm64)" >&2; exit 1 ;;
+esac
+
+# `dirname $0` only works reliably when $0 is the script's actual path.
+# Resolve symlinks so a user-created `ln -s ~/.claude/plugins/ahsir/bin/ahsir
+# /usr/local/bin/ahsir` still finds the bundled binaries.
+target=$0
+while [ -L "$target" ]; do
+  link=$(readlink "$target")
+  case "$link" in
+    /*) target=$link ;;
+    *)  target=$(dirname "$target")/$link ;;
+  esac
+done
+dir=$(cd "$(dirname "$target")" && pwd)
+
+# Pick the binary that matches this script's basename — the same wrapper
+# template ships as both `ahsir` and `ahsir-agent`, distinguishing by name.
+binary_name=$(basename "$0")
+
+bin="$dir/$os-$arch/$binary_name"
+if [ ! -x "$bin" ]; then
+  echo "ahsir: bundled binary not found at $bin" >&2
+  echo "       (run \`make plugin/$os/$arch\` from the ahsir repo to build it)" >&2
+  exit 1
+fi
+
+exec "$bin" "$@"

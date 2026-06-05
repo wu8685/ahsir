@@ -174,7 +174,7 @@ func TestStudentDelegatesToTeacher(t *testing.T) {
 
 	// ---- Test 1: Student delegates to teacher ----
 	t.Log("=== Test 1: Student delegates to teacher ===")
-	resp, err := sch.ChatWithAgent("student", "Summarize the article")
+	resp, err := sch.ChatWithAgent("student", "", "Summarize the article")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -185,7 +185,7 @@ func TestStudentDelegatesToTeacher(t *testing.T) {
 
 	// ---- Test 2: Direct teacher chat ----
 	t.Log("=== Test 2: Ask teacher directly ===")
-	resp2, err := sch.ChatWithAgent("teacher", "What is a goroutine?")
+	resp2, err := sch.ChatWithAgent("teacher", "", "What is a goroutine?")
 	if err != nil {
 		t.Fatal(err)
 	}

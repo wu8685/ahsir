@@ -31,8 +31,14 @@ func newGatewayHandler(sch *Scheduler, registry http.Handler) *gatewayHandler {
 }
 
 // chatRequest is the body for POST /agents/{name}/chat.
+//
+// ContextID is optional — when set, the scheduler forwards it as the A2A
+// message's contextId so the agent's SessionPool reuses an existing
+// session for that conversation (cross-call memory). Empty contextId
+// means each call is an isolated turn with no continuity.
 type chatRequest struct {
-	Message string `json:"message"`
+	Message   string `json:"message"`
+	ContextID string `json:"contextId,omitempty"`
 }
 
 // chatResponse is the body returned for POST /agents/{name}/chat.
@@ -99,7 +105,7 @@ func (g *gatewayHandler) handleChat(w http.ResponseWriter, r *http.Request, name
 		return
 	}
 
-	reply, err := g.sch.ChatWithAgent(name, req.Message)
+	reply, err := g.sch.ChatWithAgent(name, req.ContextID, req.Message)
 	if err != nil {
 		// Distinguish "agent not found" from generic upstream failures so
 		// callers (e.g. MCP shim) can surface a useful error instead of a
