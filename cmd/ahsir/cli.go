@@ -30,6 +30,37 @@ import (
 
 const defaultSchedulerURL = "http://127.0.0.1:9800"
 
+// parsePositionals runs fs.Parse iteratively over args so flags and
+// positionals can be freely interleaved. Go's stdlib `flag` stops at
+// the first non-flag — so a natural invocation like
+//
+//	ahsir chat teacher "msg" --context X
+//
+// would parse zero flags (because `teacher` terminates the flag loop)
+// and leave `--context X` to be joined into the message body. That bug
+// has bitten us once already; the fix is this small loop: parse flags
+// from the front, strip one positional, repeat.
+//
+// fs.Parse can be called repeatedly with disjoint slices safely — each
+// call sets fs.args independently. Flag values from each call accumulate
+// onto the FlagSet's variables.
+func parsePositionals(fs *flag.FlagSet, args []string) []string {
+	var positionals []string
+	remaining := args
+	for len(remaining) > 0 {
+		if err := fs.Parse(remaining); err != nil {
+			os.Exit(2)
+		}
+		remaining = fs.Args()
+		if len(remaining) == 0 {
+			break
+		}
+		positionals = append(positionals, remaining[0])
+		remaining = remaining[1:]
+	}
+	return positionals
+}
+
 // newSchedulerClient builds an HTTP client against the given URL and
 // asks the scheduler for its configured chat timeout so the client's
 // own http.Client.Timeout matches what the operator put in ahsir.yaml.
@@ -90,20 +121,23 @@ func chatCmd(args []string) {
 		fmt.Fprintf(os.Stderr, "Usage: ahsir chat <agent> \"<message>\" [flags]\n")
 		fs.PrintDefaults()
 	}
-	if err := fs.Parse(args); err != nil {
-		os.Exit(2)
-	}
 
-	rest := fs.Args()
-	if len(rest) < 2 {
+	// Iterative parse so flags can appear BEFORE, BETWEEN, or AFTER the
+	// positional args. Go's stdlib `flag` stops at the first non-flag,
+	// which made the natural form `chat teacher "msg" --context X` silently
+	// drop the trailing `--context X` into the message string and leave
+	// contextID empty. Each loop iteration parses any leading --flags,
+	// strips one positional, repeats.
+	positionals := parsePositionals(fs, args)
+	if len(positionals) < 2 {
 		fs.Usage()
 		os.Exit(2)
 	}
-	agent := rest[0]
-	// Join remaining args with spaces — lets the user write either
+	agent := positionals[0]
+	// Join remaining tokens — lets the user write either
 	// `ahsir chat foo "long message"` (shell preserves quotes) or
-	// `ahsir chat foo this is also fine` (multiple tokens).
-	message := strings.Join(rest[1:], " ")
+	// `ahsir chat foo this is also fine` (multiple unquoted tokens).
+	message := strings.Join(positionals[1:], " ")
 
 	client := newSchedulerClient(*schedulerURL)
 	reply, err := client.ChatWithAgent(agent, *contextID, message)
@@ -124,17 +158,16 @@ func statusCmd(args []string) {
 		fmt.Fprintf(os.Stderr, "Usage: ahsir status <agent> <task-id> [flags]\n")
 		fs.PrintDefaults()
 	}
-	if err := fs.Parse(args); err != nil {
-		os.Exit(2)
-	}
 
-	rest := fs.Args()
-	if len(rest) != 2 {
+	// Iterative parse (see chatCmd for rationale) so --flag tokens can
+	// appear at any position relative to the agent and task-id positionals.
+	positionals := parsePositionals(fs, args)
+	if len(positionals) != 2 {
 		fs.Usage()
 		os.Exit(2)
 	}
-	agent := rest[0]
-	taskID := rest[1]
+	agent := positionals[0]
+	taskID := positionals[1]
 
 	client := newSchedulerClient(*schedulerURL)
 	task, err := client.GetTaskStatus(agent, taskID)
