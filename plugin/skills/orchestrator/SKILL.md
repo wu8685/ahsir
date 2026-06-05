@@ -1,11 +1,8 @@
 ---
-name: ahsir
-description: Dispatch tasks to specialist agents running under the ahsir multi-agent scheduler. Use when the user wants to delegate work to a named external agent (teacher, reviewer, researcher, etc.), parallelize sub-tasks across independent claude processes, maintain conversation memory with a specific agent across many turns, or explicitly mentions ahsir / agent pool / multi-agent / fan-out / delegate to <agent>.
-when_to_use: ahsir, multi-agent, agent pool, delegate, dispatch, fan-out, parallel sub-tasks, sub-agent, specialist agent, scheduler
-disable-model-invocation: false
+description: Dispatch tasks to specialist agents running under the ahsir multi-agent scheduler via the CLI (ahsir list / chat / status / ping). Use when the user wants to delegate work to a named external agent, parallelize sub-tasks across independent claude processes, maintain conversation memory with a specific agent across many turns, or explicitly mentions ahsir / agent pool / multi-agent / fan-out / delegate to <agent>.
 ---
 
-# ahsir — multi-agent collaboration via a local scheduler
+# /ahsir:orchestrator — multi-agent collaboration via a local scheduler
 
 ahsir runs a long-lived scheduler that hosts multiple "agent" processes (each backed by its own `claude` subprocess). You can hand sub-tasks off to those agents and get their reply back. Each agent has its own system prompt + skills + filesystem permissions, and conversations persist across calls via `contextId` so you can carry on a thread.
 
