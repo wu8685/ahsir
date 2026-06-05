@@ -3,6 +3,7 @@ package wrapper
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log"
 	"sync"
 	"time"
@@ -89,6 +90,60 @@ type SessionPool struct {
 	persistMu    sync.Mutex
 	persistState map[string]PersistedRecord
 	persist      Persistence
+
+	// Capacity controls. Set via SetCap (or left at zero values for
+	// unlimited). Consulted on every LookupOrCreate that would otherwise
+	// create or resume an entry — when there are already maxActive entries
+	// in the ACTIVE state, the policy decides whether to reject the
+	// request or evict the LRU one. EVICTED entries do NOT count toward
+	// the cap (they hold only a sessionID, no live process).
+	//
+	// maxActive == 0 means unlimited (the historical behaviour).
+	maxActive      int
+	overloadPolicy OverloadPolicy
+}
+
+// OverloadPolicy selects what SessionPool does when LookupOrCreate would
+// push the count of ACTIVE entries beyond maxActive.
+type OverloadPolicy int
+
+const (
+	// OverloadReject returns an error to the caller and keeps existing
+	// sessions untouched. Honest about the limit; the caller decides
+	// whether to retry, queue, or surface the failure.
+	OverloadReject OverloadPolicy = iota
+
+	// OverloadEvictLRU transitions the least-recently-used ACTIVE entry
+	// to EVICTED (kills its claude process, retains sessionID for
+	// possible later --resume), freeing a slot for the new entry. Useful
+	// when callers prefer "always succeed" semantics and can tolerate an
+	// older conversation being unceremoniously dropped to make room.
+	OverloadEvictLRU
+)
+
+func (p OverloadPolicy) String() string {
+	switch p {
+	case OverloadReject:
+		return "reject"
+	case OverloadEvictLRU:
+		return "evict-lru"
+	default:
+		return fmt.Sprintf("unknown(%d)", int(p))
+	}
+}
+
+// ParseOverloadPolicy converts the human-readable form used in agent-card.yaml
+// into the typed enum. Empty string returns the default (OverloadReject) —
+// makes the config field optional.
+func ParseOverloadPolicy(s string) (OverloadPolicy, error) {
+	switch s {
+	case "", "reject":
+		return OverloadReject, nil
+	case "evict-lru":
+		return OverloadEvictLRU, nil
+	default:
+		return OverloadReject, fmt.Errorf("unknown overload_policy %q (want reject or evict-lru)", s)
+	}
 }
 
 type entryState int
@@ -190,6 +245,28 @@ func (p *SessionPool) rehydrateLocked(records map[string]PersistedRecord) {
 	}
 }
 
+// SetCap configures the maximum number of ACTIVE entries this pool will
+// hold concurrently. max == 0 means unlimited (the default, preserving
+// the historical behaviour). policy decides what to do when the cap is
+// reached on a new LookupOrCreate:
+//
+//   - OverloadReject:    return an error to the caller; existing sessions
+//                        are untouched. Honest about the limit.
+//   - OverloadEvictLRU:  evict the least-recently-used ACTIVE entry so the
+//                        new one can take its slot. The victim's sessionID
+//                        is preserved (the EVICTED→Resume path still works
+//                        if the displaced contextID comes back).
+//
+// Safe to call at any point after construction — the cap is consulted on
+// every LookupOrCreate, not just at startup. EVICTED entries (no live
+// process) do not count toward the cap.
+func (p *SessionPool) SetCap(max int, policy OverloadPolicy) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.maxActive = max
+	p.overloadPolicy = policy
+}
+
 // setClock injects a fake clock for tests. Production uses time.Now.
 func (p *SessionPool) setClock(fn func() time.Time) {
 	p.mu.Lock()
@@ -237,6 +314,16 @@ func (p *SessionPool) LookupOrCreate(ctx context.Context, contextID string) (Ses
 		entry.session = nil
 		entry.state = entryEvicted
 		entry.evictedAt = now
+	}
+
+	// About to create or resume an entry — this is the first chance to
+	// enforce the cap, since hot-path hits above don't change the active
+	// count. Skip when maxActive==0 (unlimited, the historical default).
+	if p.maxActive > 0 {
+		if err := p.enforceCap(contextID); err != nil {
+			entry.mu.Unlock()
+			return nil, err
+		}
 	}
 
 	// Fresh entry (sessionID=="") or EVICTED (sessionID preserved).
@@ -294,6 +381,95 @@ func (p *SessionPool) LookupOrCreate(ctx context.Context, contextID string) (Ses
 		})
 	}
 	return s, nil
+}
+
+// enforceCap is called from LookupOrCreate when a fresh/EVICTED entry is
+// about to become ACTIVE — i.e. the only path that grows the count of
+// running claude processes. Counts current ACTIVE entries (excluding the
+// caller's own contextID, which doesn't yet hold a live session); if the
+// count is already at p.maxActive, applies the configured overload
+// policy:
+//
+//   - OverloadReject:    return an error; caller surfaces to user
+//   - OverloadEvictLRU:  transition the LRU ACTIVE entry to EVICTED so a
+//                        slot opens up, then return nil
+//
+// Held without p.mu; acquires it internally for the scan + (for LRU) for
+// the eviction. The caller holds the per-entry lock for `contextID` so
+// concurrent LookupOrCreate on a different contextID may race with the
+// counting, but worst case is a one-over-cap excursion under heavy
+// concurrency, which is acceptable for this kind of soft limit.
+func (p *SessionPool) enforceCap(contextID string) error {
+	p.mu.Lock()
+	var (
+		active      int
+		lruEntry    *pooledEntry
+		lruLastUsed time.Time
+	)
+	for k, e := range p.entries {
+		if k == contextID {
+			continue // self — about to become active, doesn't count yet
+		}
+		// Read state without grabbing entry.mu: state mutations are rare
+		// and any racy read either over- or under-counts by at most one,
+		// which the cap can tolerate (soft limit).
+		if e.state == entryActive && e.session != nil {
+			active++
+			if lruEntry == nil || e.lastUsed.Before(lruLastUsed) {
+				lruEntry = e
+				lruLastUsed = e.lastUsed
+			}
+		}
+	}
+	p.mu.Unlock()
+
+	if active < p.maxActive {
+		return nil
+	}
+
+	switch p.overloadPolicy {
+	case OverloadReject:
+		return fmt.Errorf("session pool at capacity (%d active); retry after a session idles out (idleTTL=%v) or raise pool.max_active", p.maxActive, p.idleTTL)
+	case OverloadEvictLRU:
+		if lruEntry == nil {
+			// Shouldn't happen — if active >= max > 0, at least one entry exists.
+			return nil
+		}
+		p.evictForCap(lruEntry)
+		return nil
+	default:
+		return fmt.Errorf("unknown overload policy %v", p.overloadPolicy)
+	}
+}
+
+// evictForCap transitions one ACTIVE entry to EVICTED to free a slot for
+// a new ACTIVE entry. Mirrors the ACTIVE→EVICTED transition in reapOnce
+// (close session, retain sessionID for later --resume, persist the new
+// state) but is triggered by capacity pressure rather than idle TTL.
+//
+// Caller must NOT be holding p.mu or victim.mu.
+func (p *SessionPool) evictForCap(victim *pooledEntry) {
+	now := p.clock()
+	victim.mu.Lock()
+	if victim.state != entryActive || victim.session == nil {
+		// Already evicted between our scan and now; nothing to do.
+		victim.mu.Unlock()
+		return
+	}
+	log.Printf("session pool: evicting LRU contextID=%s (lastUsed=%s) to free a cap slot", victim.contextID, victim.lastUsed.Format(time.RFC3339))
+	_ = victim.session.Close()
+	victim.session = nil
+	victim.state = entryEvicted
+	victim.evictedAt = now
+	rec := PersistedRecord{
+		SessionID: victim.sessionID,
+		State:     persistStateEvicted,
+		LastUsed:  victim.lastUsed,
+		EvictedAt: now,
+	}
+	contextID := victim.contextID
+	victim.mu.Unlock()
+	p.upsertPersist(contextID, rec)
 }
 
 // handleSessionIDKnown is the post-init callback wired into notifier-backed

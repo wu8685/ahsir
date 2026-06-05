@@ -23,6 +23,30 @@ type AgentCardConfig struct {
 	Runtime    RuntimeConfig    `yaml:"runtime"`
 	Network    NetworkConfig    `yaml:"network"`
 	Filesystem FilesystemConfig `yaml:"filesystem"`
+	Pool       PoolConfig       `yaml:"pool"`
+}
+
+// PoolConfig caps the agent's SessionPool. Optional — all fields default
+// to zero / empty which leaves the pool unbounded (the historical
+// behaviour). Wire via wrapper.SessionPool.SetCap in main.go after pool
+// construction.
+//
+// Example:
+//
+//	pool:
+//	  max_active: 50
+//	  overload_policy: reject  # or "evict-lru"
+type PoolConfig struct {
+	// MaxActive is the maximum number of ACTIVE entries (live claude
+	// processes) the pool will hold concurrently. 0 means unlimited.
+	// EVICTED entries (sessionID retained, process gone) don't count.
+	MaxActive int `yaml:"max_active"`
+
+	// OverloadPolicy is "reject" (default — error on cap) or
+	// "evict-lru" (kick out the LRU active entry). Validated via
+	// wrapper.ParseOverloadPolicy at startup so a typo doesn't silently
+	// fall back to the default.
+	OverloadPolicy string `yaml:"overload_policy"`
 }
 
 // ProviderConfig maps to a2a.AgentProvider.

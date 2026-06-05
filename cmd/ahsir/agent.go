@@ -128,6 +128,8 @@ func agentNewCmd(args []string) {
 	timeoutDur := fs.String("timeout", "300s", "Per-LLM-call timeout")
 	wsOverride := fs.String("workspace", "", "Workspace directory (default: ~/.ahsir/agents/<name>)")
 	skipStart := fs.Bool("skip-start", false, "Only scaffold files; don't ask the scheduler to start the agent")
+	poolMaxActive := fs.Int("pool-max-active", 0, "Cap on concurrent live claude processes for this agent (0 = unlimited)")
+	poolOverload := fs.String("pool-overload-policy", "", "Behaviour when pool is at capacity: reject (default) or evict-lru")
 
 	var skills repeatStringFlag
 	var allowFS repeatStringFlag
@@ -176,16 +178,18 @@ func agentNewCmd(args []string) {
 
 	// 1. Scaffold workspace + agent-card.yaml.
 	if err := writeAgentCard(workspace, agentCardScaffold{
-		Name:         name,
-		SystemPrompt: *prompt,
-		Skills:       skillConfigs,
-		Provider:     *provider,
-		BaseURL:      *baseURL,
-		APIKey:       *apiKeyEnv,
-		Model:        *model,
-		Timeout:      *timeoutDur,
-		FSEnabled:    len(allowFS.values) > 0,
-		FSPaths:      allowFS.values,
+		Name:               name,
+		SystemPrompt:       *prompt,
+		Skills:             skillConfigs,
+		Provider:           *provider,
+		BaseURL:            *baseURL,
+		APIKey:             *apiKeyEnv,
+		Model:              *model,
+		Timeout:            *timeoutDur,
+		FSEnabled:          len(allowFS.values) > 0,
+		FSPaths:            allowFS.values,
+		PoolMaxActive:      *poolMaxActive,
+		PoolOverloadPolicy: *poolOverload,
 	}); err != nil {
 		fatal("write agent card: %v", err)
 	}
@@ -353,16 +357,18 @@ type skillPair struct{ Name, Description string }
 // minimal-but-complete agent-card.yaml that the wrapper's card.go loader
 // will accept.
 type agentCardScaffold struct {
-	Name         string
-	SystemPrompt string
-	Skills       []skillPair
-	Provider     string
-	BaseURL      string
-	APIKey       string
-	Model        string
-	Timeout      string
-	FSEnabled    bool
-	FSPaths      []string
+	Name               string
+	SystemPrompt       string
+	Skills             []skillPair
+	Provider           string
+	BaseURL            string
+	APIKey             string
+	Model              string
+	Timeout            string
+	FSEnabled          bool
+	FSPaths            []string
+	PoolMaxActive      int
+	PoolOverloadPolicy string
 }
 
 // agentCardYAMLShape mirrors the fields wrapper.AgentCardConfig consumes.
@@ -380,6 +386,7 @@ type agentCardYAMLShape struct {
 	Runtime     yamlMap     `yaml:"runtime"`
 	Filesystem  yamlMap     `yaml:"filesystem"`
 	Network     yamlMap     `yaml:"network"`
+	Pool        yamlMap     `yaml:"pool,omitempty"`
 }
 
 // yamlMap is an alias for map[string]any used so each section can be
@@ -390,6 +397,14 @@ func writeAgentCard(workspace string, s agentCardScaffold) error {
 	dir := filepath.Join(workspace, ".a2a")
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return fmt.Errorf("mkdir %s: %w", dir, err)
+	}
+
+	poolSection := yamlMap{}
+	if s.PoolMaxActive > 0 {
+		poolSection["max_active"] = s.PoolMaxActive
+	}
+	if s.PoolOverloadPolicy != "" {
+		poolSection["overload_policy"] = s.PoolOverloadPolicy
 	}
 
 	card := agentCardYAMLShape{
@@ -416,6 +431,7 @@ func writeAgentCard(workspace string, s agentCardScaffold) error {
 			"allowed_paths": s.FSPaths,
 		},
 		Network: yamlMap{"bind": "127.0.0.1"},
+		Pool:    poolSection,
 	}
 
 	out := &bytes.Buffer{}

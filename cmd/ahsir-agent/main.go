@@ -85,6 +85,20 @@ func main() {
 		pool := wrapper.NewSessionPoolWithPersistence(factory, 30*time.Minute, 24*time.Hour, persist)
 		defer pool.Stop()
 
+		// Apply pool capacity from agent-card.yaml's `pool:` block if set.
+		// Default (max_active=0) keeps the pool unbounded — historical
+		// behaviour. Set max_active to cap concurrent live claude
+		// subprocesses for this agent; overload_policy decides whether to
+		// reject new requests or evict the LRU when at cap.
+		if cfg.Pool.MaxActive > 0 {
+			policy, err := wrapper.ParseOverloadPolicy(cfg.Pool.OverloadPolicy)
+			if err != nil {
+				log.Fatalf("agent %q: %v", cfg.Name, err)
+			}
+			pool.SetCap(cfg.Pool.MaxActive, policy)
+			log.Printf("Pool cap: max_active=%d policy=%s", cfg.Pool.MaxActive, policy)
+		}
+
 		w.SetupExecutor(pool.LookupOrCreate, listAgents, callAgent, maxCalls, basePrompt)
 		log.Printf("Executor wired: stream-json SessionPool (%s %v, timeout=%s, persist=%s)", sessionCfg.Command, sessionCfg.Args, sessionCfg.Timeout, persistPath)
 	}

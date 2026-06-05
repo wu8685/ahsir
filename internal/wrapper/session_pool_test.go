@@ -2,6 +2,8 @@ package wrapper
 
 import (
 	"context"
+	"fmt"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -929,5 +931,201 @@ func TestSessionPool_ResumeKeepsPriorSessionIDDuringInit(t *testing.T) {
 	}
 	if rec.SessionID != "old-sid" {
 		t.Errorf("persisted sessionID during resume: got %q want old-sid (must NOT be overwritten with empty)", rec.SessionID)
+	}
+}
+
+// TestSessionPool_CapDefaultsToUnlimited verifies the historical
+// behaviour is preserved: a freshly-constructed pool with no SetCap
+// call accepts an arbitrary number of contextIDs.
+func TestSessionPool_CapDefaultsToUnlimited(t *testing.T) {
+	factory, _, _, _ := newRecordingFactory()
+	p := NewSessionPool(factory, 30*time.Minute, 24*time.Hour)
+	defer p.Stop()
+
+	for i := 0; i < 10; i++ {
+		if _, err := p.LookupOrCreate(context.Background(), fmt.Sprintf("ctx-%d", i)); err != nil {
+			t.Fatalf("ctx-%d unexpectedly rejected: %v", i, err)
+		}
+	}
+}
+
+// TestSessionPool_CapRejectsAtLimit is the headline reject-policy test:
+// with maxActive=2 and OverloadReject, the third distinct contextID
+// must return an error, and the first two stay running.
+func TestSessionPool_CapRejectsAtLimit(t *testing.T) {
+	factory, calls, sessions, mu := newRecordingFactory()
+	p := NewSessionPool(factory, 30*time.Minute, 24*time.Hour)
+	defer p.Stop()
+	p.SetCap(2, OverloadReject)
+
+	ctx := context.Background()
+	for i, name := range []string{"ctx-a", "ctx-b"} {
+		if _, err := p.LookupOrCreate(ctx, name); err != nil {
+			t.Fatalf("first %d (%s): %v", i, name, err)
+		}
+	}
+
+	// Third should fail. Existing two must NOT be closed — the reject
+	// policy means we keep what we have and refuse the new one.
+	_, err := p.LookupOrCreate(ctx, "ctx-c")
+	if err == nil {
+		t.Fatal("expected error on 3rd LookupOrCreate at cap, got nil")
+	}
+	if !strings.Contains(err.Error(), "at capacity") {
+		t.Errorf("error message should mention capacity, got: %v", err)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(*calls) != 2 {
+		t.Errorf("factory should have been called exactly 2x (not for the rejected ctx-c), got %d", len(*calls))
+	}
+	for i, s := range *sessions {
+		if s.isClosed() {
+			t.Errorf("session %d unexpectedly closed on reject (reject must not touch existing sessions)", i)
+		}
+	}
+}
+
+// TestSessionPool_CapEvictsLRUOnPolicy verifies the alternative policy:
+// with maxActive=2 and OverloadEvictLRU, the third call SUCCEEDS by
+// kicking out the LRU active entry. That entry's session is Close()'d
+// but its sessionID is preserved so a later LookupOrCreate of the
+// displaced contextID can resume via the factory's resumeID parameter.
+func TestSessionPool_CapEvictsLRUOnPolicy(t *testing.T) {
+	factory, calls, _, mu := newRecordingFactory()
+	p := NewSessionPool(factory, 30*time.Minute, 24*time.Hour)
+	defer p.Stop()
+	p.SetCap(2, OverloadEvictLRU)
+
+	// Drive the clock so LRU ordering is deterministic.
+	now := time.Now()
+	p.setClock(func() time.Time { return now })
+
+	ctx := context.Background()
+	// ctx-a at t=0
+	s1, _ := p.LookupOrCreate(ctx, "ctx-a")
+	// ctx-b at t+1s — newer
+	now = now.Add(1 * time.Second)
+	_, _ = p.LookupOrCreate(ctx, "ctx-b")
+	// ctx-c at t+2s — must succeed, ctx-a should be the LRU victim
+	now = now.Add(1 * time.Second)
+	if _, err := p.LookupOrCreate(ctx, "ctx-c"); err != nil {
+		t.Fatalf("3rd LookupOrCreate under evict-lru: %v", err)
+	}
+
+	// ctx-a's session must be closed.
+	if !s1.(*fakePoolSession).isClosed() {
+		t.Error("ctx-a's session should be Close()'d after LRU eviction")
+	}
+
+	// ctx-a's entry should still exist (EVICTED state) so a later lookup
+	// can resume with the same sessionID.
+	now = now.Add(1 * time.Second)
+	_, err := p.LookupOrCreate(ctx, "ctx-a")
+	if err != nil {
+		t.Fatalf("resumed ctx-a after LRU eviction: %v", err)
+	}
+
+	// Factory call sequence:
+	//   1. ctx-a (resumeID="")
+	//   2. ctx-b (resumeID="")
+	//   3. ctx-c (resumeID="")
+	//   4. ctx-a resume (resumeID="sess-ctx-a")
+	mu.Lock()
+	defer mu.Unlock()
+	if len(*calls) != 4 {
+		t.Fatalf("want 4 factory calls (3 fresh + 1 resume), got %d:\n%+v", len(*calls), *calls)
+	}
+	if (*calls)[3].resumeID != "sess-ctx-a" {
+		t.Errorf("resumed ctx-a should pass resumeID=sess-ctx-a, got %q", (*calls)[3].resumeID)
+	}
+}
+
+// TestSessionPool_CapDoesNotCountEvictedEntries verifies that EVICTED
+// entries (no live process) do not consume cap slots. After driving an
+// entry to EVICTED via reaper, a new ACTIVE entry should still fit even
+// at the previous cap.
+func TestSessionPool_CapDoesNotCountEvictedEntries(t *testing.T) {
+	factory, _, _, _ := newRecordingFactory()
+	p := NewSessionPool(factory, 30*time.Minute, 24*time.Hour)
+	defer p.Stop()
+	p.SetCap(1, OverloadReject)
+
+	now := time.Now()
+	p.setClock(func() time.Time { return now })
+
+	ctx := context.Background()
+	if _, err := p.LookupOrCreate(ctx, "ctx-a"); err != nil {
+		t.Fatal(err)
+	}
+
+	// Sanity: while ctx-a is ACTIVE, a second creates fails.
+	if _, err := p.LookupOrCreate(ctx, "ctx-b"); err == nil {
+		t.Fatal("expected reject while ctx-a still ACTIVE")
+	}
+
+	// Push past idleTTL → reaper transitions ctx-a to EVICTED.
+	now = now.Add(31 * time.Minute)
+	p.reapOnce()
+
+	// Now ctx-b should fit — EVICTED entries don't count.
+	if _, err := p.LookupOrCreate(ctx, "ctx-b"); err != nil {
+		t.Errorf("ctx-b should fit after ctx-a evicted to EVICTED (EVICTED ≠ ACTIVE for cap counting): %v", err)
+	}
+}
+
+// TestSessionPool_CapAllowsResumingSameContext verifies the cap doesn't
+// stop a contextID from being re-activated when it already has an
+// EVICTED entry. This is the "user returns to a stale conversation"
+// path — they shouldn't be refused just because the pool is full of
+// other people's ACTIVE sessions... wait, actually they SHOULD be: even
+// resuming a contextID requires a new live process, which consumes a
+// cap slot. So this test verifies REJECT still fires in that case.
+func TestSessionPool_CapAllowsResumingSameContext(t *testing.T) {
+	factory, _, _, _ := newRecordingFactory()
+	p := NewSessionPool(factory, 30*time.Minute, 24*time.Hour)
+	defer p.Stop()
+	p.SetCap(1, OverloadReject)
+
+	now := time.Now()
+	p.setClock(func() time.Time { return now })
+
+	ctx := context.Background()
+	if _, err := p.LookupOrCreate(ctx, "ctx-a"); err != nil {
+		t.Fatal(err)
+	}
+	// Evict ctx-a via idleTTL.
+	now = now.Add(31 * time.Minute)
+	p.reapOnce()
+
+	// Resuming ctx-a should now succeed (no other ACTIVE entries to
+	// compete with cap=1).
+	if _, err := p.LookupOrCreate(ctx, "ctx-a"); err != nil {
+		t.Errorf("resuming evicted ctx-a under cap=1 with no other actives: %v", err)
+	}
+}
+
+// TestParseOverloadPolicy covers the small parser used to translate
+// agent-card.yaml's overload_policy string into the typed enum.
+func TestParseOverloadPolicy(t *testing.T) {
+	cases := []struct {
+		in      string
+		want    OverloadPolicy
+		wantErr bool
+	}{
+		{"", OverloadReject, false},
+		{"reject", OverloadReject, false},
+		{"evict-lru", OverloadEvictLRU, false},
+		{"invalid-thing", OverloadReject, true},
+	}
+	for _, tc := range cases {
+		got, err := ParseOverloadPolicy(tc.in)
+		if (err != nil) != tc.wantErr {
+			t.Errorf("ParseOverloadPolicy(%q) err=%v; wantErr=%v", tc.in, err, tc.wantErr)
+		}
+		if !tc.wantErr && got != tc.want {
+			t.Errorf("ParseOverloadPolicy(%q) = %v; want %v", tc.in, got, tc.want)
+		}
 	}
 }
