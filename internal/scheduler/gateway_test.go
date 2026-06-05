@@ -193,7 +193,7 @@ func TestExampleFlow_OptionB_SchedulerGateway(t *testing.T) {
 
 // TestGatewayChat_AgentNotFound verifies the gateway distinguishes "agent
 // missing from registry" (404) from "agent reachable but failed" (502).
-// This split exists so the MCP shim can surface a useful error to the user.
+// This split exists so CLI callers can surface a useful error to the user.
 func TestGatewayChat_AgentNotFound(t *testing.T) {
 	_, gwURL := newTestScheduler(t)
 
@@ -476,4 +476,3 @@ func TestGatewayDoubleEntry(t *testing.T) {
 		}
 	})
 }
-

@@ -2,8 +2,8 @@
 
 `ahsir` is a small Go scheduler that runs multiple LLM-backed agents as local
 processes, lets them talk to each other over the
-[A2A protocol](https://google.github.io/A2A/), and exposes the whole fleet to
-external tools (e.g. Claude Code) via MCP.
+[A2A protocol](https://google.github.io/A2A/), and lets Claude Code drive the
+fleet through the bundled plugin skill plus the `ahsir` CLI.
 
 Each agent is an `ahsir-agent` process with an A2A JSON-RPC HTTP endpoint and
 a provider-backed `Session` implementation. Today the production session
@@ -14,20 +14,20 @@ backends are:
 - `CodexSession`: one `codex exec --json` subprocess per turn, resuming by
   Codex `thread_id` for the same A2A `contextId`.
 
-The scheduler owns the agent registry, a gateway that forwards chat /
-task-status requests, and an MCP stdio shim that lets your local Claude Code
-drive the fleet without speaking A2A directly.
+The scheduler owns the agent registry and a gateway that forwards chat /
+task-status requests. The Claude Code plugin teaches Claude when to use ahsir
+and how to call `ahsir list`, `ahsir chat`, and related CLI commands.
 
 ## Architecture
 
 ```
-                    ┌─────────────────────────────────────────────┐
-   Claude Code ───► │ ahsir mcp                                  │
-   (.mcp.json)      │ MCP stdio tools → scheduler HTTP            │
-                    └─────────────────┬───────────────────────────┘
-                                      │ HTTP
-   curl / ahsir chat / tests ─────────┘
-                                      ▼
+                   ┌─────────────────────────────────────────────┐
+  Claude Code ───► │ ahsir plugin skill                         │
+  + Bash tool      │ chooses ahsir CLI commands                  │
+                   └─────────────────┬───────────────────────────┘
+                                     │ ahsir list/chat/status
+  curl / tests ──────────────────────┘
+                                     ▼
                     ┌─────────────────────────────────────────────┐
                     │ ahsir start  (scheduler)                    │
                     │                                             │
@@ -59,12 +59,12 @@ drive the fleet without speaking A2A directly.
 
 | Path | Purpose |
 |---|---|
-| `cmd/ahsir/` | Scheduler + MCP shim CLI (`ahsir start`, `ahsir mcp`) |
+| `cmd/ahsir/` | Scheduler + user CLI (`ahsir start`, `ahsir list/chat/status/ping`) |
 | `cmd/ahsir-agent/` | Per-agent process; loads agent-card, hosts A2A endpoint, drives the LLM CLI |
 | `internal/scheduler/` | Config, agent lifecycle, registry, HTTP gateway |
 | `internal/registry/` | Agent registration / heartbeat / lookup |
 | `internal/wrapper/` | A2A server/client, executor, `SessionPool`, `ClaudeSession`, `CodexSession`, persistence + HA |
-| `internal/mcp/` | MCP stdio server + scheduler HTTP client |
+| `internal/schedulerclient/` | HTTP client used by the CLI to talk to the scheduler gateway |
 | `example/` | Working two-agent setup (student delegates to teacher) |
 | `docs/superpowers/` | Specs, plans, and design notes |
 
@@ -83,7 +83,7 @@ export MODEL_API_KEY=<your-deepseek-key>
 ```
 
 Then either curl the agents directly, hit the scheduler gateway, or drive the
-fleet from your local Claude Code via the bundled `.mcp.json`. Full hands-on
+fleet from Claude Code through the plugin skill and `ahsir chat`. Full hands-on
 instructions live in [`example/README.md`](example/README.md).
 
 ## Install as a Claude Code plugin
@@ -149,7 +149,7 @@ For multi-platform release builds: `make plugin` cross-compiles darwin-arm64, da
 
 Once the plugin is loaded, two things happen automatically:
 
-1. **The skill auto-loads** — Claude Code reads `plugin/skills/ahsir/SKILL.md` and consults its `description` whenever you describe a task. When the description matches (you ask about delegation, multi-agent, parallel sub-tasks, specialist agents, or mention "ahsir" explicitly), Claude proposes using it.
+1. **The skill auto-loads** — Claude Code reads `plugin/skills/orchestrator/SKILL.md` and consults its `description` whenever you describe a task. When the description matches (you ask about delegation, multi-agent, parallel sub-tasks, specialist agents, or mention "ahsir" explicitly), Claude proposes using it.
 
 2. **The CLI is on Claude's Bash path** (once you set PATH per step 4). Claude can shell out:
 
@@ -207,8 +207,8 @@ registry:
 
 # Outer-envelope timeouts. Optional — defaults shown.
 # `chat` MUST be >= the largest agent's runtime.timeout (in agent-card.yaml).
-# The MCP shim fetches `chat` from the scheduler at startup and uses chat+1m
-# as its own http.Client.Timeout, so this is the single knob you tune.
+# The CLI fetches `chat` from the scheduler and uses chat+1m as its own
+# http.Client.Timeout, so this is the single knob you tune.
 timeouts:
   chat: 10m
   task_status: 30s
@@ -279,9 +279,9 @@ a Claude/DeepSeek-backed student delegates to a Codex-backed teacher over A2A.
 There are three layers of deadlines; the invariant is **outer ≥ inner**.
 
 ```
-MCP shim http.Client.Timeout  =  chat + 1m   ← fetched from /config/timeouts
-gateway ctx                    =  chat        ← timeouts.chat in ahsir.yaml
-agent runtime.timeout          =  300s        ← per agent-card.yaml
+CLI http.Client.Timeout  =  chat + 1m   ← fetched from /config/timeouts
+gateway ctx              =  chat        ← timeouts.chat in ahsir.yaml
+agent runtime.timeout    =  300s        ← per agent-card.yaml
 ```
 
 Tune the outer two via `timeouts:` in `ahsir.yaml`. The per-agent subprocess
@@ -341,8 +341,8 @@ Useful greps:
 | `[teacher]` / `[student]` | Per-agent request/log filtering |
 | `[X → Y] A2A_CALL` | Cross-agent delegations |
 
-If you suspect the time is being spent outside the LLM (in scheduler / MCP
-shim / serialization), compare the elapsed sum across all agent log lines
+If you suspect the time is being spent outside the LLM (in scheduler /
+serialization), compare the elapsed sum across all agent log lines
 against your end-to-end latency. A large gap means the overhead is in the
 chain, not in the model.
 
@@ -356,7 +356,7 @@ go test ./...
 
 Includes:
 
-- Unit tests for registry, wrapper, scheduler, MCP server.
+- Unit tests for registry, wrapper, scheduler, and CLI command wiring.
 - An end-to-end gateway test (`internal/scheduler/gateway_test.go`) that spins
   up a real A2A server with a mock executor and exercises both the direct A2A
   path and the scheduler-gateway path.

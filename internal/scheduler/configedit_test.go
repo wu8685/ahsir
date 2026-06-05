@@ -14,8 +14,6 @@ registry:
   port: 9800
   heartbeat_interval: 10s
 
-mcp: {}
-
 timeouts:
   chat: 10m
   task_status: 30s
@@ -94,8 +92,6 @@ func TestAddAgentToConfig_PreservesExisting(t *testing.T) {
 registry:
   host: "127.0.0.1"
   port: 9800
-
-mcp: {}
 timeouts: { chat: 10m, task_status: 30s }
 port_range: { start: 9801, end: 9810 }
 `
@@ -145,8 +141,6 @@ func TestRemoveAgentFromConfig_DropsNamed(t *testing.T) {
 registry:
   host: "127.0.0.1"
   port: 9800
-
-mcp: {}
 timeouts: { chat: 10m, task_status: 30s }
 port_range: { start: 9801, end: 9810 }
 `

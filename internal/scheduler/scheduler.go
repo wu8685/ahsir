@@ -255,12 +255,12 @@ func (s *Scheduler) Stop() {
 	s.running = false
 }
 
-// ListAgents returns all registered agents (implements mcp.AgentRouter).
+// ListAgents returns all registered agents.
 func (s *Scheduler) ListAgents() []*a2a.AgentCard {
 	return s.registry.List()
 }
 
-// ChatWithAgent sends a message to an agent (implements mcp.AgentRouter).
+// ChatWithAgent sends a message to an agent.
 //
 // The forwarding timeout comes from cfg.Timeouts.Chat (default 10m). It MUST
 // be >= every agent's runtime.timeout (configured per agent-card.yaml),
@@ -283,13 +283,13 @@ func (s *Scheduler) ChatWithAgent(agentName, contextID, message string) (string,
 	}
 
 	// contextID is propagated when the caller wants session reuse across
-	// multiple chats (e.g. CLI users with --context, or MCP tool callers
-	// passing a contextId). Empty string means each call is isolated —
+	// multiple chats (e.g. CLI users with --context). Empty string means each
+	// call is isolated —
 	// the agent's executor will auto-generate a fresh contextID for the task.
 	return client.SendMessage(ctx, contextID, message)
 }
 
-// GetTaskStatus gets a task's status (implements mcp.AgentRouter).
+// GetTaskStatus gets a task's status.
 //
 // Uses cfg.Timeouts.TaskStatus (default 30s) — this is a quick task-store
 // read with no LLM round-trip, so it can be tight.

@@ -300,8 +300,6 @@ registry:
   heartbeat_interval: 10s
   heartbeat_timeout: 30s
 
-mcp: {}
-
 timeouts:
   chat: 10m
   task_status: 30s

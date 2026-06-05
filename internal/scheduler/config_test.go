@@ -24,8 +24,6 @@ registry:
   heartbeat_interval: 10s
   heartbeat_timeout: 30s
 
-mcp: {}
-
 port_range:
   start: 9801
   end: 9900

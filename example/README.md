@@ -6,7 +6,7 @@ Three self-contained worked examples, increasing in complexity. Pick where to st
 |---|---|---|
 | [`simple/`](./simple/) | The smallest possible end-to-end path: one agent, one curl, one answer | **Start here** to verify your build + API key |
 | [`session-reuse/`](./session-reuse/) | Conversation memory across multiple curls via stable `contextId` — in-process reuse, cross-restart resume, and self-healing on SIGKILL | Next, to see what `SessionPool` actually does |
-| [`multi-agent/`](./multi-agent/) | Two-agent setup (Student delegates to Teacher via `---A2A_CALL---`), filesystem access, scheduler gateway, MCP integration | Last, for the full multi-agent + gateway story |
+| [`multi-agent/`](./multi-agent/) | Two-agent setup (Student delegates to Teacher via `---A2A_CALL---`), filesystem access, scheduler gateway, Claude Code plugin/CLI integration | Last, for the full multi-agent + gateway story |
 
 Each subdirectory is self-contained: own `ahsir.yaml`, agent card(s), and walkthrough README. Pick one and read its README from top to bottom — they don't share state, can be run independently, and use the same default ports (only run one at a time).
 

@@ -23,8 +23,8 @@ import (
 // builds where GODEBUG defaults to httpmuxgo121=1 (Go 1.21 ServeMux behavior)
 // treat "{name}" as a literal segment.
 type gatewayHandler struct {
-	sch       *Scheduler
-	registry  http.Handler // delegate for non-gateway routes
+	sch      *Scheduler
+	registry http.Handler // delegate for non-gateway routes
 }
 
 func newGatewayHandler(sch *Scheduler, registry http.Handler) *gatewayHandler {
@@ -48,7 +48,7 @@ type chatResponse struct {
 }
 
 func (g *gatewayHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	// /config/timeouts: clients (e.g. the MCP shim) fetch this on startup
+	// /config/timeouts: CLI clients fetch this on startup
 	// to align their own outer-envelope http.Client.Timeout with the
 	// scheduler's gateway timeout, so timeout settings live in only one
 	// place (ahsir.yaml).
@@ -120,8 +120,7 @@ func (g *gatewayHandler) handleChat(w http.ResponseWriter, r *http.Request, name
 	reply, err := g.sch.ChatWithAgent(name, req.ContextID, req.Message)
 	if err != nil {
 		// Distinguish "agent not found" from generic upstream failures so
-		// callers (e.g. MCP shim) can surface a useful error instead of a
-		// raw 500.
+		// callers can surface a useful error instead of a raw 500.
 		if _, ok := g.sch.registry.Get(name); !ok {
 			writeJSONError(w, http.StatusNotFound, err.Error())
 			return

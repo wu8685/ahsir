@@ -12,12 +12,10 @@ registry:
   heartbeat_interval: 10s
   heartbeat_timeout: 30s
 
-mcp: {}
-
 # Outer-envelope timeouts. Optional — defaults shown.
 # `chat` MUST be >= the largest agent's runtime.timeout (in agent-card.yaml).
-# The MCP shim fetches `chat` from the scheduler at startup and uses chat+1m
-# as its own http.Client.Timeout, so this is the single knob you tune.
+# The CLI fetches `chat` from the scheduler and uses chat+1m as its own
+# http.Client.Timeout, so this is the single knob you tune.
 timeouts:
   chat: 10m
   task_status: 30s

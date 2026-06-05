@@ -24,7 +24,6 @@ const (
 type Config struct {
 	Agents    []AgentConfig  `yaml:"agents"`
 	Registry  RegistryConfig `yaml:"registry"`
-	MCP       MCPConfig      `yaml:"mcp"`
 	PortRange PortRange      `yaml:"port_range"`
 	Timeouts  TimeoutsConfig `yaml:"timeouts"`
 
@@ -84,9 +83,6 @@ type RegistryConfig struct {
 	HeartbeatInterval string `yaml:"heartbeat_interval"`
 	HeartbeatTimeout  string `yaml:"heartbeat_timeout"`
 }
-
-// MCPConfig configures the MCP server.
-type MCPConfig struct{}
 
 // PortRange defines the auto-allocation port range.
 type PortRange struct {

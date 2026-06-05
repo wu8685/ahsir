@@ -122,7 +122,7 @@ func main() {
 // Filesystem access is granted to the underlying CLI (e.g. `claude -p`) by
 // emitting `--add-dir=<abs-path>` per entry in fs.AllowedPaths and a
 // read-only `--allowedTools=...` whitelist. This relies on Claude Code's
-// built-in Read/LS/Glob/Grep tools — no custom MCP server is involved.
+// built-in Read/LS/Glob/Grep tools — no custom tool server is involved.
 //
 // Convention: when adding any new flag to args here, ALWAYS use the
 // `--flag=value` form, never `--flag value`. Several Claude Code flags

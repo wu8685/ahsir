@@ -2,10 +2,9 @@ package main
 
 // CLI subcommands that talk to a running scheduler over its HTTP gateway.
 //
-// All of these reuse mcp.SchedulerHTTPClient — the same code path that
-// powers the MCP shim. The only difference here is output formatting:
-// these commands are designed for human eyes (and, by extension, Claude
-// Code's Bash tool, which reads stdout as plain text).
+// All of these use schedulerclient.SchedulerHTTPClient and are designed for
+// human eyes (and, by extension, Claude Code's Bash tool, which reads stdout
+// as plain text).
 //
 // Output conventions:
 //   - `chat`:   pure reply text on stdout, nothing else. Composable.
@@ -16,7 +15,7 @@ package main
 //
 // Every command shares a --scheduler flag (default http://127.0.0.1:9800).
 // Anything else (timeouts, etc.) is fetched from the scheduler itself via
-// the same /config/timeouts endpoint the MCP shim uses.
+// the /config/timeouts endpoint.
 
 import (
 	"encoding/json"
@@ -25,7 +24,7 @@ import (
 	"os"
 	"strings"
 
-	"github.com/wu8685/ahsir/internal/mcp"
+	"github.com/wu8685/ahsir/internal/schedulerclient"
 )
 
 const defaultSchedulerURL = "http://127.0.0.1:9800"
@@ -66,8 +65,8 @@ func parsePositionals(fs *flag.FlagSet, args []string) []string {
 // own http.Client.Timeout matches what the operator put in ahsir.yaml.
 // Falls back to the client's default if the scheduler isn't reachable
 // (the next real call will fail with a clearer error).
-func newSchedulerClient(schedulerURL string) *mcp.SchedulerHTTPClient {
-	c := mcp.NewSchedulerHTTPClient(schedulerURL)
+func newSchedulerClient(schedulerURL string) *schedulerclient.SchedulerHTTPClient {
+	c := schedulerclient.NewSchedulerHTTPClient(schedulerURL)
 	_, _ = c.RefreshTimeout()
 	return c
 }

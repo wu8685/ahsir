@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bufio"
 	"context"
 	"flag"
 	"fmt"
@@ -11,7 +10,6 @@ import (
 	"path/filepath"
 	"syscall"
 
-	"github.com/wu8685/ahsir/internal/mcp"
 	"github.com/wu8685/ahsir/internal/scheduler"
 )
 
@@ -35,8 +33,6 @@ func main() {
 		pingCmd(os.Args[2:])
 	case "agent":
 		agentCmd(os.Args[2:])
-	case "mcp":
-		mcpCmd(os.Args[2:])
 	case "stop":
 		fmt.Println("Stopping scheduler...")
 	default:
@@ -86,9 +82,6 @@ func usage() {
 	fmt.Println("  agent new <name> [flags]             Scaffold + start an agent")
 	fmt.Println("  agent delete <name>                  Stop a running agent (files preserved)")
 	fmt.Println("  agent list-configs                   Show agents in ahsir.yaml")
-	fmt.Println()
-	fmt.Println("Integration:")
-	fmt.Println("  mcp --scheduler <url>                Run an MCP stdio shim (used by Claude Code .mcp.json)")
 }
 
 func startCmd(args []string) {
@@ -132,55 +125,4 @@ func startCmd(args []string) {
 	log.Println("Signal received, shutting down...")
 	cancel()
 	sch.Stop()
-}
-
-// mcpCmd runs the MCP stdio shim. It does not spawn agents, does not load
-// ahsir.yaml, does not embed a scheduler — it is purely a protocol adapter
-// that forwards each tools/call to a running scheduler over HTTP.
-//
-// MCP clients (like Claude Code reading .mcp.json) launch us with a piped
-// stdin; we read JSON-RPC messages line-by-line and write responses to
-// stdout. Logs go to stderr so they don't corrupt the MCP wire.
-func mcpCmd(args []string) {
-	fs := flag.NewFlagSet("mcp", flag.ExitOnError)
-	schedulerURL := fs.String("scheduler", "http://127.0.0.1:9800", "Scheduler base URL (the same host:port that ahsir start binds for its registry/gateway)")
-	if err := fs.Parse(args); err != nil {
-		os.Exit(1)
-	}
-
-	client := mcp.NewSchedulerHTTPClient(*schedulerURL)
-	server := mcp.NewServer(client)
-
-	scanner := bufio.NewScanner(os.Stdin)
-	scanner.Buffer(make([]byte, 0, 1024*1024), 1024*1024)
-
-	log.SetOutput(os.Stderr)
-	// Pull the gateway-side chat timeout from the scheduler so the shim's
-	// own http.Client.Timeout (the outermost cap) matches what the operator
-	// configured in ahsir.yaml — keeping timeout config to a single place.
-	if effective, err := client.RefreshTimeout(); err != nil {
-		log.Printf("ahsir mcp shim: timeout sync failed, using default %v: %v", effective, err)
-	} else {
-		log.Printf("ahsir mcp shim: client timeout aligned to %v (scheduler chat + 1m buffer)", effective)
-	}
-	log.Printf("ahsir mcp shim ready (scheduler=%s); reading JSON-RPC from stdin", *schedulerURL)
-
-	for scanner.Scan() {
-		data := scanner.Bytes()
-		if len(data) == 0 {
-			continue
-		}
-		resp, err := server.HandleMessage(data)
-		if err != nil {
-			log.Printf("MCP error: %v", err)
-			continue
-		}
-		if resp != nil {
-			os.Stdout.Write(resp)
-			os.Stdout.Write([]byte("\n"))
-		}
-	}
-	if err := scanner.Err(); err != nil {
-		log.Printf("stdin scanner error: %v", err)
-	}
 }

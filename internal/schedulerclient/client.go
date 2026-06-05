@@ -1,4 +1,4 @@
-package mcp
+package schedulerclient
 
 import (
 	"bufio"
@@ -16,21 +16,20 @@ import (
 	"github.com/a2aproject/a2a-go/a2a"
 )
 
-// SchedulerHTTPClient is a thin HTTP client that satisfies AgentRouter by
-// calling the scheduler's gateway endpoints. It is the implementation used
-// by `ahsir mcp` so the stdio MCP shim never spawns or directly contacts
-// agents — every request goes through the long-running scheduler process.
+// SchedulerHTTPClient is a thin HTTP client for the scheduler's gateway
+// endpoints. It powers the user-facing CLI (`ahsir list/chat/status/ping`) so
+// Claude Code skills can drive a running scheduler through shell commands.
 type SchedulerHTTPClient struct {
 	baseURL string
 	httpc   *http.Client
 }
 
-// defaultShimTimeout is the http.Client.Timeout used when the scheduler
+// defaultClientTimeout is the http.Client.Timeout used when the scheduler
 // hasn't been queried for its own configured value yet, or returned
 // something unparseable. It must be >= the scheduler's default chat
-// timeout (10m); we add a small buffer so the shim doesn't kill a request
+// timeout (10m); we add a small buffer so the client doesn't kill a request
 // the scheduler is still trying to fulfill.
-const defaultShimTimeout = 11 * time.Minute
+const defaultClientTimeout = 11 * time.Minute
 
 // NewSchedulerHTTPClient builds a client targeting the scheduler at baseURL
 // (e.g. "http://127.0.0.1:9800"). The http.Client timeout is set to a safe
@@ -41,17 +40,15 @@ const defaultShimTimeout = 11 * time.Minute
 func NewSchedulerHTTPClient(baseURL string) *SchedulerHTTPClient {
 	return &SchedulerHTTPClient{
 		baseURL: strings.TrimSuffix(baseURL, "/"),
-		httpc:   &http.Client{Timeout: defaultShimTimeout},
+		httpc:   &http.Client{Timeout: defaultClientTimeout},
 	}
 }
 
 // RefreshTimeout asks the scheduler for its configured gateway chat timeout
 // and bumps the client's http.Client.Timeout to that value plus a 1-minute
-// buffer (so the shim never kills a request the scheduler would still
-// honour). Called once at MCP shim startup.
+// buffer (so the CLI never kills a request the scheduler would still honour).
 //
-// Best-effort: any error leaves the existing default in place. The shim
-// logs to stderr so operators see when the alignment failed.
+// Best-effort: any error leaves the existing default in place.
 func (c *SchedulerHTTPClient) RefreshTimeout() (time.Duration, error) {
 	resp, err := c.httpc.Get(c.baseURL + "/config/timeouts")
 	if err != nil {
@@ -76,9 +73,8 @@ func (c *SchedulerHTTPClient) RefreshTimeout() (time.Duration, error) {
 }
 
 // ListAgents returns the cards registered with the scheduler. On any error it
-// returns nil — keeping the AgentRouter signature simple at the cost of
-// hiding diagnostic detail. The MCP layer surfaces the empty list as "no
-// agents available".
+// returns nil so CLI callers can treat an unreachable scheduler the same as an
+// empty registry for display purposes.
 func (c *SchedulerHTTPClient) ListAgents() []*a2a.AgentCard {
 	resp, err := c.httpc.Get(c.baseURL + "/agents")
 	if err != nil {
@@ -218,8 +214,7 @@ func streamAgentSSE(httpc *http.Client, agentURL, contextID, message string, onD
 	// Build a request that won't be killed by the outer http.Client.Timeout.
 	// SSE streams legitimately live for minutes — relying on Timeout would
 	// truncate every reply. Use a context.Background()-derived request and
-	// trust the surrounding caller (CLI, MCP shim) to enforce its own
-	// cancellation if needed.
+	// trust the surrounding caller to enforce its own cancellation if needed.
 	ctx := context.Background()
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, agentURL, bytes.NewReader(body))
 	if err != nil {

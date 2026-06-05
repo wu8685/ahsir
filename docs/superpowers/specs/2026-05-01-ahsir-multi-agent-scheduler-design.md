@@ -1,6 +1,8 @@
 # AHSIR: Multi-Agent Scheduler based on A2A Protocol
 
-**Status:** Draft
+**Status:** Superseded by the current plugin skill + `ahsir` CLI entrypoint. This
+document preserves the original MCP-based design for historical context only.
+See `README.md` for the current architecture.
 **Date:** 2026-05-01
 **Version:** 1.0.0
 

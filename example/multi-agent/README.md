@@ -1,6 +1,6 @@
 # Example: Student-Teacher Multi-Agent Setup
 
-The full multi-agent walkthrough: two agents — **Student** and **Teacher** — collaborating via the [A2A protocol](https://google.github.io/A2A/), plus filesystem access, scheduler gateway endpoints, and MCP integration.
+The full multi-agent walkthrough: two agents — **Student** and **Teacher** — collaborating via the [A2A protocol](https://google.github.io/A2A/), plus filesystem access, scheduler gateway endpoints, and Claude Code plugin/CLI integration.
 
 - **Teacher**: Answers questions, summarizes articles, explains concepts. Has filesystem read access to a configurable allow-list (defaults include `/Users/wuke/workspace/brain-spark` — adjust to your own path).
 - **Student**: Receives user requests. When it needs help, delegates to the Teacher via `---A2A_CALL---`.
@@ -109,7 +109,7 @@ filesystem:
     - "/Users/wuke/workspace/brain-spark"   # <-- change this to your own path
 ```
 
-At startup the wrapper translates each entry into a `--add-dir=<abs-path>` argument for `claude -p`, plus `--allowedTools=Read,LS,Glob,Grep` so the model can use the built-in filesystem tools but cannot write or shell out. No custom MCP server is involved.
+At startup the wrapper translates each entry into a `--add-dir=<abs-path>` argument for `claude -p`, plus `--allowedTools=Read,LS,Glob,Grep` so the model can use the built-in filesystem tools but cannot write or shell out. No extra tool server is involved.
 
 > The `--flag=value` form is deliberate: `--add-dir` and `--allowedTools` are variadic in the Claude Code CLI, and the space-separated form would greedily consume neighbouring tokens. The prompt is fed via stdin, so it is not at risk, but other flag values still are. Stick to `=` form when adding new flags in `cmd/ahsir-agent/main.go`.
 
@@ -140,7 +140,7 @@ To grant write or bash access, edit `cmd/ahsir-agent/main.go` and swap `--allowe
 
 ### 5. Scheduler HTTP API (registry + gateway)
 
-The scheduler exposes two groups of endpoints on port 9800. Registry endpoints serve agent CRUD; gateway endpoints forward chat / task-status into the running agents over A2A. Both share the same listener — the same paths the MCP shim hits.
+The scheduler exposes two groups of endpoints on port 9800. Registry endpoints serve agent CRUD; gateway endpoints forward chat / task-status into the running agents over A2A. The `ahsir` CLI uses these same gateway paths.
 
 ```bash
 # Registry: list / get
@@ -156,7 +156,7 @@ curl -s -X POST http://127.0.0.1:9800/agents/teacher/chat \
 curl -s http://127.0.0.1:9800/agents/teacher/tasks/<task-id>
 ```
 
-This is also the quickest way to sanity-check the gateway after restarting the scheduler — if `POST /agents/<name>/chat` works here, the MCP shim path will work too.
+This is also the quickest way to sanity-check the gateway after restarting the scheduler; `ahsir chat` is a small wrapper over this path.
 
 ### 6. Tune timeouts
 
@@ -164,11 +164,11 @@ There are three deadlines in the chain; the invariant is **outer ≥ inner**:
 
 | Where | Default | Configured in |
 |---|---|---|
-| MCP shim `http.Client.Timeout` | `chat + 1m` | fetched from scheduler at startup |
+| CLI `http.Client.Timeout` | `chat + 1m` | fetched from scheduler at startup |
 | Gateway forwarding (`POST /agents/{n}/chat`) | 10m | `timeouts.chat` in `ahsir.yaml` |
 | Per-agent LLM subprocess deadline | 300s | `runtime.timeout` in each `agent-card.yaml` |
 
-Bump `timeouts.chat` if any agent's `runtime.timeout` is increased — the MCP shim picks up the new value the next time it starts.
+Bump `timeouts.chat` if any agent's `runtime.timeout` is increased — the CLI picks up the new value when it talks to the scheduler.
 
 ### 7. Reading the logs
 
@@ -209,39 +209,21 @@ Common patterns:
 
 `Ctrl+C` in the scheduler terminal. The scheduler stops the registry and kills all agent subprocesses.
 
-## Use ahsir from your local Claude Code (via MCP)
+## Use ahsir from your local Claude Code
 
-Drive the running scheduler from your own Claude Code session via the MCP shim. The repo ships a `.mcp.json` that registers `ahsir`:
+Install the Claude Code plugin described in the root README, put
+`plugin/bin` on PATH, and keep the scheduler running from step 2. The skill
+will guide Claude to use CLI commands such as:
 
-```json
-{
-  "mcpServers": {
-    "ahsir": {
-      "command": "/Users/wuke/workspace/go/src/github.com/wu8685/ahsir/bin/ahsir",
-      "args": ["mcp", "--scheduler", "http://127.0.0.1:9800"]
-    }
-  }
-}
+```bash
+ahsir ping
+ahsir list
+ahsir chat student "Please delegate this to the teacher agent: explain what a goroutine is in one paragraph." --context demo-multi
 ```
 
-The shim is just a protocol adapter — it spawns no agents, loads no `ahsir.yaml`, and holds no state. Every tool call becomes an HTTP request to the running scheduler:
-
-- `agent_list` → `GET /agents`
-- `agent_chat` → `POST /agents/{name}/chat`
-- `agent_task_status` → `GET /agents/{name}/tasks/{taskID}`
-
-So the flow is **Claude Code → `ahsir mcp` shim → scheduler gateway → A2A → agent**. Nothing works unless the scheduler is already running (`./bin/ahsir start example/multi-agent/ahsir.yaml` from step 2).
-
-To use it:
-
-1. Make sure `bin/ahsir` is built (step 1) and the scheduler is running (step 2).
-2. Open Claude Code in this repo (it auto-discovers `.mcp.json`); approve the `ahsir` MCP server.
-3. Ask Claude Code things like *"list agents via ahsir"* or *"have the student summarize \<some path under teacher's allowed roots\> using ahsir"*. It uses `agent_list` / `agent_chat` to talk to the scheduler.
-
-Notes:
-
-- `command` is an **absolute path** to the `ahsir` binary built in step 1. If you cloned this repo somewhere else, update `command` accordingly — Claude Code does not search `PATH` here.
-- The shim auto-aligns its `http.Client.Timeout` with the scheduler's `timeouts.chat` (plus a 1-minute buffer) on startup; you should see `ahsir mcp shim: client timeout aligned to 11m0s` on stderr. No need to set timeouts in `.mcp.json`.
+The flow is **Claude Code skill → Bash tool → `ahsir` CLI → scheduler gateway
+→ A2A → agent**. The CLI spawns no agents and loads no `ahsir.yaml`; it talks to
+the already-running scheduler.
 
 ## Run the Tests
 
