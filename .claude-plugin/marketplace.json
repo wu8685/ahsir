@@ -1,0 +1,28 @@
+{
+  "name": "ahsir",
+  "owner": {
+    "name": "wu8685",
+    "url": "https://github.com/wu8685"
+  },
+  "plugins": [
+    {
+      "name": "ahsir",
+      "source": "./plugin",
+      "description": "Multi-agent collaboration via the ahsir scheduler. Adds CLI commands (list / chat / status) and a skill that lets Claude Code dispatch sub-tasks to specialist agents running under ahsir.",
+      "version": "0.1.0",
+      "author": {
+        "name": "wu8685",
+        "url": "https://github.com/wu8685/ahsir"
+      },
+      "homepage": "https://github.com/wu8685/ahsir",
+      "license": "MIT",
+      "keywords": [
+        "multi-agent",
+        "orchestration",
+        "claude-code",
+        "delegation",
+        "a2a"
+      ]
+    }
+  ]
+}

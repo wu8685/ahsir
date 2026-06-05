@@ -3,10 +3,21 @@
 /ahsir
 /ahsir-agent
 
-# Plugin per-platform binaries — built by `make plugin` / `make plugin-current`.
-# Wrappers and metadata (plugin/.claude-plugin/, plugin/skills/, plugin/bin/*ahsir*
-# at top level) are tracked; per-platform binary subdirs are not.
-/plugin/bin/*/
+# Plugin per-platform binaries — built by `make plugin`.
+#
+# These ARE tracked: they're the payload shipped to anyone installing the
+# plugin via the marketplace (`/plugin install ahsir@ahsir`). Without them,
+# marketplace consumers would have to clone the repo and rebuild — which
+# defeats the point of marketplace install. Each binary is ~19 MB × 4 OS/
+# arch × 2 (ahsir + ahsir-agent) ≈ 150 MB at the working tree; only one set
+# of new objects per release commit gets added to git history.
+#
+# Refresh the commit after a release-worthy code change:
+#   make plugin && git add plugin/bin && git commit
+#
+# If repo size ever becomes a real problem, the alternative is moving these
+# to GitHub Releases + a download-on-first-use bin/ahsir wrapper. Not yet
+# justified for this codebase.
 
 
 # Vendored deps — fetched via `go mod download` instead

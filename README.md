@@ -81,7 +81,31 @@ The plugin bundles:
 - A small wrapper at `plugin/bin/ahsir` that auto-detects platform.
 - A skill at `plugin/skills/ahsir/SKILL.md` that teaches Claude **when** to use ahsir (parallel sub-tasks, specialist agents, multi-turn with a specific agent) and **how** to invoke it (`ahsir list`, `ahsir chat`, etc).
 
-### Install (current option: local plugin directory)
+### Install (recommended: via marketplace)
+
+Claude Code's plugin system uses a git-based marketplace model — no central registry, no upload step. The repo's root holds a `.claude-plugin/marketplace.json` catalog, and Claude Code clones the repo on `marketplace add`.
+
+From inside any Claude Code session, run the two slash commands below:
+
+```
+/plugin marketplace add wu8685/ahsir
+/plugin install ahsir@ahsir
+```
+
+That's it — the binaries for your OS/arch are already bundled under `plugin/bin/<os>-<arch>/`, so the install resolves to a working `ahsir` and `ahsir-agent` immediately. The first `ahsir` is the plugin name; `@ahsir` is the marketplace name (both happen to be "ahsir" here because this repo is single-plugin).
+
+Then add the wrappers to your shell PATH so the same `ahsir` binary works from a normal terminal too — not just Claude Code's Bash tool. Claude Code installs marketplaces under `~/.claude/plugins/<marketplace>/`:
+
+```bash
+echo 'export PATH="$HOME/.claude/plugins/ahsir/plugin/bin:$PATH"' >> ~/.zshrc
+exec zsh
+```
+
+Supported platforms: **darwin-arm64**, **darwin-amd64**, **linux-amd64**, **linux-arm64**. If you're on a different OS/arch, fall back to the local-clone option below.
+
+### Install (alternative: local clone, for development)
+
+If you're hacking on ahsir itself, clone the repo and point Claude Code at the working tree directly:
 
 ```bash
 # 1. Clone the repo (or `git pull` to update an existing clone).
@@ -104,7 +128,7 @@ echo 'export PATH="$HOME/path/to/ahsir/plugin/bin:$PATH"' >> ~/.zshrc
 exec zsh   # reload
 ```
 
-For multi-platform release builds: `make plugin` cross-compiles darwin-arm64, darwin-amd64, linux-amd64, and linux-arm64 into `plugin/bin/<os>-<arch>/`.
+For multi-platform release builds: `make plugin` cross-compiles darwin-arm64, darwin-amd64, linux-amd64, and linux-arm64 into `plugin/bin/<os>-<arch>/`. Run this and commit before tagging a release so marketplace installers get the new binaries.
 
 ### What you get inside Claude Code
 
