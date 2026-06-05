@@ -34,15 +34,21 @@ import (
 	"github.com/wu8685/ahsir/internal/scheduler"
 )
 
+const (
+	defaultProviderBaseURL = "https://api.deepseek.com/anthropic"
+	defaultProviderModel   = "deepseek-v4-pro"
+	defaultProviderAPIKey  = "${MODEL_API_KEY}"
+)
+
 // Default file layout when neither --config nor --workspace is given.
 // Putting state under ~/.ahsir keeps agent files OUT of the user's
 // current directory — running `ahsir agent new` from a git repo
 // shouldn't drop generated yaml + workspace dirs into that repo.
 //
-//   ~/.ahsir/
-//   ├── ahsir.yaml                         # scheduler config (auto-created)
-//   └── agents/
-//       └── <name>/.a2a/agent-card.yaml    # per-agent workspace
+//	~/.ahsir/
+//	├── ahsir.yaml                         # scheduler config (auto-created)
+//	└── agents/
+//	    └── <name>/.a2a/agent-card.yaml    # per-agent workspace
 //
 // Users with project-scoped configs (e.g. example/multi-agent/ahsir.yaml)
 // pass --config explicitly.
@@ -121,10 +127,10 @@ func agentNewCmd(args []string) {
 	cfgPath := fs.String("config", defaultConfigPath(), "Path to ahsir.yaml (created if missing under ~/.ahsir/)")
 	schedulerURL := fs.String("scheduler", defaultSchedulerURL, "Scheduler admin URL")
 	prompt := fs.String("prompt", "", "System prompt (the persona's instructions)")
-	model := fs.String("model", "deepseek-v4-pro", "LLM model identifier")
-	provider := fs.String("provider", "deepseek", "Provider (anthropic|zhipu|deepseek)")
-	baseURL := fs.String("base-url", "https://api.deepseek.com/anthropic", "Provider base URL")
-	apiKeyEnv := fs.String("api-key-env", "${MODEL_API_KEY}", "API key (literal or ${ENV_VAR})")
+	model := fs.String("model", defaultProviderModel, "LLM model identifier")
+	provider := fs.String("provider", "deepseek", "Provider (anthropic|zhipu|deepseek|codex)")
+	baseURL := fs.String("base-url", defaultProviderBaseURL, "Provider base URL")
+	apiKeyEnv := fs.String("api-key-env", defaultProviderAPIKey, "API key (literal or ${ENV_VAR})")
 	timeoutDur := fs.String("timeout", "300s", "Per-LLM-call timeout")
 	wsOverride := fs.String("workspace", "", "Workspace directory (default: ~/.ahsir/agents/<name>)")
 	skipStart := fs.Bool("skip-start", false, "Only scaffold files; don't ask the scheduler to start the agent")
@@ -406,6 +412,20 @@ func writeAgentCard(workspace string, s agentCardScaffold) error {
 	if s.PoolOverloadPolicy != "" {
 		poolSection["overload_policy"] = s.PoolOverloadPolicy
 	}
+	command := "claude"
+	baseURL := s.BaseURL
+	if strings.EqualFold(s.Provider, "codex") {
+		command = "codex"
+		if baseURL == defaultProviderBaseURL {
+			baseURL = ""
+		}
+		if s.Model == defaultProviderModel {
+			s.Model = ""
+		}
+		if s.APIKey == defaultProviderAPIKey {
+			s.APIKey = ""
+		}
+	}
 
 	card := agentCardYAMLShape{
 		Name:        s.Name,
@@ -418,11 +438,11 @@ func writeAgentCard(workspace string, s agentCardScaffold) error {
 			"maxAgentCalls": 0,
 		},
 		Runtime: yamlMap{
-			"command":  "claude",
+			"command":  command,
 			"args":     []string{},
 			"timeout":  s.Timeout,
 			"provider": s.Provider,
-			"baseURL":  s.BaseURL,
+			"baseURL":  baseURL,
 			"apiKey":   s.APIKey,
 			"model":    s.Model,
 		},

@@ -98,6 +98,41 @@ func setupE2E(t *testing.T) *e2eFixture {
 	if _, err := exec.LookPath("claude"); err != nil {
 		t.Skipf("claude binary not on PATH: %v", err)
 	}
+	return setupE2EWithCards(t, teacherCardYAML, studentCardYAML)
+}
+
+func setupCodexE2E(t *testing.T) *e2eFixture {
+	t.Helper()
+
+	if os.Getenv("AHSIR_E2E_CODEX") != "1" {
+		t.Skip("set AHSIR_E2E_CODEX=1 to run real-codex e2e tests")
+	}
+	if _, err := exec.LookPath("codex"); err != nil {
+		t.Skipf("codex binary not on PATH: %v", err)
+	}
+	return setupE2EWithCards(t, codexTeacherCardYAML, codexStudentCardYAML)
+}
+
+func setupMixedProviderE2E(t *testing.T) *e2eFixture {
+	t.Helper()
+
+	if os.Getenv("AHSIR_E2E_MIXED") != "1" {
+		t.Skip("set AHSIR_E2E_MIXED=1 to run real mixed claude+codex e2e tests")
+	}
+	if os.Getenv("MODEL_API_KEY") == "" {
+		t.Skip("MODEL_API_KEY required for mixed claude+codex e2e tests")
+	}
+	if _, err := exec.LookPath("claude"); err != nil {
+		t.Skipf("claude binary not on PATH: %v", err)
+	}
+	if _, err := exec.LookPath("codex"); err != nil {
+		t.Skipf("codex binary not on PATH: %v", err)
+	}
+	return setupE2EWithCards(t, mixedCodexTeacherCardYAML, mixedClaudeStudentCardYAML)
+}
+
+func setupE2EWithCards(t *testing.T, teacherCard, studentCard string) *e2eFixture {
+	t.Helper()
 
 	repoRoot := findRepoRoot(t)
 	ahsirBin := filepath.Join(repoRoot, "bin", "ahsir")
@@ -123,8 +158,8 @@ func setupE2E(t *testing.T) *e2eFixture {
 	tmp := t.TempDir()
 	teacherWS := filepath.Join(tmp, "workspaces", "teacher")
 	studentWS := filepath.Join(tmp, "workspaces", "student")
-	writeAgentCard(t, teacherWS, teacherCardYAML)
-	writeAgentCard(t, studentWS, studentCardYAML)
+	writeAgentCard(t, teacherWS, teacherCard)
+	writeAgentCard(t, studentWS, studentCard)
 
 	cfgPath := filepath.Join(tmp, "ahsir.yaml")
 	writeSchedulerConfig(t, cfgPath, registryPort, teacherPort, studentPort, teacherWS, studentWS)
@@ -576,6 +611,132 @@ claude:
 
     Available agents:
     - teacher: teaching
+  maxAgentCalls: 3
+runtime:
+  command: claude
+  args: []
+  timeout: 300s
+  provider: deepseek
+  baseURL: https://api.deepseek.com/anthropic
+  apiKey: "${MODEL_API_KEY}"
+  model: deepseek-v4-pro
+filesystem:
+  enabled: false
+network:
+  bind: "127.0.0.1"
+`
+
+const codexTeacherCardYAML = `name: teacher
+description: e2e codex teacher agent
+version: "1.0.0"
+provider:
+  name: ahsir
+  url: https://github.com/wu8685/ahsir
+skills:
+  - name: teaching
+    description: answer questions concisely
+claude:
+  systemPrompt: |
+    You are a teacher. Follow the user's instruction exactly and answer
+    concisely. If asked to remember a codeword, remember it for later turns.
+    If asked for your favorite fruit, answer exactly: papaya-5
+  maxAgentCalls: 0
+runtime:
+  command: codex
+  args: ["--ignore-user-config", "--ignore-rules"]
+  timeout: 300s
+  provider: codex
+filesystem:
+  enabled: false
+network:
+  bind: "127.0.0.1"
+`
+
+const codexStudentCardYAML = `name: student
+description: e2e codex student agent
+version: "1.0.0"
+provider:
+  name: ahsir
+  url: https://github.com/wu8685/ahsir
+skills:
+  - name: learning
+    description: delegate questions to the teacher
+claude:
+  systemPrompt: |
+    Classroom exercise: you do not know the teacher's favorite fruit. You are
+    not allowed to answer user questions directly.
+
+    You are a student. For every user question, you MUST delegate to the
+    teacher agent. Your first response to a user request must contain exactly
+    this block, with no markdown fences and no surrounding prose:
+
+    ---A2A_CALL---
+    {"agent": "teacher", "task": "<the user's question, verbatim>"}
+    ---END---
+
+    Then in your follow-up turn, relay the teacher's answer back to the user.
+    Do not answer the question yourself.
+  maxAgentCalls: 3
+runtime:
+  command: codex
+  args: ["--ignore-user-config", "--ignore-rules"]
+  timeout: 300s
+  provider: codex
+filesystem:
+  enabled: false
+network:
+  bind: "127.0.0.1"
+`
+
+const mixedCodexTeacherCardYAML = `name: teacher
+description: e2e mixed-provider codex teacher agent
+version: "1.0.0"
+provider:
+  name: ahsir
+  url: https://github.com/wu8685/ahsir
+skills:
+  - name: teaching
+    description: answer questions concisely
+claude:
+  systemPrompt: |
+    You are the teacher in a mixed-provider integration test.
+    If asked for the classroom passphrase, answer exactly: cross-provider-papaya-17
+    Otherwise answer in one concise sentence.
+  maxAgentCalls: 0
+runtime:
+  command: codex
+  args: ["--ignore-user-config", "--ignore-rules"]
+  timeout: 300s
+  provider: codex
+filesystem:
+  enabled: false
+network:
+  bind: "127.0.0.1"
+`
+
+const mixedClaudeStudentCardYAML = `name: student
+description: e2e mixed-provider claude student agent
+version: "1.0.0"
+provider:
+  name: ahsir
+  url: https://github.com/wu8685/ahsir
+skills:
+  - name: learning
+    description: delegate questions to the teacher
+claude:
+  systemPrompt: |
+    You are the student in a mixed-provider integration test. You do not know
+    the teacher's classroom passphrase.
+
+    For every user question, you MUST delegate to the teacher agent using
+    exactly this format:
+
+    ---A2A_CALL---
+    {"agent": "teacher", "task": "<the user's question, verbatim>"}
+    ---END---
+
+    Then in your follow-up turn, relay the teacher's answer back to the user.
+    Do not answer the question yourself.
   maxAgentCalls: 3
 runtime:
   command: claude

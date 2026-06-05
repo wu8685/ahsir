@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 
@@ -69,10 +70,13 @@ func main() {
 		maxCalls := cfg.Claude.MaxAgentCalls
 		basePrompt := cfg.Claude.SystemPrompt
 
-		// Long-running stream-json claude session per A2A contextID, pooled
-		// with sliding 30-minute idle TTL. Evicted entries keep their
-		// sessionID for 24h so a returning conversation can `--resume`.
+		// Session per A2A contextID, pooled with sliding 30-minute idle TTL.
+		// Claude uses one long-running stream-json subprocess; Codex forks
+		// `codex exec --json` per turn and resumes by thread_id.
 		factory := func(ctx context.Context, contextID, resumeID string) (wrapper.Session, error) {
+			if sessionCfg.Provider == wrapper.ProviderCodex {
+				return wrapper.NewCodexSession(ctx, sessionCfg, resumeID)
+			}
 			return wrapper.NewClaudeSession(ctx, sessionCfg, resumeID)
 		}
 		// Persist contextID → sessionID mappings so a restart of this agent
@@ -100,7 +104,7 @@ func main() {
 		}
 
 		w.SetupExecutor(pool.LookupOrCreate, listAgents, callAgent, maxCalls, basePrompt)
-		log.Printf("Executor wired: stream-json SessionPool (%s %v, timeout=%s, persist=%s)", sessionCfg.Command, sessionCfg.Args, sessionCfg.Timeout, persistPath)
+		log.Printf("Executor wired: %s SessionPool (%s %v, timeout=%s, persist=%s)", sessionCfg.Provider, sessionCfg.Command, sessionCfg.Args, sessionCfg.Timeout, persistPath)
 	}
 
 	// Wait for signal
@@ -146,6 +150,11 @@ func buildSessionConfig(name string, rt wrapper.RuntimeConfig, fs wrapper.Filesy
 	if err != nil {
 		return wrapper.SessionConfig{}, err
 	}
+	model, err := wrapper.ResolveRuntimeModel(rt)
+	if err != nil {
+		return wrapper.SessionConfig{}, err
+	}
+	provider := wrapper.RuntimeProvider(rt)
 
 	var env []string
 	if len(extra) > 0 {
@@ -162,20 +171,26 @@ func buildSessionConfig(name string, rt wrapper.RuntimeConfig, fs wrapper.Filesy
 			if !filepath.IsAbs(abs) {
 				abs = filepath.Join(workspace, p)
 			}
-			// Use --add-dir=<path> form (one path per flag). claude's --add-dir
-			// is variadic — the space-separated form would greedily consume the
-			// trailing prompt positional as another directory and the CLI would
-			// then bail out with "Input must be provided ... when using --print".
+			// Use --add-dir=<path> form (one path per flag). Both claude and
+			// codex accept it, and claude's --add-dir is variadic — the
+			// space-separated form would greedily consume trailing values.
 			args = append(args, "--add-dir="+abs)
 		}
-		// Read-only whitelist: model can inspect files but not modify them or
-		// run arbitrary shell. Drop this list (or swap to bypassPermissions)
-		// if write tools are needed.
-		// --allowedTools is variadic too — same trap as --add-dir; use the
-		// = form so it cannot consume the trailing prompt positional.
-		args = append(args, "--allowedTools=Read,LS,Glob,Grep")
+		if provider != wrapper.ProviderCodex {
+			// Read-only whitelist: model can inspect files but not modify them or
+			// run arbitrary shell. Drop this list (or swap to bypassPermissions)
+			// if write tools are needed.
+			// --allowedTools is variadic too — same trap as --add-dir; use the
+			// = form so it cannot consume the trailing prompt positional.
+			args = append(args, "--allowedTools=Read,LS,Glob,Grep")
+		}
 	}
-	if stream.PartialMessages {
+	if provider == wrapper.ProviderCodex {
+		if model != "" && !hasFlag(args, "--model", "-m") {
+			args = append(args, "--model="+model)
+		}
+	}
+	if provider != wrapper.ProviderCodex && stream.PartialMessages {
 		// Tell claude to interleave incremental content_block_delta lines into
 		// the NDJSON stream so subscribers can see assistant text as it is
 		// produced. The wrapper surfaces these as EventTextDelta and the A2A
@@ -184,11 +199,24 @@ func buildSessionConfig(name string, rt wrapper.RuntimeConfig, fs wrapper.Filesy
 	}
 
 	return wrapper.SessionConfig{
-		Name:    name,
-		Command: rt.Command,
-		Args:    args,
-		Env:     env,
-		WorkDir: workspace,
-		Timeout: timeout,
+		Name:     name,
+		Provider: provider,
+		Command:  rt.Command,
+		Args:     args,
+		Env:      env,
+		WorkDir:  workspace,
+		Timeout:  timeout,
 	}, nil
+}
+
+func hasFlag(args []string, long, short string) bool {
+	for i, a := range args {
+		if a == long || a == short {
+			return i+1 < len(args)
+		}
+		if strings.HasPrefix(a, long+"=") || strings.HasPrefix(a, short+"=") {
+			return true
+		}
+	}
+	return false
 }

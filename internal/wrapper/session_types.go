@@ -17,12 +17,13 @@ type SessionConfig struct {
 	// only for log lines. Optional — empty Name just produces logs without
 	// the agent= field. Setting it makes grepping logs by agent trivial
 	// when multiple agents share the same scheduler tee.
-	Name    string
-	Command string
-	Args    []string
-	Env     []string
-	WorkDir string
-	Timeout time.Duration
+	Name     string
+	Provider string
+	Command  string
+	Args     []string
+	Env      []string
+	WorkDir  string
+	Timeout  time.Duration
 }
 
 // Validate checks the config for required fields.

@@ -31,7 +31,7 @@ multi-agent/
 
   The agents are wired to DeepSeek's Anthropic-compatible endpoint (`https://api.deepseek.com/anthropic`, model `deepseek-v4-pro`). Get a key from <https://platform.deepseek.com/>.
 
-  To use a different provider, edit `workspaces/{teacher,student}/.a2a/agent-card.yaml` — the `runtime` block accepts `provider: anthropic|zhipu|deepseek` plus `baseURL` / `apiKey` / `model`. Startup fails fast if a referenced env var is unset.
+  To use a different provider, edit `workspaces/{teacher,student}/.a2a/agent-card.yaml` — the `runtime` block accepts `provider: anthropic|zhipu|deepseek|codex` plus `baseURL` / `apiKey` / `model` where supported. Startup fails fast if a referenced env var is unset.
 
 ## Quick Start
 

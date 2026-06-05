@@ -66,6 +66,34 @@ func TestResolveProviderEnv_DeepSeekDefaultsBaseURL(t *testing.T) {
 	}
 }
 
+func TestResolveProviderEnv_CodexAPIKey(t *testing.T) {
+	got, err := ResolveProviderEnv(RuntimeConfig{
+		Provider: "codex",
+		APIKey:   "sk-test",
+		Model:    "gpt-5.4",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got["CODEX_API_KEY"] != "sk-test" {
+		t.Errorf("CODEX_API_KEY not set: %v", got)
+	}
+	if _, ok := got["ANTHROPIC_AUTH_TOKEN"]; ok {
+		t.Errorf("codex provider should not set Anthropic env: %v", got)
+	}
+}
+
+func TestResolveProviderEnv_CodexRejectsBaseURL(t *testing.T) {
+	_, err := ResolveProviderEnv(RuntimeConfig{
+		Provider: "codex",
+		BaseURL:  "https://example.com",
+		APIKey:   "sk-test",
+	})
+	if err == nil || !strings.Contains(err.Error(), "provider=codex") {
+		t.Fatalf("expected codex baseURL error, got %v", err)
+	}
+}
+
 func TestResolveProviderEnv_ZhipuExplicitBaseURLWins(t *testing.T) {
 	got, _ := ResolveProviderEnv(RuntimeConfig{
 		Provider: "Zhipu", // also tests case-insensitivity

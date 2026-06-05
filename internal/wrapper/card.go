@@ -11,11 +11,11 @@ import (
 
 // AgentCardConfig represents the .a2a/agent-card.yaml file structure.
 type AgentCardConfig struct {
-	Name        string           `yaml:"name"`
-	Description string           `yaml:"description"`
-	Version     string           `yaml:"version"`
-	Provider    *ProviderConfig  `yaml:"provider"`
-	Skills      []SkillConfig    `yaml:"skills"`
+	Name        string          `yaml:"name"`
+	Description string          `yaml:"description"`
+	Version     string          `yaml:"version"`
+	Provider    *ProviderConfig `yaml:"provider"`
+	Skills      []SkillConfig   `yaml:"skills"`
 	// Claude holds agent behavior (system prompt, max delegation depth).
 	// The field is named "Claude" for historical reasons; its contents are
 	// provider-agnostic — any LLM CLI configured via Runtime can consume them.
@@ -103,6 +103,8 @@ type ClaudeConfig struct {
 //   - "zhipu": same env mapping as anthropic (Zhipu/智谱 GLM exposes an
 //     Anthropic-compatible endpoint), with BaseURL defaulting to
 //     https://open.bigmodel.cn/api/anthropic.
+//   - "codex": drives `codex exec --json`, maps APIKey to CODEX_API_KEY and
+//     Model to --model.
 //   - any other value: provider mapping is skipped; user must populate Env
 //     (and likely Command) directly.
 //
@@ -170,8 +172,12 @@ func (b *AgentCardBuilder) Load() (*AgentCardConfig, error) {
 		cfg.Filesystem.AllowedPaths = []string{"."}
 	}
 	if cfg.Runtime.Command == "" {
-		cfg.Runtime.Command = "claude"
-		if len(cfg.Runtime.Args) == 0 {
+		if RuntimeProvider(cfg.Runtime) == ProviderCodex {
+			cfg.Runtime.Command = "codex"
+		} else {
+			cfg.Runtime.Command = "claude"
+		}
+		if cfg.Runtime.Command == "claude" && len(cfg.Runtime.Args) == 0 {
 			cfg.Runtime.Args = []string{"-p", "--output-format", "text"}
 		}
 	}

@@ -12,6 +12,7 @@ const (
 	ProviderAnthropic = "anthropic"
 	ProviderZhipu     = "zhipu"
 	ProviderDeepSeek  = "deepseek"
+	ProviderCodex     = "codex"
 )
 
 // zhipuDefaultBaseURL is the Anthropic-compatible endpoint published by
@@ -21,6 +22,21 @@ const zhipuDefaultBaseURL = "https://open.bigmodel.cn/api/anthropic"
 // deepseekDefaultBaseURL is the Anthropic-compatible endpoint published by
 // DeepSeek (parallel to zhipu — same ANTHROPIC_* env wiring).
 const deepseekDefaultBaseURL = "https://api.deepseek.com/anthropic"
+
+// RuntimeProvider returns the canonical provider for a RuntimeConfig.
+func RuntimeProvider(rt RuntimeConfig) string {
+	provider := strings.ToLower(strings.TrimSpace(rt.Provider))
+	if provider == "" {
+		return ProviderAnthropic
+	}
+	return provider
+}
+
+// ResolveRuntimeModel expands runtime.model using the same strict env-var
+// semantics as ResolveProviderEnv.
+func ResolveRuntimeModel(rt RuntimeConfig) (string, error) {
+	return expandStrict("runtime.model", rt.Model)
+}
 
 // ResolveProviderEnv translates the high-level provider/baseURL/apiKey/model
 // fields into the env-var shape the underlying CLI expects, then layers any
@@ -34,10 +50,7 @@ const deepseekDefaultBaseURL = "https://api.deepseek.com/anthropic"
 // The returned map is *just the LLM-related additions* — caller is
 // responsible for merging it with os.Environ() when building exec.Cmd.Env.
 func ResolveProviderEnv(rt RuntimeConfig) (map[string]string, error) {
-	provider := strings.ToLower(strings.TrimSpace(rt.Provider))
-	if provider == "" {
-		provider = ProviderAnthropic
-	}
+	provider := RuntimeProvider(rt)
 
 	baseURL, err := expandStrict("runtime.baseURL", rt.BaseURL)
 	if err != nil {
@@ -77,11 +90,18 @@ func ResolveProviderEnv(rt RuntimeConfig) (map[string]string, error) {
 		if model != "" {
 			out["ANTHROPIC_MODEL"] = model
 		}
+	case ProviderCodex:
+		if baseURL != "" {
+			return nil, fmt.Errorf("runtime.baseURL is not supported with provider=codex; use runtime.env for advanced Codex CLI configuration")
+		}
+		if apiKey != "" {
+			out["CODEX_API_KEY"] = apiKey
+		}
 	default:
 		// Unknown provider — refuse silently translating high-level fields,
 		// but tolerate the case where the user only set Env explicitly.
 		if baseURL != "" || apiKey != "" || model != "" {
-			return nil, fmt.Errorf("unknown runtime.provider %q (high-level baseURL/apiKey/model fields can only be used with provider=anthropic|zhipu|deepseek); use runtime.env for custom providers", rt.Provider)
+			return nil, fmt.Errorf("unknown runtime.provider %q (high-level baseURL/apiKey/model fields can only be used with provider=anthropic|zhipu|deepseek|codex); use runtime.env for custom providers", rt.Provider)
 		}
 	}
 

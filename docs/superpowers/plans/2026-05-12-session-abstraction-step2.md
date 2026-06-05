@@ -273,7 +273,7 @@ Status as of 2026-06-05:
 - **V2-SSE 流式**：still open. `--include-partial-messages` + EventText delta into A2A SSE.
 - **V2-资源控制**：still open. Pool LRU + overload reject/queue.
 - **V2-A2A_CALL → tool_call**：still open. Replace text marker with MCP tool-call protocol.
-- **V2-多 provider**：still open. `CodexSession` / `GeminiSession` over the same `Session` interface.
+- **V2-多 provider**：partially done. `CodexSession` landed after this plan; `GeminiSession` still open over the same `Session` interface.
 
 ### Bonus capabilities delivered beyond original Step 2 scope (commit `22f7a2e`)
 

@@ -224,6 +224,9 @@ filesystem:
     - "/tmp"
 ```
 
+For Codex CLI-backed agents, use `provider: codex` and `command: codex`.
+`apiKey` maps to `CODEX_API_KEY`; `model` maps to `codex exec --model`.
+
 ## Timeout topology
 
 There are three layers of deadlines; the invariant is **outer ≥ inner**.
