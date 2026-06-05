@@ -1,43 +1,58 @@
 # ahsir — A Multi-Agent Scheduler over A2A
 
 `ahsir` is a small Go scheduler that runs multiple LLM-backed agents as local
-subprocesses, lets them talk to each other over the
+processes, lets them talk to each other over the
 [A2A protocol](https://google.github.io/A2A/), and exposes the whole fleet to
 external tools (e.g. Claude Code) via MCP.
 
-Each agent is a `claude -p` subprocess wrapped in a JSON-RPC HTTP server. The
-scheduler owns the agent registry, a gateway that forwards chat / task-status
-requests, and an MCP stdio shim that lets your local Claude Code drive the
-fleet without speaking A2A directly.
+Each agent is an `ahsir-agent` process with an A2A JSON-RPC HTTP endpoint and
+a provider-backed `Session` implementation. Today the production session
+backends are:
+
+- `ClaudeSession`: one long-running `claude -p --input-format=stream-json`
+  subprocess per A2A `contextId`, with `--resume` recovery.
+- `CodexSession`: one `codex exec --json` subprocess per turn, resuming by
+  Codex `thread_id` for the same A2A `contextId`.
+
+The scheduler owns the agent registry, a gateway that forwards chat /
+task-status requests, and an MCP stdio shim that lets your local Claude Code
+drive the fleet without speaking A2A directly.
 
 ## Architecture
 
 ```
-                   ┌─────────────────────────────────────────────┐
-   Claude Code ─►  │  ahsir mcp (stdio shim)                     │
-   (.mcp.json)     │  - tool calls → HTTP                        │
-                   └─────────────────┬───────────────────────────┘
-                                     │ HTTP
-                                     ▼
-                   ┌─────────────────────────────────────────────┐
-   curl / tests ─► │  ahsir start  (scheduler, port 9800)        │
-                   │  ┌──────────────┬───────────────────────┐   │
-                   │  │ registry     │ gateway               │   │
-                   │  │ /agents      │ /agents/{n}/chat      │   │
-                   │  │ /agents/{n}  │ /agents/{n}/tasks/{t} │   │
-                   │  │              │ /config/timeouts      │   │
-                   │  └──────────────┴───────────┬───────────┘   │
-                   └─────────────────────────────┼───────────────┘
-                                                 │ A2A JSON-RPC
-                              ┌──────────────────┼─────────────────┐
-                              ▼                                    ▼
-                   ┌─────────────────────┐           ┌─────────────────────┐
-                   │ ahsir-agent (9801)  │           │ ahsir-agent (9802)  │
-                   │ A2A server  ◄────►  │  A2A      │ A2A server          │
-                   │ wrapper / executor  │           │ wrapper / executor  │
-                   │   ↓ SessionPool     │           │   ↓ SessionPool     │
-                   │   claude -p (LLM)   │           │   claude -p (LLM)   │
-                   └─────────────────────┘           └─────────────────────┘
+                    ┌─────────────────────────────────────────────┐
+   Claude Code ───► │ ahsir mcp                                  │
+   (.mcp.json)      │ MCP stdio tools → scheduler HTTP            │
+                    └─────────────────┬───────────────────────────┘
+                                      │ HTTP
+   curl / ahsir chat / tests ─────────┘
+                                      ▼
+                    ┌─────────────────────────────────────────────┐
+                    │ ahsir start  (scheduler)                    │
+                    │                                             │
+                    │  registry          gateway                  │
+                    │  /agents           /agents/{name}/chat      │
+                    │  heartbeats        /agents/{name}/tasks/{id}│
+                    │  endpoint lookup   /config/timeouts         │
+                    └─────────────────┬───────────────────────────┘
+                                      │ A2A JSON-RPC message/send
+                                      │ or message/stream
+            ┌─────────────────────────┴───────────────────────────┐
+            ▼                                                     ▼
+ ┌───────────────────────────────┐                    ┌───────────────────────────────┐
+ │ ahsir-agent: student          │                    │ ahsir-agent: teacher          │
+ │ - A2A server + task store     │                    │ - A2A server + task store     │
+ │ - executor parses A2A_CALL    │── peer A2A call ──►│ - executor handles request    │
+ │ - SessionPool by contextId    │                    │ - SessionPool by contextId    │
+ │ - provider session backend:   │                    │ - provider session backend:   │
+ │   ClaudeSession / CodexSession│                    │   ClaudeSession / CodexSession│
+ └───────────────┬───────────────┘                    └───────────────┬───────────────┘
+                 │                                                    │
+       ┌─────────┴─────────┐                                ┌─────────┴─────────┐
+       │ claude stream-json│  or  codex exec --json         │ claude stream-json│
+       │ / --resume        │      / exec resume <thread>    │ / codex exec      │
+       └───────────────────┘                                └───────────────────┘
 ```
 
 ## Repo layout
@@ -48,7 +63,7 @@ fleet without speaking A2A directly.
 | `cmd/ahsir-agent/` | Per-agent process; loads agent-card, hosts A2A endpoint, drives the LLM CLI |
 | `internal/scheduler/` | Config, agent lifecycle, registry, HTTP gateway |
 | `internal/registry/` | Agent registration / heartbeat / lookup |
-| `internal/wrapper/` | A2A server, executor, session pool (long-running `claude` subprocesses with persistence + HA), agent client |
+| `internal/wrapper/` | A2A server/client, executor, `SessionPool`, `ClaudeSession`, `CodexSession`, persistence + HA |
 | `internal/mcp/` | MCP stdio server + scheduler HTTP client |
 | `example/` | Working two-agent setup (student delegates to teacher) |
 | `docs/superpowers/` | Specs, plans, and design notes |
@@ -79,7 +94,7 @@ The plugin bundles:
 
 - The `ahsir` and `ahsir-agent` CLI binaries (pre-built per platform under `plugin/bin/<os>-<arch>/`).
 - A small wrapper at `plugin/bin/ahsir` that auto-detects platform.
-- A skill at `plugin/skills/ahsir/SKILL.md` that teaches Claude **when** to use ahsir (parallel sub-tasks, specialist agents, multi-turn with a specific agent) and **how** to invoke it (`ahsir list`, `ahsir chat`, etc).
+- A skill at `plugin/skills/orchestrator/SKILL.md` that teaches Claude **when** to use ahsir (parallel sub-tasks, specialist agents, multi-turn with a specific agent) and **how** to invoke it (`ahsir list`, `ahsir chat`, etc).
 
 ### Install (recommended: via marketplace)
 
@@ -206,26 +221,58 @@ port_range:
 ### `<workspace>/.a2a/agent-card.yaml` — per-agent config
 
 System prompt, runtime backend (provider / baseURL / apiKey / model),
-filesystem allow-list, and the per-agent LLM subprocess timeout.
+filesystem allow-list, pool limits, streaming settings, and the per-agent LLM
+subprocess timeout.
 
 ```yaml
 name: teacher
 runtime:
   command: claude
-  args: ["-p", "--output-format", "text"]
+  args: []
   timeout: 300s          # claude subprocess deadline
-  provider: zhipu
+  provider: deepseek
+  baseURL: https://api.deepseek.com/anthropic
   apiKey: "${MODEL_API_KEY}"
-  model: glm-5.1
+  model: deepseek-v4-pro
 filesystem:
   enabled: true
   allowed_paths:
     - "."
     - "/tmp"
+pool:
+  max_active: 50          # optional; 0/unset = unlimited
+  overload_policy: reject # or evict-lru
+streaming:
+  partial_messages: true  # ClaudeSession only; enables A2A SSE deltas
 ```
 
-For Codex CLI-backed agents, use `provider: codex` and `command: codex`.
-`apiKey` maps to `CODEX_API_KEY`; `model` maps to `codex exec --model`.
+Runtime provider choices:
+
+| Provider | Runtime backend | Notes |
+|---|---|---|
+| `anthropic` or empty | `ClaudeSession` via `claude -p --input-format=stream-json` | Uses local Claude auth unless `apiKey` / env are supplied. |
+| `deepseek` | `ClaudeSession` against DeepSeek's Anthropic-compatible endpoint | Defaults `baseURL` to `https://api.deepseek.com/anthropic`; `apiKey` maps to `ANTHROPIC_AUTH_TOKEN`. |
+| `zhipu` | `ClaudeSession` against Zhipu's Anthropic-compatible endpoint | Defaults `baseURL` to `https://open.bigmodel.cn/api/anthropic`. |
+| `codex` | `CodexSession` via `codex exec --json` | `apiKey` maps to `CODEX_API_KEY`; `model` maps to `--model`; resume uses Codex `thread_id`. |
+
+Codex-backed agent example:
+
+```yaml
+name: reviewer
+runtime:
+  command: codex
+  args: ["--ignore-user-config", "--ignore-rules"]
+  timeout: 300s
+  provider: codex
+  model: gpt-5.4        # optional; omit to use Codex CLI defaults
+filesystem:
+  enabled: true
+  allowed_paths:
+    - "."
+```
+
+Agents can mix providers freely. The e2e suite includes a real mixed run where
+a Claude/DeepSeek-backed student delegates to a Codex-backed teacher over A2A.
 
 ## Timeout topology
 
@@ -243,20 +290,31 @@ response latency (a fast classifier vs. a deep researcher legitimately differ).
 
 ## Diagnostics: reading the logs
 
-The agent runs a long-lived `claude` subprocess per A2A `contextId`
-(`ClaudeSession` pooled by `SessionPool`). Each session-lifecycle event emits
-one line on the agent's stdout, which the scheduler tees into its own
-terminal:
+Every agent has a `SessionPool` keyed by A2A `contextId`. The pool returns the
+same provider session for repeated turns in the same conversation and persists
+`contextId → runtime session id` under `<workspace>/.a2a/sessions.json`.
+
+For Claude-backed agents, the pool owns one long-running `claude` subprocess
+per active context. Session starts look like this:
 
 ```
 claude session: started pid=59108 cmd=claude args=[-p --input-format=stream-json --output-format=stream-json --verbose]
 ```
 
-When the pool resumes an evicted (or unhealthy) session, the same line
-carries the `--resume=<id>` flag:
+When the pool resumes an evicted, restarted, or unhealthy Claude session, the
+line carries `--resume=<id>`:
 
 ```
 claude session: started pid=67914 cmd=claude args=[... --resume=4a038c6b-f0cb-4ea6-ad1c-05eb7741511c]
+```
+
+For Codex-backed agents, each turn starts a `codex exec --json` process. The
+first turn records Codex's `thread_id`; later turns for the same context use
+`codex exec resume <thread_id>`:
+
+```
+codex session: started pid=70022 cmd=codex args=[exec --json --sandbox=read-only --skip-git-repo-check ...]
+codex session: started pid=70548 cmd=codex args=[exec --json --sandbox=read-only --skip-git-repo-check resume 019e99a5-... ...]
 ```
 
 Inter-agent traffic and per-request receive markers:
@@ -271,8 +329,10 @@ Useful greps:
 
 | Grep | What it tells you |
 |---|---|
-| `pid=` | Every new `claude` subprocess (one per contextId, per agent, until idle eviction) |
-| `--resume=` | Pool eviction recovery, cross-restart resume, or self-healing on SIGKILL |
+| `claude session: started` | Every new Claude runtime process (one per active contextId, per agent) |
+| `codex session: started` | Every Codex non-interactive turn |
+| `--resume=` | Claude pool eviction recovery, cross-restart resume, or self-healing on SIGKILL |
+| ` exec resume ` | Codex turn resumed from a prior `thread_id` |
 | `[teacher]` / `[student]` | Per-agent request/log filtering |
 | `[X → Y] A2A_CALL` | Cross-agent delegations |
 
@@ -298,26 +358,33 @@ Includes:
 
 No `MODEL_API_KEY` or live `claude` CLI required — the default suite uses mocks.
 
-### End-to-end with a real LLM (opt-in)
+### End-to-end with real LLMs (opt-in)
 
 The `e2e/` package holds top-to-bottom integration tests that spawn the real
-scheduler subprocess against real `claude` CLIs and a real DeepSeek
-(or other Anthropic-compat) endpoint. Build-tagged `e2e` so they never run
-in the default pipeline.
+scheduler subprocess against real provider CLIs. Build-tagged `e2e` so they
+never run in the default pipeline.
 
 ```bash
 # Build binaries first
 go build -o bin/ahsir ./cmd/ahsir
 go build -o bin/ahsir-agent ./cmd/ahsir-agent
 
-# Run the e2e suite
+# ClaudeSession / Anthropic-compatible provider path
 AHSIR_E2E_CLAUDE=1 MODEL_API_KEY=<your-deepseek-key> \
   go test -tags=e2e -timeout=5m -v ./e2e/
+
+# CodexSession path
+AHSIR_E2E_CODEX=1 \
+  go test -tags=e2e -timeout=8m -v ./e2e/ -run TestCodexProvider_E2E
+
+# Mixed provider path: Claude/DeepSeek student delegates to Codex teacher
+AHSIR_E2E_MIXED=1 MODEL_API_KEY=<your-deepseek-key> \
+  go test -tags=e2e -timeout=8m -v ./e2e/ -run TestMixedClaudeAndCodexCollaborate_E2E
 ```
 
-Tests skip gracefully if `bin/ahsir(-agent)` isn't built, `claude` isn't on
-PATH, or `AHSIR_E2E_CLAUDE` / `MODEL_API_KEY` aren't set — so the same
-command can be wired into CI conditionally without manual gating.
+Tests skip gracefully if `bin/ahsir(-agent)` isn't built, the required provider
+CLI is not on PATH, or the matching gate/env vars are missing — so the same
+commands can be wired into CI conditionally without manual gating.
 
 There's also a lower-level e2e at `internal/wrapper/session_claude_e2e_test.go`
 that exercises `ClaudeSession` directly against real claude (no scheduler /
