@@ -3,6 +3,7 @@ package main
 import (
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/wu8685/ahsir/internal/wrapper"
 )
@@ -41,6 +42,20 @@ func TestBuildSessionConfig_CodexProvider(t *testing.T) {
 	}
 }
 
+func TestBuildSessionConfig_RuntimeTimeoutZeroIsPreserved(t *testing.T) {
+	cfg, err := buildSessionConfig("coder", wrapper.RuntimeConfig{
+		Provider: "codex",
+		Command:  "codex",
+		Timeout:  "0s",
+	}, wrapper.FilesystemConfig{}, wrapper.StreamingConfig{}, "/tmp/workspace")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Timeout != 0 {
+		t.Fatalf("expected runtime.timeout=0s to disable provider deadline, got %s", cfg.Timeout)
+	}
+}
+
 func TestBuildSessionConfig_ClaudeProviderStillGetsClaudeFlags(t *testing.T) {
 	cfg, err := buildSessionConfig("teacher", wrapper.RuntimeConfig{
 		Provider: "anthropic",
@@ -58,5 +73,39 @@ func TestBuildSessionConfig_ClaudeProviderStillGetsClaudeFlags(t *testing.T) {
 	}
 	if !strings.Contains(joined, "--include-partial-messages") {
 		t.Fatalf("missing claude partial flag in %v", cfg.Args)
+	}
+}
+
+func TestPoolRetentionConfigDefaultsAndOverrides(t *testing.T) {
+	defaults, err := poolRetentionConfig(wrapper.PoolConfig{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if defaults.idleTTL != 30*time.Minute {
+		t.Fatalf("default idleTTL = %s", defaults.idleTTL)
+	}
+	if defaults.evictedTTL != 30*24*time.Hour {
+		t.Fatalf("default evictedTTL = %s", defaults.evictedTTL)
+	}
+	if defaults.maxEvicted != 1000 {
+		t.Fatalf("default maxEvicted = %d", defaults.maxEvicted)
+	}
+
+	got, err := poolRetentionConfig(wrapper.PoolConfig{
+		IdleTTL:    "45m",
+		EvictedTTL: "7d",
+		MaxEvicted: 25,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.idleTTL != 45*time.Minute {
+		t.Fatalf("idleTTL override = %s", got.idleTTL)
+	}
+	if got.evictedTTL != 7*24*time.Hour {
+		t.Fatalf("evictedTTL override = %s", got.evictedTTL)
+	}
+	if got.maxEvicted != 25 {
+		t.Fatalf("maxEvicted override = %d", got.maxEvicted)
 	}
 }

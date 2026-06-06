@@ -1102,6 +1102,46 @@ func TestSessionPool_CapDoesNotCountEvictedEntries(t *testing.T) {
 	}
 }
 
+func TestSessionPool_MaxEvictedDeletesOldestInactiveMappings(t *testing.T) {
+	factory, _, _, _ := newRecordingFactory()
+	mp := newMemPersist()
+	p := NewSessionPoolWithPersistence(factory, 30*time.Minute, 30*24*time.Hour, mp)
+	defer p.Stop()
+	p.SetMaxEvicted(2)
+
+	now := time.Date(2026, 6, 7, 10, 0, 0, 0, time.UTC)
+	p.setClock(func() time.Time { return now })
+
+	ctx := context.Background()
+	if _, err := p.LookupOrCreate(ctx, "ctx-active"); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, contextID := range []string{"ctx-oldest", "ctx-middle", "ctx-newest"} {
+		if _, err := p.LookupOrCreate(ctx, contextID); err != nil {
+			t.Fatal(err)
+		}
+		now = now.Add(31 * time.Minute)
+		if _, err := p.LookupOrCreate(ctx, "ctx-active"); err != nil {
+			t.Fatal(err)
+		}
+		p.reapOnce()
+	}
+
+	snap := mp.snapshot()
+	if _, ok := snap["ctx-active"]; !ok {
+		t.Fatalf("active mapping should not be deleted by max_evicted enforcement: %v", snap)
+	}
+	if _, ok := snap["ctx-oldest"]; ok {
+		t.Fatalf("oldest evicted mapping should be deleted when max_evicted is exceeded: %v", snap)
+	}
+	for _, kept := range []string{"ctx-middle", "ctx-newest"} {
+		if rec, ok := snap[kept]; !ok || rec.State != persistStateEvicted {
+			t.Fatalf("expected %s to remain evicted, got rec=%+v ok=%t snapshot=%v", kept, rec, ok, snap)
+		}
+	}
+}
+
 // TestSessionPool_CapAllowsResumingSameContext verifies the cap doesn't
 // stop a contextID from being re-activated when it already has an
 // EVICTED entry. This is the "user returns to a stale conversation"

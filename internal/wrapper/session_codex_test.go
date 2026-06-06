@@ -197,3 +197,15 @@ func TestCodexSession_TurnReturnsPartialTextWithError(t *testing.T) {
 		t.Fatalf("err = %v", err)
 	}
 }
+
+func TestCodexSession_ZeroTimeoutDoesNotSetTurnDeadline(t *testing.T) {
+	s := newCodexSessionWithRunner(SessionConfig{Command: "codex", Timeout: 0}, "", func(ctx context.Context, cfg SessionConfig, resumeID, prompt string) (codexRunResult, error) {
+		if _, ok := ctx.Deadline(); ok {
+			t.Fatal("expected no deadline when cfg.Timeout is 0")
+		}
+		return codexRunResult{Text: "ok"}, nil
+	})
+	if _, err := s.Turn(context.Background(), "x"); err != nil {
+		t.Fatal(err)
+	}
+}

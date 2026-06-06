@@ -23,7 +23,7 @@ session-reuse/
 └── README.md
 ```
 
-`sessions.json` is created automatically by the agent on first request. It maps `contextId` → `sessionId` so a restart can resume.
+`sessions.json` is created automatically by the agent on first request. It maps `contextId` → `sessionId` so a restart can resume. Inactive mappings are bounded by `pool.max_evicted` and `pool.evicted_ttl`; the default keeps up to 1000 inactive mappings for up to 30 days and deletes the oldest inactive records first.
 
 ## Prerequisites
 
@@ -43,7 +43,7 @@ Two curls back-to-back with the same `contextId`. The teacher recalls the codewo
 
 ```bash
 # Turn 1 — give the teacher something to remember
-curl -s -X POST http://127.0.0.1:9801/ \
+curl -s -X POST http://127.0.0.1:9800/a2a/teacher \
   -H 'Content-Type: application/json' \
   -d '{
     "jsonrpc": "2.0",
@@ -60,7 +60,7 @@ curl -s -X POST http://127.0.0.1:9801/ \
   }'
 
 # Turn 2 — same contextId, ask the teacher to recall
-curl -s -X POST http://127.0.0.1:9801/ \
+curl -s -X POST http://127.0.0.1:9800/a2a/teacher \
   -H 'Content-Type: application/json' \
   -d '{
     "jsonrpc": "2.0",
@@ -117,7 +117,7 @@ Stop and restart the scheduler. The next curl on the same `contextId` resumes th
 ./bin/ahsir start example/session-reuse/ahsir.yaml
 
 # Same contextId, ask again:
-curl -s -X POST http://127.0.0.1:9801/ \
+curl -s -X POST http://127.0.0.1:9800/a2a/teacher \
   -H 'Content-Type: application/json' \
   -d '{
     "jsonrpc": "2.0",
@@ -155,7 +155,7 @@ TEACHER_PID=<the-pid-from-the-log>
 kill -9 $TEACHER_PID
 
 # Curl again with the same contextId
-curl -s -X POST http://127.0.0.1:9801/ \
+curl -s -X POST http://127.0.0.1:9800/a2a/teacher \
   -H 'Content-Type: application/json' \
   -d '{
     "jsonrpc": "2.0",
@@ -186,6 +186,7 @@ The teacher still recalls `jade-tiger-99`. The pool noticed the prior session wa
 - The JSON field is **`contextId`** (camelCase, lowercase `d`). `contextID` / `context_id` are silently ignored and you'll never see reuse.
 - `messageId` must differ across requests — the A2A SDK may dedupe and replay the previous task otherwise.
 - Each request specifies the **outer** `contextId`. The internal `sessionId` (the one in `sessions.json`) is owned by claude and rotates when claude wants — `contextId` is your stable handle.
+- `sessions.json` is a resume cache, not the scheduler task ledger. When `pool.max_evicted` is exceeded, the oldest inactive mappings are removed; active mappings are preserved.
 - If you delete `~/.claude/projects/.../<sessionId>.jsonl` between turns, `--resume` will fail (claude has lost the history). The pool will still spawn a new process but the teacher won't remember the prior turns.
 
 ## Stop

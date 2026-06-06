@@ -50,21 +50,26 @@ The scheduler reads `example/multi-agent/ahsir.yaml`, starts both agents, and ru
 ./bin/ahsir start example/multi-agent/ahsir.yaml
 ```
 
-**Port allocation:** ports are assigned from `port_range.start` (default 9801) in declaration order:
+**Internal port allocation:** local agent ports are assigned from
+`port_range.start` (default 9801) in declaration order:
 
 | Agent | Port |
 |-------|------|
 | teacher | 9801 |
 | student | 9802 |
 
-(The scheduler prints the assignment to stdout: `Agent <name> listening on port <port>`.)
+The scheduler prints the assignment to stdout: `Agent <name> listening on port
+<port>`. These ports are internal execution targets; public A2A requests should
+use the scheduler endpoint `/a2a/{agent}`. Scheduler-started local agents reject
+direct A2A JSON-RPC on the internal port unless the scheduler-issued internal
+token is present.
 
 ### 3. Ask student to delegate to teacher
 
 Be **explicit** about delegation. Loose prompts like "summarize X; ask the teacher if you need help" often let the model answer directly without emitting an `---A2A_CALL---` marker — phrase it as a direct instruction to delegate.
 
 ```bash
-curl -s -X POST http://127.0.0.1:9802/ \
+curl -s -X POST http://127.0.0.1:9800/a2a/student \
   -H 'Content-Type: application/json' \
   -d '{
     "jsonrpc": "2.0",
@@ -117,7 +122,7 @@ Verify end-to-end:
 
 ```bash
 # Adjust the path to a directory under one of teacher's allowed_paths.
-curl -s -X POST http://127.0.0.1:9802/ \
+curl -s -X POST http://127.0.0.1:9800/a2a/student \
   -H 'Content-Type: application/json' \
   -d '{
     "jsonrpc": "2.0",
@@ -140,12 +145,21 @@ To grant write or bash access, edit `cmd/ahsir-agent/main.go` and swap `--allowe
 
 ### 5. Scheduler HTTP API (registry + gateway)
 
-The scheduler exposes two groups of endpoints on port 9800. Registry endpoints serve agent CRUD; gateway endpoints forward chat / task-status into the running agents over A2A. The `ahsir` CLI uses these same gateway paths.
+The scheduler exposes three groups of endpoints on port 9800. Registry
+endpoints serve public Agent Cards whose URLs point back to scheduler
+`/a2a/{agent}` routes; the A2A proxy forwards native JSON-RPC into the internal
+agent ports; chat / task-status gateway endpoints provide CLI-friendly wrappers.
+The `ahsir` CLI uses these same gateway paths.
 
 ```bash
 # Registry: list / get
 curl -s http://127.0.0.1:9800/agents
 curl -s http://127.0.0.1:9800/agents/student
+
+# Native A2A through scheduler
+curl -s -X POST http://127.0.0.1:9800/a2a/teacher \
+  -H 'Content-Type: application/json' \
+  -d '{"jsonrpc":"2.0","method":"message/send","params":{"message":{"messageId":"msg-a2a","role":"user","parts":[{"kind":"text","text":"What is a goroutine?"}]}},"id":1}'
 
 # Gateway: chat (forwards to the agent over A2A)
 curl -s -X POST http://127.0.0.1:9800/agents/teacher/chat \
@@ -158,17 +172,31 @@ curl -s http://127.0.0.1:9800/agents/teacher/tasks/<task-id>
 
 This is also the quickest way to sanity-check the gateway after restarting the scheduler; `ahsir chat` is a small wrapper over this path.
 
+Each local agent also exposes internal operational endpoints. These remain
+token-free so the scheduler and operators can check process health:
+
+```bash
+curl -s http://127.0.0.1:9801/healthz
+curl -s http://127.0.0.1:9801/readyz
+curl -s http://127.0.0.1:9801/.well-known/agent-card.json
+```
+
+If an agent process exits unexpectedly, or if `/healthz` fails repeatedly, the
+scheduler restarts it on the same port with exponential backoff. `ahsir agent
+delete <name>` and scheduler shutdown are treated as intentional stops and are
+not restarted.
+
 ### 6. Tune timeouts
 
 There are three deadlines in the chain; the invariant is **outer ≥ inner**:
 
 | Where | Default | Configured in |
 |---|---|---|
-| CLI `http.Client.Timeout` | `chat + 1m` | fetched from scheduler at startup |
-| Gateway forwarding (`POST /agents/{n}/chat`) | 10m | `timeouts.chat` in `ahsir.yaml` |
-| Per-agent LLM subprocess deadline | 300s | `runtime.timeout` in each `agent-card.yaml` |
+| CLI `http.Client.Timeout` | `chat + 1m`, or no timeout when `chat: 0s` | fetched from scheduler at startup |
+| Gateway forwarding (`POST /agents/{n}/chat`) | 10m, or no deadline when `chat: 0s` | `timeouts.chat` in `ahsir.yaml` |
+| Per-agent provider deadline | 300s, or no provider deadline with `runtime.timeout: 0s` | `runtime.timeout` in each `agent-card.yaml` |
 
-Bump `timeouts.chat` if any agent's `runtime.timeout` is increased — the CLI picks up the new value when it talks to the scheduler.
+Bump `timeouts.chat` if any agent's `runtime.timeout` is increased — the CLI picks up the new value when it talks to the scheduler. For intentionally long-running work, set both `timeouts.chat: 0s` and the relevant agent's `runtime.timeout: 0s`.
 
 ### 7. Reading the logs
 

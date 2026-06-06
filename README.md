@@ -2,8 +2,8 @@
 
 `ahsir` is a small Go scheduler that runs multiple LLM-backed agents as local
 processes, lets them talk to each other over the
-[A2A protocol](https://google.github.io/A2A/), and lets Claude Code drive the
-fleet through the bundled plugin skill plus the `ahsir` CLI.
+[A2A protocol](https://google.github.io/A2A/), and lets Claude Code or Codex
+drive the fleet through the bundled plugin skill plus the `ahsir` CLI.
 
 Each agent is an `ahsir-agent` process with an A2A JSON-RPC HTTP endpoint and
 a provider-backed `Session` implementation. Today the production session
@@ -15,15 +15,22 @@ backends are:
   Codex `thread_id` for the same A2A `contextId`.
 
 The scheduler owns the agent registry and a gateway that forwards chat /
-task-status requests. The Claude Code plugin teaches Claude when to use ahsir
-and how to call `ahsir list`, `ahsir chat`, and related CLI commands.
+task-status requests. The bundled Claude Code and Codex plugin manifests expose
+the same skill and CLI wrappers, so both hosts learn when to use ahsir and how
+to call `ahsir list`, `ahsir chat`, and related commands.
+
+For local agents started by the scheduler, ahsir also acts as a lightweight
+supervisor: if an `ahsir-agent` process exits unexpectedly, or if its
+`/healthz` endpoint fails repeatedly, the scheduler restarts it on the same
+port with exponential backoff. Explicit `ahsir agent delete` / scheduler
+shutdown still stop the process without restart.
 
 ## Architecture
 
 ```
                    ┌─────────────────────────────────────────────┐
   Claude Code ───► │ ahsir plugin skill                         │
-  + Bash tool      │ chooses ahsir CLI commands                  │
+  or Codex         │ chooses ahsir CLI commands                  │
                    └─────────────────┬───────────────────────────┘
                                      │ ahsir list/chat/status
   curl / tests ──────────────────────┘
@@ -34,16 +41,17 @@ and how to call `ahsir list`, `ahsir chat`, and related CLI commands.
                     │  registry          gateway                  │
                     │  /agents           /agents/{name}/chat      │
                     │  heartbeats        /agents/{name}/tasks/{id}│
-                    │  endpoint lookup   /config/timeouts         │
+                    │  A2A proxy         /a2a/{name}              │
+                    │  config            /config/timeouts         │
                     └─────────────────┬───────────────────────────┘
-                                      │ A2A JSON-RPC message/send
-                                      │ or message/stream
+                                     │ A2A JSON-RPC message/send
+                                     │ or message/stream
             ┌─────────────────────────┴───────────────────────────┐
             ▼                                                     ▼
  ┌───────────────────────────────┐                    ┌───────────────────────────────┐
  │ ahsir-agent: student          │                    │ ahsir-agent: teacher          │
- │ - A2A server + task store     │                    │ - A2A server + task store     │
- │ - executor handles agent calls│── peer A2A call ──►│ - executor handles request    │
+ │ - internal A2A server         │                    │ - internal A2A server         │
+ │ - executor handles agent calls│── via scheduler ──►│ - executor handles request    │
  │ - SessionPool by contextId    │                    │ - SessionPool by contextId    │
  │ - provider session backend:   │                    │ - provider session backend:   │
  │   ClaudeSession / CodexSession│                    │   ClaudeSession / CodexSession│
@@ -54,6 +62,30 @@ and how to call `ahsir list`, `ahsir chat`, and related CLI commands.
        │ / --resume        │      / exec resume <thread>    │ / codex exec      │
        └───────────────────┘                                └───────────────────┘
 ```
+
+Each agent HTTP server exposes a few non-LLM operational endpoints alongside
+the internal A2A JSON-RPC endpoint. Public A2A traffic should use the
+scheduler-owned URL from the registry, `http://<scheduler>/a2a/{agentName}`;
+direct agent ports are reserved for internal forwarding, health checks, and
+local debugging. Local agents started by the scheduler require an internal
+`X-Ahsir-Internal-Token` header for A2A JSON-RPC, and the scheduler proxy adds
+that header automatically.
+
+| Endpoint | Purpose |
+|---|---|
+| `GET /healthz` | Liveness: the `ahsir-agent` process and HTTP server can answer. |
+| `GET /readyz` | Readiness: the agent card is loaded and the executor is wired. |
+| `GET /.well-known/agent-card.json` | A2A Agent Card discovery using the SDK's standard well-known path. |
+
+The scheduler probes local agents through `/healthz` after a startup grace
+period. Non-2xx responses, request timeouts, or connection failures count as
+health failures; consecutive failures trigger the same restart supervisor used
+for abnormal process exits.
+
+Scheduler-mediated chat and A2A proxy calls are recorded in an append-only
+invocation ledger at `<dir-of-ahsir.yaml>/.ahsir/ledger.jsonl`. The scheduler
+replays this JSONL file on startup so future recovery layers can continue from
+interrupted `contextId` work even after a scheduler restart.
 
 ## Repo layout
 
@@ -82,9 +114,60 @@ export MODEL_API_KEY=<your-deepseek-key>
 ./bin/ahsir start example/multi-agent/ahsir.yaml
 ```
 
-Then either curl the agents directly, hit the scheduler gateway, or drive the
-fleet from Claude Code through the plugin skill and `ahsir chat`. Full hands-on
-instructions live in [`example/README.md`](example/README.md).
+Then either curl the scheduler A2A endpoint, hit the scheduler chat gateway, or
+drive the fleet from Claude Code / Codex through the plugin skill and `ahsir chat`. Full
+hands-on instructions live in [`example/README.md`](example/README.md).
+
+## Install as a Codex plugin
+
+ahsir can be installed into Codex with the same user experience as Claude Code:
+the plugin exposes the same orchestrator skill and the same `plugin/bin/ahsir`
+wrapper, which auto-selects the bundled binary for your OS/arch.
+
+### Install (recommended: via marketplace)
+
+```bash
+codex plugin marketplace add wu8685/ahsir
+codex plugin add ahsir@ahsir
+```
+
+Then add the installed plugin's wrapper to your shell PATH so `ahsir` also
+works from a normal terminal:
+
+```bash
+AHSIR_PLUGIN_DIR="$(codex plugin list | awk '/ahsir@ahsir/ {print $NF; exit}')"
+echo "export PATH=\"$AHSIR_PLUGIN_DIR/bin:\$PATH\"" >> ~/.zshrc
+exec zsh
+```
+
+Supported platforms: **darwin-arm64**, **darwin-amd64**, **linux-amd64**,
+**linux-arm64**. If you're on a different OS/arch, use the local-clone option
+and build the plugin binaries for your platform.
+
+### Install (alternative: local clone, for development)
+
+```bash
+git clone https://github.com/wu8685/ahsir.git
+cd ahsir
+make plugin-current
+
+codex plugin marketplace add "$(pwd)"
+codex plugin add ahsir@ahsir
+
+AHSIR_PLUGIN_DIR="$(codex plugin list | awk '/ahsir@ahsir/ {print $NF; exit}')"
+echo "export PATH=\"$AHSIR_PLUGIN_DIR/bin:\$PATH\"" >> ~/.zshrc
+exec zsh
+```
+
+Once installed, Codex sees the `orchestrator` skill and can use `ahsir ping`,
+`ahsir list`, `ahsir chat`, `ahsir status`, and `ahsir agent ...` through its
+shell tools. The scheduler is still a local service; start it in a separate
+terminal before delegating work:
+
+```bash
+export MODEL_API_KEY=<your-deepseek-or-anthropic-key>
+ahsir start path/to/your/ahsir.yaml
+```
 
 ## Install as a Claude Code plugin
 
@@ -207,8 +290,11 @@ registry:
 
 # Outer-envelope timeouts. Optional — defaults shown.
 # `chat` MUST be >= the largest agent's runtime.timeout (in agent-card.yaml).
+# Set `chat: 0s` only for intentional long-running work with no scheduler
+# gateway deadline; hung providers will then keep the request open.
 # The CLI fetches `chat` from the scheduler and uses chat+1m as its own
-# http.Client.Timeout, so this is the single knob you tune.
+# http.Client.Timeout for positive values. With `chat: 0s`, the CLI also
+# disables its own HTTP timeout.
 timeouts:
   chat: 10m
   task_status: 30s
@@ -221,15 +307,15 @@ port_range:
 ### `<workspace>/.a2a/agent-card.yaml` — per-agent config
 
 System prompt, runtime backend (provider / baseURL / apiKey / model),
-filesystem allow-list, pool limits, streaming settings, and the per-agent LLM
-subprocess timeout.
+filesystem allow-list, pool limits, streaming settings, and the per-agent
+provider deadline.
 
 ```yaml
 name: teacher
 runtime:
   command: claude
   args: []
-  timeout: 300s          # claude subprocess deadline
+  timeout: 300s          # provider turn deadline; set 0s for no provider deadline
   provider: deepseek
   baseURL: https://api.deepseek.com/anthropic
   apiKey: "${MODEL_API_KEY}"
@@ -241,6 +327,9 @@ filesystem:
     - "/tmp"
 pool:
   max_active: 50          # optional; 0/unset = unlimited
+  max_evicted: 1000       # inactive resume mappings retained; oldest evicted records are deleted first
+  idle_ttl: 30m           # active session idle time before closing the live process
+  evicted_ttl: 30d        # inactive mapping TTL; accepts Go durations plus day suffix such as 30d
   overload_policy: reject # or evict-lru
 streaming:
   partial_messages: true  # ClaudeSession only; enables A2A SSE deltas
@@ -262,7 +351,7 @@ name: reviewer
 runtime:
   command: codex
   args: ["--ignore-user-config", "--ignore-rules"]
-  timeout: 300s
+  timeout: 300s          # set 0s for no Codex turn deadline
   provider: codex
   model: gpt-5.4        # optional; omit to use Codex CLI defaults
 filesystem:
@@ -279,20 +368,27 @@ a Claude/DeepSeek-backed student delegates to a Codex-backed teacher over A2A.
 There are three layers of deadlines; the invariant is **outer ≥ inner**.
 
 ```
-CLI http.Client.Timeout  =  chat + 1m   ← fetched from /config/timeouts
-gateway ctx              =  chat        ← timeouts.chat in ahsir.yaml
-agent runtime.timeout    =  300s        ← per agent-card.yaml
+CLI http.Client.Timeout  =  chat + 1m, or 0 when chat=0s
+gateway ctx              =  chat, or no deadline when chat=0s
+agent runtime.timeout    =  300s, or 0s for no provider deadline
 ```
 
-Tune the outer two via `timeouts:` in `ahsir.yaml`. The per-agent subprocess
+Tune the outer two via `timeouts:` in `ahsir.yaml`. The per-agent provider
 deadline stays per-agent because it is intrinsic to that agent's expected
 response latency (a fast classifier vs. a deep researcher legitimately differ).
+For intentional long-running work, set both `timeouts.chat: 0s` and that
+agent's `runtime.timeout: 0s`; hung providers will then keep the request open
+until manually stopped or the scheduler/agent process exits.
 
 ## Diagnostics: reading the logs
 
 Every agent has a `SessionPool` keyed by A2A `contextId`. The pool returns the
 same provider session for repeated turns in the same conversation and persists
 `contextId → runtime session id` under `<workspace>/.a2a/sessions.json`.
+Active sessions idle out after `pool.idle_ttl` and become inactive mappings;
+inactive mappings are retained until `pool.evicted_ttl` or until
+`pool.max_evicted` is exceeded, in which case the oldest inactive mappings are
+deleted first. Active mappings are not deleted by `pool.max_evicted`.
 
 For Claude-backed agents, the pool owns one long-running `claude` subprocess
 per active context. Session starts look like this:
@@ -366,6 +462,7 @@ Useful greps:
 | `contextID=<id>` | Full waterfall for one conversation |
 | `executor turn done` | Provider turn timings and token/cost stats |
 | `session pool: lookup` | Session reuse / create / resume / capacity behavior |
+| `Agent <name> recovery:` | Scheduler restart continuation prompt attempts and outcomes |
 
 If you suspect the time is being spent outside the LLM (in scheduler /
 serialization), compare the elapsed sum across all agent log lines
@@ -384,8 +481,8 @@ Includes:
 
 - Unit tests for registry, wrapper, scheduler, and CLI command wiring.
 - An end-to-end gateway test (`internal/scheduler/gateway_test.go`) that spins
-  up a real A2A server with a mock executor and exercises both the direct A2A
-  path and the scheduler-gateway path.
+  up a real A2A server with a mock executor and exercises the scheduler-owned
+  A2A proxy plus the scheduler chat gateway path.
 
 No `MODEL_API_KEY` or live `claude` CLI required — the default suite uses mocks.
 

@@ -15,7 +15,8 @@ registry:
 # Outer-envelope timeouts. Optional — defaults shown.
 # `chat` MUST be >= the largest agent's runtime.timeout (in agent-card.yaml).
 # The CLI fetches `chat` from the scheduler and uses chat+1m as its own
-# http.Client.Timeout, so this is the single knob you tune.
+# http.Client.Timeout for positive values. With `chat: 0s`, the scheduler
+# gateway and CLI both wait without their own deadline.
 timeouts:
   chat: 10m
   task_status: 30s

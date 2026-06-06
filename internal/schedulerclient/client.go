@@ -45,8 +45,10 @@ func NewSchedulerHTTPClient(baseURL string) *SchedulerHTTPClient {
 }
 
 // RefreshTimeout asks the scheduler for its configured gateway chat timeout
-// and bumps the client's http.Client.Timeout to that value plus a 1-minute
-// buffer (so the CLI never kills a request the scheduler would still honour).
+// and aligns the client's http.Client.Timeout with it. Positive chat timeouts
+// get a 1-minute buffer so the CLI never kills a request the scheduler would
+// still honour. A chat timeout of 0 means "no scheduler deadline", so the
+// client also disables its field-level HTTP timeout.
 //
 // Best-effort: any error leaves the existing default in place.
 func (c *SchedulerHTTPClient) RefreshTimeout() (time.Duration, error) {
@@ -67,6 +69,10 @@ func (c *SchedulerHTTPClient) RefreshTimeout() (time.Duration, error) {
 	chat, err := time.ParseDuration(cfg.Chat)
 	if err != nil {
 		return c.httpc.Timeout, fmt.Errorf("parse chat timeout %q: %w", cfg.Chat, err)
+	}
+	if chat == 0 {
+		c.httpc.Timeout = 0
+		return c.httpc.Timeout, nil
 	}
 	c.httpc.Timeout = chat + time.Minute
 	return c.httpc.Timeout, nil

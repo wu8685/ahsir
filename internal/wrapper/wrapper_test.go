@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -53,6 +54,165 @@ func TestAgentWrapperStartStop(t *testing.T) {
 	if err := wrapper.Stop(ctx); err != nil {
 		t.Fatal(err)
 	}
+}
+
+func TestAgentWrapperHealthReadyAndAgentCardEndpoints(t *testing.T) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	port := listener.Addr().(*net.TCPAddr).Port
+	listener.Close()
+
+	card := &a2a.AgentCard{
+		Name:    "health-agent",
+		Version: "1.0.0",
+		URL:     fmt.Sprintf("http://127.0.0.1:%d/", port),
+	}
+	w := NewAgentWrapper(AgentWrapperConfig{
+		Port:      port,
+		AgentCard: card,
+	})
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	if err := w.Start(ctx); err != nil {
+		t.Fatal(err)
+	}
+	defer w.Stop(ctx)
+	waitForHTTP(t, fmt.Sprintf("http://127.0.0.1:%d/healthz", port))
+
+	resp, err := http.Get(fmt.Sprintf("http://127.0.0.1:%d/healthz", port))
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("healthz status = %d", resp.StatusCode)
+	}
+
+	resp, err = http.Get(fmt.Sprintf("http://127.0.0.1:%d/readyz", port))
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusServiceUnavailable {
+		t.Fatalf("readyz before executor status = %d", resp.StatusCode)
+	}
+
+	w.SetupExecutor(
+		func(ctx context.Context, contextID string) (Session, error) {
+			return NewOneshotSession(func(ctx context.Context, prompt string) (string, error) {
+				return "ok", nil
+			}), nil
+		},
+		func() []*a2a.AgentCard { return nil },
+		nil,
+		0,
+		"ready",
+	)
+
+	resp, err = http.Get(fmt.Sprintf("http://127.0.0.1:%d/readyz", port))
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("readyz after executor status = %d", resp.StatusCode)
+	}
+
+	resp, err = http.Get(fmt.Sprintf("http://127.0.0.1:%d/.well-known/agent-card.json", port))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("agent card status = %d", resp.StatusCode)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	var got a2a.AgentCard
+	if err := json.Unmarshal(body, &got); err != nil {
+		t.Fatalf("decode agent card: %v body=%s", err, body)
+	}
+	if got.Name != card.Name {
+		t.Fatalf("agent card name = %q, want %q", got.Name, card.Name)
+	}
+}
+
+func TestAgentWrapperRequiresInternalTokenForA2A(t *testing.T) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	port := listener.Addr().(*net.TCPAddr).Port
+	listener.Close()
+
+	card := &a2a.AgentCard{
+		Name:    "token-agent",
+		Version: "1.0.0",
+		URL:     fmt.Sprintf("http://127.0.0.1:%d/", port),
+	}
+	w := NewAgentWrapper(AgentWrapperConfig{
+		Port:          port,
+		AgentCard:     card,
+		InternalToken: "secret-token",
+	})
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	if err := w.Start(ctx); err != nil {
+		t.Fatal(err)
+	}
+	defer w.Stop(ctx)
+	waitForHTTP(t, fmt.Sprintf("http://127.0.0.1:%d/healthz", port))
+	w.SetupExecutor(
+		func(ctx context.Context, contextID string) (Session, error) {
+			return NewOneshotSession(func(ctx context.Context, prompt string) (string, error) {
+				return "authorized", nil
+			}), nil
+		},
+		func() []*a2a.AgentCard { return nil },
+		nil,
+		0,
+		"token",
+	)
+
+	body := `{"jsonrpc":"2.0","method":"message/send","params":{"message":{"messageId":"msg-token","role":"user","parts":[{"kind":"text","text":"hello"}]}},"id":1}`
+	resp, err := http.Post(fmt.Sprintf("http://127.0.0.1:%d/", port), "application/json", strings.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("missing token status = %d, want 401", resp.StatusCode)
+	}
+
+	req, err := http.NewRequest(http.MethodPost, fmt.Sprintf("http://127.0.0.1:%d/", port), strings.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set(InternalTokenHeader, "secret-token")
+	resp, err = http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("valid token status = %d, want 200", resp.StatusCode)
+	}
+}
+
+func waitForHTTP(t *testing.T, url string) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		resp, err := http.Get(url)
+		if err == nil {
+			resp.Body.Close()
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("%s did not become reachable", url)
 }
 
 // TestAgentWrapperReusesSessionAcrossRequests verifies the linchpin of

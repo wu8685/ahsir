@@ -1,0 +1,37 @@
+{
+  "name": "ahsir",
+  "version": "0.1.0",
+  "description": "Multi-agent collaboration via the ahsir scheduler. Adds CLI commands and a skill that lets Codex dispatch sub-tasks to specialist agents running under ahsir.",
+  "author": {
+    "name": "wu8685",
+    "url": "https://github.com/wu8685"
+  },
+  "homepage": "https://github.com/wu8685/ahsir",
+  "repository": "https://github.com/wu8685/ahsir",
+  "license": "MIT",
+  "keywords": [
+    "multi-agent",
+    "orchestration",
+    "codex",
+    "delegation"
+  ],
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "ahsir",
+    "shortDescription": "Dispatch work to local specialist agents through the ahsir CLI.",
+    "longDescription": "ahsir runs a local scheduler for specialist agents and gives Codex a skill for discovering agents, delegating tasks, preserving context, and creating reusable specialists with the ahsir CLI.",
+    "developerName": "wu8685",
+    "category": "Productivity",
+    "capabilities": [
+      "Interactive",
+      "Automation"
+    ],
+    "websiteURL": "https://github.com/wu8685/ahsir",
+    "defaultPrompt": [
+      "Use ahsir to list available agents.",
+      "Ask the teacher agent to explain this.",
+      "Fan out this review across ahsir agents."
+    ],
+    "brandColor": "#2563EB"
+  }
+}

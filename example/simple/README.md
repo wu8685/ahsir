@@ -1,6 +1,7 @@
 # Example: Simple Single-Agent Q&A
 
-The minimum possible AHSIR setup — one agent (a teacher) listening on A2A, one HTTP request, one LLM round trip, one answer.
+The minimum possible AHSIR setup — one agent (a teacher), one scheduler-owned
+A2A request, one LLM round trip, one answer.
 
 Run this first to confirm your build, registry, agent card, runtime config, and DeepSeek API key are all healthy. Once it works, move on to `../session-reuse/` for the session continuity story.
 
@@ -41,7 +42,7 @@ Executor wired: stream-json SessionPool (... persist=example/simple/workspaces/t
 ## Ask the teacher (in another terminal)
 
 ```bash
-curl -s -X POST http://127.0.0.1:9801/ \
+curl -s -X POST http://127.0.0.1:9800/a2a/teacher \
   -H 'Content-Type: application/json' \
   -d '{
     "jsonrpc": "2.0",
@@ -89,7 +90,7 @@ That's the limitation of this example by design. To carry conversation memory be
 The teacher's `agent-card.yaml` enables `streaming.partial_messages: true`, so the agent is willing to stream token-level deltas back if the client asks for it. To trigger it, use the **`message/stream`** JSON-RPC method instead of `message/send`, and add `Accept: text/event-stream`:
 
 ```bash
-curl -N -X POST http://127.0.0.1:9801/ \
+curl -N -X POST http://127.0.0.1:9800/a2a/teacher \
   -H 'Content-Type: application/json' \
   -H 'Accept: text/event-stream' \
   -d '{
@@ -136,7 +137,7 @@ The format:
 The raw SSE frames above are JSON-shaped — readable but not pretty. To get a "typewriter" effect where only the answer text streams out word by word, pipe the curl output through `awk` to strip the `data:` prefix from each SSE line, then `jq` to pull out the delta text, then `tr` to suppress newlines so the chunks concatenate naturally:
 
 ```bash
-curl -sN -X POST http://127.0.0.1:9801/ \
+curl -sN -X POST http://127.0.0.1:9800/a2a/teacher \
   -H 'Content-Type: application/json' \
   -H 'Accept: text/event-stream' \
   -d '{
@@ -169,7 +170,7 @@ You should see the answer print left-to-right, a few words at a time, until it s
 A pure-awk version (no `jq` required) — slightly more brittle because awk doesn't do real JSON parsing, but useful if you don't have jq handy:
 
 ```bash
-curl -sN -X POST http://127.0.0.1:9801/ \
+curl -sN -X POST http://127.0.0.1:9800/a2a/teacher \
   -H 'Content-Type: application/json' \
   -H 'Accept: text/event-stream' \
   -d '{"jsonrpc":"2.0","method":"message/stream","params":{"message":{"messageId":"m","role":"user","parts":[{"kind":"text","text":"Briefly explain TCP three-way handshake in two sentences."}]}},"id":1}' \

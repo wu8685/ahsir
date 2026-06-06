@@ -4,7 +4,9 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -142,10 +144,9 @@ func assertReplyInTask(t *testing.T, task map[string]any, want string) {
 	t.Fatalf("reply %q not found in task history: %v", want, task)
 }
 
-// TestExampleFlow_OptionA_DirectAgentA2A is the regression test for the
-// "curl http://127.0.0.1:9801/ with JSON-RPC message/send" flow documented
-// in example/README.md. It does NOT go through the scheduler gateway —
-// just the agent's A2A endpoint, exactly like Option A in the README.
+// TestExampleFlow_OptionA_DirectAgentA2A keeps the internal agent A2A server
+// covered. Public examples now use the scheduler-owned /a2a/{agent} endpoint;
+// this direct path remains useful as a low-level wrapper regression test.
 func TestExampleFlow_OptionA_DirectAgentA2A(t *testing.T) {
 	agentURL := realAgent(t, "teacher", "A goroutine is a lightweight thread.", 0)
 
@@ -345,6 +346,131 @@ func TestGatewayChat_AgentReplyDelay(t *testing.T) {
 	}
 }
 
+func TestGatewayChatRecordsInvocationLifecycle(t *testing.T) {
+	sch, gwURL := newTestScheduler(t)
+	release := make(chan struct{})
+	upstream := blockingA2AServer(t, release, "ledger chat reply")
+	sch.Registry().Register(&a2a.AgentCard{
+		Name:               "teacher",
+		URL:                upstream.URL,
+		PreferredTransport: a2a.TransportProtocolJSONRPC,
+	})
+
+	done := make(chan []byte, 1)
+	go func() {
+		body, _ := json.Marshal(map[string]string{
+			"message":   "remember this for recovery",
+			"contextId": "ctx-ledger-chat",
+		})
+		resp, err := http.Post(gwURL+"/agents/teacher/chat", "application/json", bytes.NewReader(body))
+		if err != nil {
+			done <- []byte(err.Error())
+			return
+		}
+		defer resp.Body.Close()
+		raw, _ := io.ReadAll(resp.Body)
+		done <- raw
+	}()
+
+	inFlight := waitForLedgerStatus(t, sch, "teacher", InvocationStatusInFlight)
+	if inFlight.Source != InvocationSourceChatGateway {
+		t.Fatalf("source = %q", inFlight.Source)
+	}
+	if inFlight.ContextID != "ctx-ledger-chat" {
+		t.Fatalf("contextID = %q", inFlight.ContextID)
+	}
+	if inFlight.UserText != "remember this for recovery" {
+		t.Fatalf("user text = %q", inFlight.UserText)
+	}
+
+	close(release)
+	raw := <-done
+	if !bytes.Contains(raw, []byte("ledger chat reply")) {
+		t.Fatalf("chat response missing reply: %s", raw)
+	}
+	completed := waitForLedgerStatus(t, sch, "teacher", InvocationStatusCompleted)
+	if completed.ID != inFlight.ID {
+		t.Fatalf("completed ID = %q, want %q", completed.ID, inFlight.ID)
+	}
+}
+
+func TestGatewayA2AProxyRecordsInvocationLifecycle(t *testing.T) {
+	sch, gwURL := newTestScheduler(t)
+	release := make(chan struct{})
+	upstream := blockingA2AServer(t, release, "ledger proxy reply")
+	sch.Registry().Register(&a2a.AgentCard{
+		Name:               "teacher",
+		URL:                upstream.URL,
+		PreferredTransport: a2a.TransportProtocolJSONRPC,
+	})
+
+	done := make(chan []byte, 1)
+	go func() {
+		body := []byte(`{"jsonrpc":"2.0","method":"message/send","params":{"message":{"messageId":"msg-ledger-a2a","contextId":"ctx-ledger-a2a","role":"user","parts":[{"kind":"text","text":"proxy text for recovery"}]}},"id":1}`)
+		resp, err := http.Post(gwURL+"/a2a/teacher", "application/json", bytes.NewReader(body))
+		if err != nil {
+			done <- []byte(err.Error())
+			return
+		}
+		defer resp.Body.Close()
+		raw, _ := io.ReadAll(resp.Body)
+		done <- raw
+	}()
+
+	inFlight := waitForLedgerStatus(t, sch, "teacher", InvocationStatusInFlight)
+	if inFlight.Source != InvocationSourceA2AProxy {
+		t.Fatalf("source = %q", inFlight.Source)
+	}
+	if inFlight.Method != "message/send" {
+		t.Fatalf("method = %q", inFlight.Method)
+	}
+	if inFlight.ContextID != "ctx-ledger-a2a" {
+		t.Fatalf("contextID = %q", inFlight.ContextID)
+	}
+	if inFlight.MessageID != "msg-ledger-a2a" {
+		t.Fatalf("messageID = %q", inFlight.MessageID)
+	}
+	if inFlight.UserText != "proxy text for recovery" {
+		t.Fatalf("user text = %q", inFlight.UserText)
+	}
+
+	close(release)
+	raw := <-done
+	if !bytes.Contains(raw, []byte("ledger proxy reply")) {
+		t.Fatalf("A2A response missing reply: %s", raw)
+	}
+	completed := waitForLedgerStatus(t, sch, "teacher", InvocationStatusCompleted)
+	if completed.ID != inFlight.ID {
+		t.Fatalf("completed ID = %q, want %q", completed.ID, inFlight.ID)
+	}
+}
+
+func TestGatewayA2AProxyRecordsFailedInvocation(t *testing.T) {
+	sch, gwURL := newTestScheduler(t)
+	port := freeGatewayTestPort(t)
+	sch.Registry().Register(&a2a.AgentCard{
+		Name:               "teacher",
+		URL:                fmt.Sprintf("http://127.0.0.1:%d/", port),
+		PreferredTransport: a2a.TransportProtocolJSONRPC,
+	})
+
+	body := []byte(`{"jsonrpc":"2.0","method":"message/send","params":{"message":{"messageId":"msg-fail","contextId":"ctx-fail","role":"user","parts":[{"kind":"text","text":"will fail"}]}},"id":1}`)
+	resp, err := http.Post(gwURL+"/a2a/teacher", "application/json", bytes.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusBadGateway {
+		raw, _ := io.ReadAll(resp.Body)
+		t.Fatalf("expected 502, got %d: %s", resp.StatusCode, raw)
+	}
+
+	failed := waitForLedgerStatus(t, sch, "teacher", InvocationStatusFailed)
+	if failed.Error == "" {
+		t.Fatal("expected failed invocation to record error detail")
+	}
+}
+
 // TestGatewayTaskStatus covers the GET /agents/{name}/tasks/{taskID} path.
 // Same shape as Option B chat: gateway forwards to the agent over A2A.
 func TestGatewayTaskStatus(t *testing.T) {
@@ -400,6 +526,182 @@ func TestGatewayTaskStatus(t *testing.T) {
 	}
 	if string(task.ID) != taskID {
 		t.Errorf("expected task ID %q, got %q", taskID, task.ID)
+	}
+}
+
+func TestGatewayRegistryReturnsSchedulerA2AURLs(t *testing.T) {
+	sch, gwURL := newTestScheduler(t)
+	agentURL := realAgent(t, "teacher", "public card target", 0)
+	sch.Registry().Register(&a2a.AgentCard{
+		Name:               "teacher",
+		Version:            "1.0.0",
+		URL:                agentURL,
+		PreferredTransport: a2a.TransportProtocolJSONRPC,
+	})
+
+	resp, err := http.Get(gwURL + "/agents/teacher")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		t.Fatalf("GET /agents/teacher: expected 200, got %d: %s", resp.StatusCode, body)
+	}
+	var card a2a.AgentCard
+	if err := json.NewDecoder(resp.Body).Decode(&card); err != nil {
+		t.Fatal(err)
+	}
+	if card.URL != gwURL+"/a2a/teacher" {
+		t.Fatalf("public card URL = %q, want %q", card.URL, gwURL+"/a2a/teacher")
+	}
+
+	resp, err = http.Get(gwURL + "/agents")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		t.Fatalf("GET /agents: expected 200, got %d: %s", resp.StatusCode, body)
+	}
+	var cards []struct {
+		*a2a.AgentCard
+		Status string `json:"status"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&cards); err != nil {
+		t.Fatal(err)
+	}
+	if len(cards) != 1 {
+		t.Fatalf("expected one card, got %d", len(cards))
+	}
+	if cards[0].URL != gwURL+"/a2a/teacher" {
+		t.Fatalf("public list URL = %q, want %q", cards[0].URL, gwURL+"/a2a/teacher")
+	}
+}
+
+func TestGatewayA2AProxyForwardsNativeMessageSend(t *testing.T) {
+	sch, gwURL := newTestScheduler(t)
+	agentURL := realAgent(t, "teacher", "proxied native A2A reply", 0)
+	sch.Registry().Register(&a2a.AgentCard{
+		Name:               "teacher",
+		Version:            "1.0.0",
+		URL:                agentURL,
+		PreferredTransport: a2a.TransportProtocolJSONRPC,
+	})
+
+	task := postA2AMessage(t, gwURL+"/a2a/teacher", "ping through scheduler")
+	if state, _ := task["status"].(map[string]any)["state"].(string); state != string(a2a.TaskStateCompleted) {
+		t.Errorf("expected task state=completed, got %q", state)
+	}
+	assertReplyInTask(t, task, "proxied native A2A reply")
+}
+
+func TestGatewayA2AProxyAddsInternalToken(t *testing.T) {
+	sch, gwURL := newTestScheduler(t)
+	var sawToken string
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		sawToken = r.Header.Get("X-Ahsir-Internal-Token")
+		writeTestA2AReply(t, w, "token accepted")
+	}))
+	defer upstream.Close()
+
+	sch.Registry().Register(&a2a.AgentCard{
+		Name:               "teacher",
+		Version:            "1.0.0",
+		URL:                upstream.URL,
+		PreferredTransport: a2a.TransportProtocolJSONRPC,
+	})
+	sch.agents["teacher"] = &agentProcess{
+		cfg:           AgentConfig{Name: "teacher"},
+		internalToken: "scheduler-token",
+	}
+
+	task := postA2AMessage(t, gwURL+"/a2a/teacher", "ping through scheduler")
+	assertReplyInTask(t, task, "token accepted")
+	if sawToken != "scheduler-token" {
+		t.Fatalf("proxy token header = %q, want scheduler-token", sawToken)
+	}
+}
+
+func writeTestA2AReply(t *testing.T, w http.ResponseWriter, text string) {
+	t.Helper()
+	task := a2a.NewSubmittedTask(a2a.TaskInfo{}, nil)
+	task.Status = a2a.TaskStatus{State: a2a.TaskStateCompleted}
+	task.History = []*a2a.Message{
+		a2a.NewMessage(a2a.MessageRoleAgent, a2a.TextPart{Text: text}),
+	}
+	result, err := json.Marshal(task)
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"jsonrpc": "2.0",
+		"result":  json.RawMessage(result),
+		"id":      "test",
+	})
+}
+
+func blockingA2AServer(t *testing.T, release <-chan struct{}, reply string) *httptest.Server {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		<-release
+		writeTestA2AReply(t, w, reply)
+	}))
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+func waitForLedgerStatus(t *testing.T, sch *Scheduler, agent string, status InvocationStatus) InvocationRecord {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		for _, inv := range sch.Invocations().Snapshot() {
+			if inv.AgentName == agent && inv.Status == status {
+				return inv
+			}
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("timeout waiting for ledger status %s for agent %s; snapshot=%+v", status, agent, sch.Invocations().Snapshot())
+	return InvocationRecord{}
+}
+
+func freeGatewayTestPort(t *testing.T) int {
+	t.Helper()
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer l.Close()
+	return l.Addr().(*net.TCPAddr).Port
+}
+
+func TestGatewayRegistryLeavesRemoteAgentURLUnchanged(t *testing.T) {
+	sch, gwURL := newTestScheduler(t)
+	remoteURL := "http://192.0.2.10:9801/"
+	sch.Registry().Register(&a2a.AgentCard{
+		Name:               "remote-teacher",
+		Version:            "1.0.0",
+		URL:                remoteURL,
+		PreferredTransport: a2a.TransportProtocolJSONRPC,
+	})
+
+	resp, err := http.Get(gwURL + "/agents/remote-teacher")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		t.Fatalf("GET /agents/remote-teacher: expected 200, got %d: %s", resp.StatusCode, body)
+	}
+	var card a2a.AgentCard
+	if err := json.NewDecoder(resp.Body).Decode(&card); err != nil {
+		t.Fatal(err)
+	}
+	if card.URL != remoteURL {
+		t.Fatalf("remote card URL = %q, want %q", card.URL, remoteURL)
 	}
 }
 

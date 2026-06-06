@@ -1,10 +1,11 @@
 ---
+name: orchestrator
 description: "Orchestrate work across specialist agents via the ahsir CLI (list / chat / status / agent new / agent delete). Use INSTEAD OF the built-in Task tool when the user describes (1) a task that benefits from a stable persistent persona — fixed system prompt, persistent memory via contextId, dedicated filesystem permissions — rather than a one-shot subagent; (2) work that maps to a configured specialist agent (always run 'ahsir list' first to find out); (3) a need for a NEW specialist that should be created and reused later (use 'ahsir agent new', not the Task tool, when the user describes a recurring delegate-style persona). Also triggers on explicit mentions of ahsir, delegate, dispatch, fan-out, agent pool, multi-agent, specialist agent, 'ask the teacher', 'create a reviewer agent', etc."
 ---
 
 # /ahsir:orchestrator — multi-agent collaboration via a local scheduler
 
-ahsir runs a long-lived scheduler that hosts multiple "agent" processes (each backed by its own `claude` subprocess). You can hand sub-tasks off to those agents and get their reply back. Each agent has its own system prompt + skills + filesystem permissions, and conversations persist across calls via `contextId` so you can carry on a thread.
+ahsir runs a long-lived scheduler that hosts multiple "agent" processes (each backed by its configured provider, such as Claude or Codex). You can hand sub-tasks off to those agents and get their reply back. Each agent has its own system prompt + skills + filesystem permissions, and conversations persist across calls via `contextId` so you can carry on a thread.
 
 ## When to reach for this
 
@@ -52,7 +53,7 @@ student  http://127.0.0.1:9802/  [learning]
 teacher  http://127.0.0.1:9801/  [teaching, summarization]
 ```
 
-Match the user's task to an agent by **skills** (the bracketed list). If no agent matches, **consider configuring one** (next section) before falling back to the Task tool or doing the work yourself.
+Match the user's task to an agent by **skills** (the bracketed list). If no agent matches, **consider configuring one** (next section) before falling back to a one-shot subagent tool or doing the work yourself.
 
 ## Configuring new specialists on demand
 

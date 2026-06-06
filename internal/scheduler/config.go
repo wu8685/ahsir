@@ -3,6 +3,7 @@ package scheduler
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 	"sync"
 	"time"
 
@@ -29,6 +30,7 @@ type Config struct {
 
 	mu       sync.Mutex
 	nextPort int
+	path     string
 }
 
 // TimeoutsConfig is the single source of truth for the scheduler's
@@ -47,6 +49,8 @@ type TimeoutsConfig struct {
 }
 
 // ChatTimeout returns the parsed Chat timeout, or the default if empty/invalid.
+// A configured duration of 0 disables the scheduler gateway deadline for chat
+// requests, which is useful for explicitly long-running agent work.
 func (t TimeoutsConfig) ChatTimeout() time.Duration {
 	if t.Chat == "" {
 		return defaultChatTimeout
@@ -70,10 +74,11 @@ func (t TimeoutsConfig) TaskStatusTimeout() time.Duration {
 
 // AgentConfig configures a single agent.
 type AgentConfig struct {
-	Name      string `yaml:"name"`
-	Workspace string `yaml:"workspace"`
-	Port      int    `yaml:"port"`
-	Remote    string `yaml:"remote,omitempty"`
+	Name          string `yaml:"name"`
+	Workspace     string `yaml:"workspace"`
+	Port          int    `yaml:"port"`
+	Remote        string `yaml:"remote,omitempty"`
+	InternalToken string `yaml:"-"`
 }
 
 // RegistryConfig configures the registry.
@@ -115,7 +120,22 @@ func LoadConfig(path string) (*Config, error) {
 	}
 
 	cfg.nextPort = cfg.PortRange.Start
+	if abs, err := filepath.Abs(path); err == nil {
+		cfg.path = abs
+	} else {
+		cfg.path = path
+	}
 	return cfg, nil
+}
+
+// InvocationLedgerPath returns the default persistent scheduler ledger path.
+// Empty means the config was constructed in memory and should use an in-memory
+// ledger unless tests or callers explicitly provide one.
+func (c *Config) InvocationLedgerPath() string {
+	if c == nil || c.path == "" {
+		return ""
+	}
+	return filepath.Join(filepath.Dir(c.path), ".ahsir", "ledger.jsonl")
 }
 
 // AllocatePort allocates the next available port from the range.

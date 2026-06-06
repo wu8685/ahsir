@@ -10,14 +10,18 @@ import (
 	"time"
 
 	"github.com/a2aproject/a2a-go/a2a"
+	"github.com/a2aproject/a2a-go/a2asrv"
 )
 
 // AgentWrapperConfig configures an agent wrapper instance.
 type AgentWrapperConfig struct {
-	Port        int
-	RegistryURL string
-	AgentCard   *a2a.AgentCard
+	Port          int
+	RegistryURL   string
+	AgentCard     *a2a.AgentCard
+	InternalToken string
 }
+
+const InternalTokenHeader = "X-Ahsir-Internal-Token"
 
 // AgentWrapper ties together the A2A server, task store, and registry heartbeat.
 type AgentWrapper struct {
@@ -27,6 +31,7 @@ type AgentWrapper struct {
 	httpSrv   *http.Server
 	mu        sync.Mutex
 	running   bool
+	ready     bool
 	cancel    context.CancelFunc
 }
 
@@ -49,6 +54,11 @@ func (w *AgentWrapper) TaskStore() *TaskStore {
 // claude process — conversation history is held by claude itself, not by
 // the wrapper.
 func (w *AgentWrapper) SetupExecutor(openSession func(ctx context.Context, contextID string) (Session, error), listAgents func() []*a2a.AgentCard, callAgent func(ctx context.Context, agentName, contextID, task string) (string, error), maxDepth int, basePrompt string) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.server == nil {
+		return
+	}
 	executor := NewExecutor(ExecutorConfig{
 		OpenSession: openSession,
 		ListAgents:  listAgents,
@@ -62,6 +72,7 @@ func (w *AgentWrapper) SetupExecutor(openSession func(ctx context.Context, conte
 	// pool lookup), so streaming and non-streaming requests on one contextID
 	// share conversation state inside the underlying claude process.
 	w.server.SetExecutorStream(executor.ExecuteStream)
+	w.ready = true
 }
 
 // agentName returns the agent's own name from the configured card, or "" if
@@ -88,7 +99,12 @@ func (w *AgentWrapper) Start(ctx context.Context) error {
 	w.server.SetSelfName(w.agentName())
 
 	mux := http.NewServeMux()
-	mux.Handle("/", w.server)
+	mux.HandleFunc("/healthz", w.handleHealthz)
+	mux.HandleFunc("/readyz", w.handleReadyz)
+	if w.cfg.AgentCard != nil {
+		mux.Handle(a2asrv.WellKnownAgentCardPath, a2asrv.NewStaticAgentCardHandler(w.cfg.AgentCard))
+	}
+	mux.Handle("/", w.requireInternalToken(w.server))
 
 	w.httpSrv = &http.Server{
 		Addr:    fmt.Sprintf("127.0.0.1:%d", w.cfg.Port),
@@ -108,6 +124,48 @@ func (w *AgentWrapper) Start(ctx context.Context) error {
 
 	w.running = true
 	return nil
+}
+
+func (w *AgentWrapper) requireInternalToken(next http.Handler) http.Handler {
+	if w.cfg.InternalToken == "" {
+		return next
+	}
+	return http.HandlerFunc(func(rw http.ResponseWriter, r *http.Request) {
+		if r.Header.Get(InternalTokenHeader) != w.cfg.InternalToken {
+			writeWrapperStatus(rw, http.StatusUnauthorized, "unauthorized")
+			return
+		}
+		next.ServeHTTP(rw, r)
+	})
+}
+
+func (w *AgentWrapper) handleHealthz(rw http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet && r.Method != http.MethodHead {
+		rw.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+	writeWrapperStatus(rw, http.StatusOK, "ok")
+}
+
+func (w *AgentWrapper) handleReadyz(rw http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet && r.Method != http.MethodHead {
+		rw.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+	w.mu.Lock()
+	ready := w.running && w.ready && w.server != nil && w.cfg.AgentCard != nil
+	w.mu.Unlock()
+	if !ready {
+		writeWrapperStatus(rw, http.StatusServiceUnavailable, "not_ready")
+		return
+	}
+	writeWrapperStatus(rw, http.StatusOK, "ready")
+}
+
+func writeWrapperStatus(rw http.ResponseWriter, status int, state string) {
+	rw.Header().Set("Content-Type", "application/json")
+	rw.WriteHeader(status)
+	_ = json.NewEncoder(rw).Encode(map[string]string{"status": state})
 }
 
 // Stop gracefully shuts down the HTTP server.
@@ -130,6 +188,7 @@ func (w *AgentWrapper) Stop(ctx context.Context) error {
 	}
 
 	w.running = false
+	w.ready = false
 	return nil
 }
 

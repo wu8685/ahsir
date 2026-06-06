@@ -56,6 +56,9 @@ type StreamingConfig struct {
 //
 //	pool:
 //	  max_active: 50
+//	  max_evicted: 1000
+//	  idle_ttl: 30m
+//	  evicted_ttl: 30d
 //	  overload_policy: reject  # or "evict-lru"
 type PoolConfig struct {
 	// MaxActive is the maximum number of ACTIVE entries (live claude
@@ -68,6 +71,18 @@ type PoolConfig struct {
 	// wrapper.ParseOverloadPolicy at startup so a typo doesn't silently
 	// fall back to the default.
 	OverloadPolicy string `yaml:"overload_policy"`
+
+	// IdleTTL controls when an ACTIVE session is closed and moved to
+	// EVICTED. Empty means the ahsir-agent default.
+	IdleTTL string `yaml:"idle_ttl"`
+
+	// EvictedTTL controls time-based deletion of inactive mappings. Empty
+	// means the ahsir-agent default.
+	EvictedTTL string `yaml:"evicted_ttl"`
+
+	// MaxEvicted bounds how many inactive mappings are retained for resume.
+	// 0 means the ahsir-agent default.
+	MaxEvicted int `yaml:"max_evicted"`
 }
 
 // ProviderConfig maps to a2a.AgentProvider.

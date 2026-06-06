@@ -9,6 +9,11 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -136,11 +141,43 @@ func TestSchedulerChatWithAgent(t *testing.T) {
 	defer mockSrv.Close()
 
 	sch.Registry().Register(&a2a.AgentCard{
-		Name:              "test-agent",
-		Version:           "1.0.0",
-		URL:               mockURL,
+		Name:               "test-agent",
+		Version:            "1.0.0",
+		URL:                mockURL,
 		PreferredTransport: a2a.TransportProtocolJSONRPC,
 	})
+	resp, err := sch.ChatWithAgent("test-agent", "", "hello")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp == "" {
+		t.Error("expected non-empty response")
+	}
+}
+
+func TestSchedulerChatWithAgentZeroChatTimeoutDoesNotExpireImmediately(t *testing.T) {
+	cfg := &Config{
+		Registry: RegistryConfig{
+			Host: "127.0.0.1",
+			Port: freePort(t),
+		},
+		Timeouts:  TimeoutsConfig{Chat: "0s"},
+		PortRange: PortRange{Start: 9801, End: 9900},
+	}
+	cfg.nextPort = cfg.PortRange.Start
+
+	sch := New(cfg)
+
+	mockSrv, mockURL := mockA2AServer(t)
+	defer mockSrv.Close()
+
+	sch.Registry().Register(&a2a.AgentCard{
+		Name:               "test-agent",
+		Version:            "1.0.0",
+		URL:                mockURL,
+		PreferredTransport: a2a.TransportProtocolJSONRPC,
+	})
+
 	resp, err := sch.ChatWithAgent("test-agent", "", "hello")
 	if err != nil {
 		t.Fatal(err)
@@ -179,6 +216,440 @@ func TestSchedulerStartStop(t *testing.T) {
 	sch.Stop()
 }
 
+func TestSchedulerRestartsLocalAgentAfterUnexpectedExit(t *testing.T) {
+	dir := t.TempDir()
+	countPath := filepath.Join(dir, "starts.log")
+	scriptPath := filepath.Join(dir, "agent.sh")
+	script := fmt.Sprintf("#!/bin/sh\nprintf '%%s\\n' \"$*\" >> %q\nexit 0\n", countPath)
+	if err := os.WriteFile(scriptPath, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	portStart := freePort(t)
+
+	cfg := &Config{
+		Agents: []AgentConfig{{
+			Name:      "worker",
+			Workspace: dir,
+			Port:      0,
+		}},
+		Registry:  RegistryConfig{Host: "127.0.0.1", Port: freePort(t)},
+		PortRange: PortRange{Start: portStart, End: portStart + 20},
+	}
+	cfg.nextPort = cfg.PortRange.Start
+	sch := New(cfg)
+	sch.supervisor.InitialBackoff = 10 * time.Millisecond
+	sch.supervisor.MaxBackoff = 10 * time.Millisecond
+	sch.agentCommand = func(ctx context.Context, agentExe string, cfg AgentConfig, registryURL string) *exec.Cmd {
+		return exec.CommandContext(ctx, scriptPath,
+			"--workspace", cfg.Workspace,
+			"--port", fmt.Sprint(cfg.Port),
+			"--registry", registryURL,
+		)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if err := sch.Start(ctx); err != nil {
+		t.Fatal(err)
+	}
+	defer sch.Stop()
+
+	lines := waitForLines(t, countPath, 2, 2*time.Second)
+	firstPort := argValue(lines[0], "--port")
+	secondPort := argValue(lines[1], "--port")
+	if firstPort == "" || secondPort == "" {
+		t.Fatalf("missing --port in restart args: %q", lines)
+	}
+	if firstPort != secondPort {
+		t.Fatalf("restart should reuse port: first %s second %s", firstPort, secondPort)
+	}
+}
+
+func TestSchedulerRecoverySendsContinuationForInterruptedContext(t *testing.T) {
+	cfg := &Config{
+		Registry:  RegistryConfig{Host: "127.0.0.1", Port: freePort(t)},
+		PortRange: PortRange{Start: 9801, End: 9900},
+	}
+	cfg.nextPort = cfg.PortRange.Start
+	sch := New(cfg)
+
+	rec := sch.Invocations().Begin(InvocationMetadata{
+		Source:    InvocationSourceChatGateway,
+		AgentName: "worker",
+		ContextID: "ctx-recover",
+		UserText:  "long task",
+	})
+	sch.Invocations().FailMessage(rec.ID, "agent exited")
+
+	var gotAgent, gotContext, gotPrompt string
+	sch.recoveryDispatch = func(ctx context.Context, agentName, contextID, prompt string) (string, error) {
+		gotAgent = agentName
+		gotContext = contextID
+		gotPrompt = prompt
+		return "continued", nil
+	}
+
+	sch.recoverAgentInvocations(context.Background(), "worker")
+
+	if gotAgent != "worker" {
+		t.Fatalf("agent = %q", gotAgent)
+	}
+	if gotContext != "ctx-recover" {
+		t.Fatalf("contextID = %q", gotContext)
+	}
+	if !strings.Contains(gotPrompt, "continue the interrupted work") {
+		t.Fatalf("unexpected continuation prompt: %q", gotPrompt)
+	}
+	snapshot := sch.Invocations().Snapshot()
+	assertLedgerStatus(t, snapshot, rec.ID, InvocationStatusRecovered, "")
+}
+
+func TestSchedulerRecoverySkipsRecordsWithoutContextID(t *testing.T) {
+	cfg := &Config{
+		Registry:  RegistryConfig{Host: "127.0.0.1", Port: freePort(t)},
+		PortRange: PortRange{Start: 9801, End: 9900},
+	}
+	cfg.nextPort = cfg.PortRange.Start
+	sch := New(cfg)
+
+	rec := sch.Invocations().Begin(InvocationMetadata{
+		Source:    InvocationSourceChatGateway,
+		AgentName: "worker",
+		UserText:  "no context",
+	})
+	sch.Invocations().FailMessage(rec.ID, "agent exited")
+
+	var calls int
+	sch.recoveryDispatch = func(ctx context.Context, agentName, contextID, prompt string) (string, error) {
+		calls++
+		return "", nil
+	}
+
+	sch.recoverAgentInvocations(context.Background(), "worker")
+
+	if calls != 0 {
+		t.Fatalf("expected no continuation prompt for empty contextID, got %d calls", calls)
+	}
+	snapshot := sch.Invocations().Snapshot()
+	assertLedgerStatus(t, snapshot, rec.ID, InvocationStatusFailed, "agent exited")
+}
+
+func TestSchedulerRecoveryMarksContinuationFailure(t *testing.T) {
+	cfg := &Config{
+		Registry:  RegistryConfig{Host: "127.0.0.1", Port: freePort(t)},
+		PortRange: PortRange{Start: 9801, End: 9900},
+	}
+	cfg.nextPort = cfg.PortRange.Start
+	sch := New(cfg)
+
+	rec := sch.Invocations().Begin(InvocationMetadata{
+		Source:    InvocationSourceChatGateway,
+		AgentName: "worker",
+		ContextID: "ctx-fail-recovery",
+	})
+	sch.Invocations().FailMessage(rec.ID, "agent exited")
+
+	sch.recoveryDispatch = func(ctx context.Context, agentName, contextID, prompt string) (string, error) {
+		return "", fmt.Errorf("agent not ready")
+	}
+
+	sch.recoverAgentInvocations(context.Background(), "worker")
+
+	snapshot := sch.Invocations().Snapshot()
+	assertLedgerStatus(t, snapshot, rec.ID, InvocationStatusRecoveryFailed, "agent not ready")
+}
+
+func TestSchedulerStopAgentDoesNotRestartLocalAgent(t *testing.T) {
+	dir := t.TempDir()
+	countPath := filepath.Join(dir, "starts.log")
+	scriptPath := filepath.Join(dir, "agent.sh")
+	script := fmt.Sprintf("#!/bin/sh\nprintf '%%s\\n' \"$*\" >> %q\nsleep 5\n", countPath)
+	if err := os.WriteFile(scriptPath, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	portStart := freePort(t)
+
+	cfg := &Config{
+		Agents: []AgentConfig{{
+			Name:      "worker",
+			Workspace: dir,
+			Port:      0,
+		}},
+		Registry:  RegistryConfig{Host: "127.0.0.1", Port: freePort(t)},
+		PortRange: PortRange{Start: portStart, End: portStart + 20},
+	}
+	cfg.nextPort = cfg.PortRange.Start
+	sch := New(cfg)
+	sch.supervisor.InitialBackoff = 10 * time.Millisecond
+	sch.supervisor.MaxBackoff = 10 * time.Millisecond
+	sch.agentCommand = func(ctx context.Context, agentExe string, cfg AgentConfig, registryURL string) *exec.Cmd {
+		return exec.CommandContext(ctx, scriptPath,
+			"--workspace", cfg.Workspace,
+			"--port", fmt.Sprint(cfg.Port),
+			"--registry", registryURL,
+		)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if err := sch.Start(ctx); err != nil {
+		t.Fatal(err)
+	}
+	defer sch.Stop()
+
+	_ = waitForLines(t, countPath, 1, 2*time.Second)
+	if err := sch.StopAgent("worker"); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(60 * time.Millisecond)
+	lines := readLines(t, countPath)
+	if len(lines) != 1 {
+		t.Fatalf("StopAgent should not restart agent, starts=%d lines=%q", len(lines), lines)
+	}
+}
+
+func TestSchedulerRestartsLocalAgentAfterHealthFailures(t *testing.T) {
+	dir := t.TempDir()
+	countPath := filepath.Join(dir, "starts.log")
+	portStart := freePort(t)
+
+	cfg := &Config{
+		Agents: []AgentConfig{{
+			Name:      "worker",
+			Workspace: dir,
+			Port:      0,
+		}},
+		Registry:  RegistryConfig{Host: "127.0.0.1", Port: freePort(t)},
+		PortRange: PortRange{Start: portStart, End: portStart + 20},
+	}
+	cfg.nextPort = cfg.PortRange.Start
+	sch := New(cfg)
+	sch.supervisor.InitialBackoff = 10 * time.Millisecond
+	sch.supervisor.MaxBackoff = 10 * time.Millisecond
+	sch.supervisor.HealthStartupGrace = 150 * time.Millisecond
+	sch.supervisor.HealthInterval = 20 * time.Millisecond
+	sch.supervisor.HealthTimeout = 100 * time.Millisecond
+	sch.supervisor.HealthFailureThreshold = 2
+	sch.agentCommand = healthAgentCommand(countPath, "unhealthy", 0)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	if err := sch.Start(ctx); err != nil {
+		t.Fatal(err)
+	}
+	defer sch.Stop()
+
+	lines := waitForLines(t, countPath, 2, 3*time.Second)
+	firstPort := argValue(lines[0], "--port")
+	secondPort := argValue(lines[1], "--port")
+	if firstPort == "" || secondPort == "" {
+		t.Fatalf("missing --port in restart args: %q", lines)
+	}
+	if firstPort != secondPort {
+		t.Fatalf("health restart should reuse port: first %s second %s", firstPort, secondPort)
+	}
+}
+
+func TestSchedulerDoesNotRestartLocalAgentAfterTransientHealthFailures(t *testing.T) {
+	dir := t.TempDir()
+	countPath := filepath.Join(dir, "starts.log")
+	portStart := freePort(t)
+
+	cfg := &Config{
+		Agents: []AgentConfig{{
+			Name:      "worker",
+			Workspace: dir,
+			Port:      0,
+		}},
+		Registry:  RegistryConfig{Host: "127.0.0.1", Port: freePort(t)},
+		PortRange: PortRange{Start: portStart, End: portStart + 20},
+	}
+	cfg.nextPort = cfg.PortRange.Start
+	sch := New(cfg)
+	sch.supervisor.InitialBackoff = 10 * time.Millisecond
+	sch.supervisor.MaxBackoff = 10 * time.Millisecond
+	sch.supervisor.HealthStartupGrace = 150 * time.Millisecond
+	sch.supervisor.HealthInterval = 20 * time.Millisecond
+	sch.supervisor.HealthTimeout = 100 * time.Millisecond
+	sch.supervisor.HealthFailureThreshold = 3
+	sch.agentCommand = healthAgentCommand(countPath, "transient", 2)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if err := sch.Start(ctx); err != nil {
+		t.Fatal(err)
+	}
+	defer sch.Stop()
+
+	_ = waitForLines(t, countPath, 1, 2*time.Second)
+	time.Sleep(350 * time.Millisecond)
+	lines := readLines(t, countPath)
+	if len(lines) != 1 {
+		t.Fatalf("transient health failures should not restart agent, starts=%d lines=%q", len(lines), lines)
+	}
+}
+
+func TestSchedulerStopAgentCancelsHealthWatcher(t *testing.T) {
+	dir := t.TempDir()
+	countPath := filepath.Join(dir, "starts.log")
+	portStart := freePort(t)
+
+	cfg := &Config{
+		Agents: []AgentConfig{{
+			Name:      "worker",
+			Workspace: dir,
+			Port:      0,
+		}},
+		Registry:  RegistryConfig{Host: "127.0.0.1", Port: freePort(t)},
+		PortRange: PortRange{Start: portStart, End: portStart + 20},
+	}
+	cfg.nextPort = cfg.PortRange.Start
+	sch := New(cfg)
+	sch.supervisor.HealthStartupGrace = 200 * time.Millisecond
+	sch.supervisor.HealthInterval = 20 * time.Millisecond
+	sch.supervisor.HealthTimeout = 10 * time.Millisecond
+	sch.supervisor.HealthFailureThreshold = 1
+	sch.agentCommand = healthAgentCommand(countPath, "unhealthy", 0)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if err := sch.Start(ctx); err != nil {
+		t.Fatal(err)
+	}
+	defer sch.Stop()
+
+	_ = waitForLines(t, countPath, 1, 2*time.Second)
+	if err := sch.StopAgent("worker"); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(300 * time.Millisecond)
+	lines := readLines(t, countPath)
+	if len(lines) != 1 {
+		t.Fatalf("StopAgent should cancel health watcher, starts=%d lines=%q", len(lines), lines)
+	}
+}
+
+func healthAgentCommand(logPath, mode string, transientFailures int) agentCommandBuilder {
+	return func(ctx context.Context, agentExe string, cfg AgentConfig, registryURL string) *exec.Cmd {
+		cmd := exec.CommandContext(ctx, os.Args[0],
+			"-test.run=TestSchedulerHealthAgentHelperProcess",
+			"--",
+			"--workspace", cfg.Workspace,
+			"--port", fmt.Sprint(cfg.Port),
+			"--registry", registryURL,
+		)
+		cmd.Env = append(os.Environ(),
+			"AHSIR_TEST_HEALTH_AGENT=1",
+			"AHSIR_TEST_HEALTH_LOG="+logPath,
+			"AHSIR_TEST_HEALTH_MODE="+mode,
+			"AHSIR_TEST_HEALTH_TRANSIENT_FAILURES="+strconv.Itoa(transientFailures),
+		)
+		return cmd
+	}
+}
+
+func TestSchedulerHealthAgentHelperProcess(t *testing.T) {
+	if os.Getenv("AHSIR_TEST_HEALTH_AGENT") != "1" {
+		return
+	}
+	agentArgs := argsAfterDashDash(os.Args)
+	logPath := os.Getenv("AHSIR_TEST_HEALTH_LOG")
+	if logPath != "" {
+		f, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+		if err != nil {
+			os.Exit(2)
+		}
+		_, _ = fmt.Fprintln(f, strings.Join(agentArgs, " "))
+		_ = f.Close()
+	}
+
+	port := argFromFields(agentArgs, "--port")
+	if port == "" {
+		os.Exit(2)
+	}
+	mode := os.Getenv("AHSIR_TEST_HEALTH_MODE")
+	transientFailures, _ := strconv.Atoi(os.Getenv("AHSIR_TEST_HEALTH_TRANSIENT_FAILURES"))
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
+		if mode == "unhealthy" {
+			http.Error(w, "unhealthy", http.StatusInternalServerError)
+			return
+		}
+		if transientFailures > 0 {
+			transientFailures--
+			http.Error(w, "warming", http.StatusInternalServerError)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"status":"ok"}`))
+	})
+	srv := &http.Server{Addr: "127.0.0.1:" + port, Handler: mux}
+	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+		os.Exit(2)
+	}
+	os.Exit(0)
+}
+
+func argsAfterDashDash(args []string) []string {
+	for i, arg := range args {
+		if arg == "--" && i+1 < len(args) {
+			return args[i+1:]
+		}
+	}
+	return nil
+}
+
+func argFromFields(fields []string, flag string) string {
+	for i, f := range fields {
+		if f == flag && i+1 < len(fields) {
+			return fields[i+1]
+		}
+	}
+	return ""
+}
+
+func waitForLines(t *testing.T, path string, want int, timeout time.Duration) []string {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		lines := readLines(t, path)
+		if len(lines) >= want {
+			return lines
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	lines := readLines(t, path)
+	t.Fatalf("timeout waiting for %d lines in %s, got %d: %q", want, path, len(lines), lines)
+	return nil
+}
+
+func readLines(t *testing.T, path string) []string {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if os.IsNotExist(err) {
+		return nil
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := strings.TrimSpace(string(data))
+	if text == "" {
+		return nil
+	}
+	return strings.Split(text, "\n")
+}
+
+func argValue(line, flag string) string {
+	fields := strings.Fields(line)
+	for i, f := range fields {
+		if f == flag && i+1 < len(fields) {
+			return fields[i+1]
+		}
+	}
+	return ""
+}
+
 func TestSchedulerGetTaskStatus(t *testing.T) {
 	cfg := &Config{
 		Registry: RegistryConfig{
@@ -196,8 +667,8 @@ func TestSchedulerGetTaskStatus(t *testing.T) {
 	defer mockSrv.Close()
 
 	sch.Registry().Register(&a2a.AgentCard{
-		Name:              "test-agent",
-		URL:               mockURL,
+		Name:               "test-agent",
+		URL:                mockURL,
 		PreferredTransport: a2a.TransportProtocolJSONRPC,
 	})
 
@@ -242,12 +713,12 @@ func TestIntegrationFullFlow(t *testing.T) {
 
 	// Step 1: Register agent via HTTP
 	card := a2a.AgentCard{
-		Name:              "integration-agent",
-		Description:       "Integration test agent",
-		Version:           "1.0.0",
-		URL:               mockURL,
+		Name:               "integration-agent",
+		Description:        "Integration test agent",
+		Version:            "1.0.0",
+		URL:                mockURL,
 		PreferredTransport: a2a.TransportProtocolJSONRPC,
-		Skills:            []a2a.AgentSkill{{Name: "testing"}},
+		Skills:             []a2a.AgentSkill{{Name: "testing"}},
 	}
 	cardData, _ := json.Marshal(card)
 	resp, err := http.Post(registryURL+"/agents", "application/json", bytes.NewReader(cardData))

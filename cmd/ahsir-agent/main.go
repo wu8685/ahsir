@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -19,6 +20,7 @@ func main() {
 	workspace := flag.String("workspace", "", "Workspace directory")
 	port := flag.Int("port", 0, "Listen port")
 	registry := flag.String("registry", "", "Registry URL")
+	internalToken := flag.String("internal-token", "", "Internal scheduler-to-agent A2A token")
 	flag.Parse()
 
 	if *workspace == "" {
@@ -48,9 +50,10 @@ func main() {
 	}
 
 	wrapperCfg := wrapper.AgentWrapperConfig{
-		Port:        *port,
-		RegistryURL: *registry,
-		AgentCard:   runtimeCard,
+		Port:          *port,
+		RegistryURL:   *registry,
+		AgentCard:     runtimeCard,
+		InternalToken: *internalToken,
 	}
 
 	w := wrapper.NewAgentWrapper(wrapperCfg)
@@ -70,7 +73,12 @@ func main() {
 		maxCalls := cfg.Claude.MaxAgentCalls
 		basePrompt := cfg.Claude.SystemPrompt
 
-		// Session per A2A contextID, pooled with sliding 30-minute idle TTL.
+		retention, err := poolRetentionConfig(cfg.Pool)
+		if err != nil {
+			log.Fatalf("agent %q: %v", cfg.Name, err)
+		}
+
+		// Session per A2A contextID, pooled with sliding idle TTL.
 		// Claude uses one long-running stream-json subprocess; Codex forks
 		// `codex exec --json` per turn and resumes by thread_id.
 		factory := func(ctx context.Context, contextID, resumeID string) (wrapper.Session, error) {
@@ -86,7 +94,8 @@ func main() {
 		// agent always boots.
 		persistPath := filepath.Join(*workspace, ".a2a", "sessions.json")
 		persist := wrapper.NewFilePersistence(persistPath)
-		pool := wrapper.NewSessionPoolWithPersistence(factory, 30*time.Minute, 24*time.Hour, persist)
+		pool := wrapper.NewSessionPoolWithPersistence(factory, retention.idleTTL, retention.evictedTTL, persist)
+		pool.SetMaxEvicted(retention.maxEvicted)
 		defer pool.Stop()
 
 		// Apply pool capacity from agent-card.yaml's `pool:` block if set.
@@ -104,7 +113,7 @@ func main() {
 		}
 
 		w.SetupExecutor(pool.LookupOrCreate, listAgents, callAgent, maxCalls, basePrompt)
-		log.Printf("Executor wired: %s SessionPool (%s %v, timeout=%s, persist=%s)", sessionCfg.Provider, sessionCfg.Command, sessionCfg.Args, sessionCfg.Timeout, persistPath)
+		log.Printf("Executor wired: %s SessionPool (%s %v, timeout=%s, persist=%s, idle_ttl=%s, evicted_ttl=%s, max_evicted=%d)", sessionCfg.Provider, sessionCfg.Command, sessionCfg.Args, sessionCfg.Timeout, persistPath, retention.idleTTL, retention.evictedTTL, retention.maxEvicted)
 	}
 
 	// Wait for signal
@@ -114,6 +123,49 @@ func main() {
 
 	log.Println("Shutting down...")
 	w.Stop(ctx)
+}
+
+type poolRetention struct {
+	idleTTL    time.Duration
+	evictedTTL time.Duration
+	maxEvicted int
+}
+
+func poolRetentionConfig(cfg wrapper.PoolConfig) (poolRetention, error) {
+	ret := poolRetention{
+		idleTTL:    30 * time.Minute,
+		evictedTTL: 30 * 24 * time.Hour,
+		maxEvicted: 1000,
+	}
+	if cfg.IdleTTL != "" {
+		d, err := parsePoolDuration(cfg.IdleTTL)
+		if err != nil {
+			return poolRetention{}, fmt.Errorf("pool.idle_ttl %q: %w", cfg.IdleTTL, err)
+		}
+		ret.idleTTL = d
+	}
+	if cfg.EvictedTTL != "" {
+		d, err := parsePoolDuration(cfg.EvictedTTL)
+		if err != nil {
+			return poolRetention{}, fmt.Errorf("pool.evicted_ttl %q: %w", cfg.EvictedTTL, err)
+		}
+		ret.evictedTTL = d
+	}
+	if cfg.MaxEvicted > 0 {
+		ret.maxEvicted = cfg.MaxEvicted
+	}
+	return ret, nil
+}
+
+func parsePoolDuration(s string) (time.Duration, error) {
+	if strings.HasSuffix(s, "d") {
+		days, err := strconv.Atoi(strings.TrimSuffix(s, "d"))
+		if err != nil {
+			return 0, err
+		}
+		return time.Duration(days) * 24 * time.Hour, nil
+	}
+	return time.ParseDuration(s)
 }
 
 // buildSessionConfig translates a card RuntimeConfig + FilesystemConfig into a

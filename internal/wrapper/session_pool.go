@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"sort"
 	"sync"
 	"time"
 )
@@ -101,6 +102,10 @@ type SessionPool struct {
 	// maxActive == 0 means unlimited (the historical behaviour).
 	maxActive      int
 	overloadPolicy OverloadPolicy
+
+	// maxEvicted bounds inactive resume mappings. 0 means unlimited.
+	// ACTIVE entries are never deleted by this limit.
+	maxEvicted int
 }
 
 // OverloadPolicy selects what SessionPool does when LookupOrCreate would
@@ -265,6 +270,14 @@ func (p *SessionPool) SetCap(max int, policy OverloadPolicy) {
 	defer p.mu.Unlock()
 	p.maxActive = max
 	p.overloadPolicy = policy
+}
+
+// SetMaxEvicted configures the maximum number of inactive EVICTED mappings
+// the pool retains for later resume. max<=0 means unlimited.
+func (p *SessionPool) SetMaxEvicted(max int) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.maxEvicted = max
 }
 
 // setClock injects a fake clock for tests. Production uses time.Now.
@@ -650,6 +663,69 @@ func (p *SessionPool) reapOnce() {
 		for _, k := range toDelete {
 			p.removePersist(k)
 		}
+	}
+
+	p.enforceMaxEvicted()
+}
+
+func (p *SessionPool) enforceMaxEvicted() {
+	p.mu.Lock()
+	max := p.maxEvicted
+	if max <= 0 {
+		p.mu.Unlock()
+		return
+	}
+	type evictedEntry struct {
+		contextID string
+		entry     *pooledEntry
+	}
+	entries := make([]evictedEntry, 0, len(p.entries))
+	for contextID, e := range p.entries {
+		entries = append(entries, evictedEntry{contextID: contextID, entry: e})
+	}
+	p.mu.Unlock()
+
+	type evictedCandidate struct {
+		contextID string
+		entry     *pooledEntry
+		evictedAt time.Time
+	}
+	candidates := make([]evictedCandidate, 0, len(entries))
+	for _, item := range entries {
+		e := item.entry
+		e.mu.Lock()
+		if e.state == entryEvicted {
+			candidates = append(candidates, evictedCandidate{
+				contextID: item.contextID,
+				entry:     e,
+				evictedAt: e.evictedAt,
+			})
+		}
+		e.mu.Unlock()
+	}
+	if len(candidates) <= max {
+		return
+	}
+	sort.Slice(candidates, func(i, j int) bool {
+		return candidates[i].evictedAt.Before(candidates[j].evictedAt)
+	})
+	toDelete := candidates[:len(candidates)-max]
+	deleted := make([]string, 0, len(toDelete))
+	for _, c := range toDelete {
+		c.entry.mu.Lock()
+		if c.entry.state == entryEvicted {
+			p.mu.Lock()
+			if p.entries[c.contextID] == c.entry {
+				delete(p.entries, c.contextID)
+				deleted = append(deleted, c.contextID)
+			}
+			p.mu.Unlock()
+		}
+		c.entry.mu.Unlock()
+	}
+
+	for _, contextID := range deleted {
+		p.removePersist(contextID)
 	}
 }
 
