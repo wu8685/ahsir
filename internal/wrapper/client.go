@@ -33,11 +33,22 @@ var noFieldTimeoutHTTPClient = &http.Client{}
 
 // NewAgentClient creates a client for communicating with a target agent.
 func NewAgentClient(ctx context.Context, card *a2a.AgentCard) (*AgentClient, error) {
+	return NewAgentClientWithInternalToken(ctx, card, "")
+}
+
+// NewAgentClientWithInternalToken creates a client that attaches the scheduler
+// internal token to every A2A call. Empty token means no header is added.
+func NewAgentClientWithInternalToken(ctx context.Context, card *a2a.AgentCard, internalToken string) (*AgentClient, error) {
 	client, err := a2aclient.NewFromCard(ctx, card,
 		a2aclient.WithJSONRPCTransport(noFieldTimeoutHTTPClient),
 	)
 	if err != nil {
 		return nil, fmt.Errorf("create client for %s: %w", card.Name, err)
+	}
+	if internalToken != "" {
+		meta := a2aclient.CallMeta{}
+		meta.Append(InternalTokenHeader, internalToken)
+		client.AddCallInterceptor(a2aclient.NewStaticCallMetaInjector(meta))
 	}
 	return &AgentClient{client: client, card: card}, nil
 }

@@ -45,8 +45,8 @@ func TestSessionReusedAcrossDelegations_E2E(t *testing.T) {
 	)
 
 	// === Turn 1 — establish memory in teacher ===
-	reply1, err := fix.sendMessage(
-		fix.studentPort,
+	reply1, err := fix.sendMessageToAgent(
+		"student",
 		"msg-rr-1",
 		contextID,
 		fmt.Sprintf("Please delegate to the teacher: remember the codeword %q. Reply briefly to confirm.", codeword),
@@ -70,8 +70,8 @@ func TestSessionReusedAcrossDelegations_E2E(t *testing.T) {
 	}
 
 	// === Turn 2 — verify session reuse: same contextID, same processes ===
-	reply2, err := fix.sendMessage(
-		fix.studentPort,
+	reply2, err := fix.sendMessageToAgent(
+		"student",
 		"msg-rr-2",
 		contextID,
 		"Please delegate to the teacher: what codeword did I just tell you? Reply with just the codeword.",
@@ -109,8 +109,8 @@ func TestSessionReusedAcrossDelegations_E2E(t *testing.T) {
 	// itself remembers turn 1+2 (it saw the teacher's prior reply). Without
 	// the explicit ask, the model might shortcut and answer directly,
 	// bypassing the recovery path we want to exercise.
-	reply3, err := fix.sendMessage(
-		fix.studentPort,
+	reply3, err := fix.sendMessageToAgent(
+		"student",
 		"msg-rr-3",
 		contextID,
 		"Please delegate to the teacher one more time even if you remember the answer: what was the codeword? The teacher's verification is required.",

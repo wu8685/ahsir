@@ -17,8 +17,8 @@ func TestCodexProvider_E2E(t *testing.T) {
 		codeword  = "codex-sapphire-42"
 	)
 
-	reply1, err := fix.sendMessage(
-		fix.teacherPort,
+	reply1, err := fix.sendMessageToAgent(
+		"teacher",
 		"msg-codex-teacher-1",
 		contextID,
 		fmt.Sprintf("Remember this codeword for the next turn: %s. Reply with exactly: stored %s", codeword, codeword),
@@ -30,8 +30,8 @@ func TestCodexProvider_E2E(t *testing.T) {
 		t.Fatalf("teacher turn 1 did not confirm codeword %q: %q", codeword, reply1)
 	}
 
-	reply2, err := fix.sendMessage(
-		fix.teacherPort,
+	reply2, err := fix.sendMessageToAgent(
+		"teacher",
 		"msg-codex-teacher-2",
 		contextID,
 		"What codeword did I ask you to remember? Reply with only the codeword.",
@@ -54,8 +54,8 @@ func TestCodexProvider_E2E(t *testing.T) {
 		t.Fatalf("second codex exec resume id is empty: %+v", starts[1])
 	}
 
-	reply3, err := fix.sendMessage(
-		fix.studentPort,
+	reply3, err := fix.sendMessageToAgent(
+		"student",
 		"msg-codex-student-1",
 		"codex-provider-delegation",
 		"Ask the teacher for the teacher's favorite fruit and relay the exact answer.",

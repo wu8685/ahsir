@@ -37,8 +37,8 @@ import (
 func TestSSEStreaming_TeacherEmitsDeltas_E2E(t *testing.T) {
 	fix := setupE2E(t)
 
-	events, err := fix.sendMessageStream(
-		fix.teacherPort,
+	events, err := fix.sendMessageStreamToAgent(
+		"teacher",
 		"msg-sse-1",
 		"e2e-sse-1",
 		"Briefly explain in two short sentences what a TCP three-way handshake is.",
@@ -142,8 +142,8 @@ func TestSSEStreaming_DeltasArriveIncrementally_E2E(t *testing.T) {
 	// Ask for a longer answer so the model has to emit many deltas over time.
 	// Empirically deepseek-v4-pro produces ~50-60 delta frames over ~5s for
 	// a "explain X in 4-5 sentences" prompt.
-	events, err := fix.sendMessageStream(
-		fix.teacherPort,
+	events, err := fix.sendMessageStreamToAgent(
+		"teacher",
 		"msg-sse-incr",
 		"e2e-sse-incr",
 		"Explain in four short sentences what a goroutine is, how it differs from an OS thread, what M:N scheduling means in Go, and one common pitfall to avoid when using them.",

@@ -16,8 +16,8 @@ import (
 func TestStudentDelegatesToTeacher_E2E(t *testing.T) {
 	fix := setupE2E(t)
 
-	reply, err := fix.sendMessage(
-		fix.studentPort,
+	reply, err := fix.sendMessageToAgent(
+		"student",
 		"msg-e2e-1",
 		"e2e-conv-1",
 		"What is a goroutine? Answer in one sentence.",

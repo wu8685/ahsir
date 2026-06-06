@@ -28,11 +28,11 @@ import (
 //  3. Exactly N distinct `claude session: started` lines, all with
 //     distinct pids, none with `--resume=`. Anything else means:
 //     - fewer than N: at least one goroutine got a session it shouldn't
-//       have (somehow keyed on the wrong contextID),
+//     have (somehow keyed on the wrong contextID),
 //     - more than N: a process died mid-flight and recovery fired
-//       (shouldn't happen in this scenario),
+//     (shouldn't happen in this scenario),
 //     - duplicate pids: filesystem race in the persist file or process
-//       table accounting bug.
+//     table accounting bug.
 //
 //  4. Exactly N `[teacher] receive` lines — one per request reaching
 //     the A2A server, no dropped requests.
@@ -65,8 +65,8 @@ func TestConcurrentDistinctContextIDs_E2E(t *testing.T) {
 			// Prompt asks teacher to echo back exactly the codeword.
 			// Verifies the SAME conversation handled this request (no
 			// silent swap) without depending on multi-turn memory.
-			reply, err := fix.sendMessage(
-				fix.teacherPort,
+			reply, err := fix.sendMessageToAgent(
+				"teacher",
 				fmt.Sprintf("msg-concurrent-%d", i),
 				ctxID,
 				fmt.Sprintf("Please reply with exactly the following codeword and nothing else: %s", codeword),

@@ -598,7 +598,7 @@ func (s *Scheduler) ChatWithAgent(agentName, contextID, message string) (string,
 	}
 	defer cancel()
 
-	client, err := wrapper.NewAgentClient(ctx, card)
+	client, err := wrapper.NewAgentClientWithInternalToken(ctx, card, s.agentInternalToken(agentName))
 	if err != nil {
 		return "", fmt.Errorf("create client for %s: %w", agentName, err)
 	}
@@ -623,7 +623,7 @@ func (s *Scheduler) GetTaskStatus(agentName, taskID string) (*a2a.Task, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), s.cfg.Timeouts.TaskStatusTimeout())
 	defer cancel()
 
-	client, err := wrapper.NewAgentClient(ctx, card)
+	client, err := wrapper.NewAgentClientWithInternalToken(ctx, card, s.agentInternalToken(agentName))
 	if err != nil {
 		return nil, fmt.Errorf("create client for %s: %w", agentName, err)
 	}

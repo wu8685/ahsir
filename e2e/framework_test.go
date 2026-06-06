@@ -53,6 +53,7 @@ import (
 type e2eFixture struct {
 	t            *testing.T
 	repoRoot     string
+	configDir    string
 	registryPort int
 	teacherPort  int
 	studentPort  int
@@ -222,6 +223,7 @@ func setupE2EWithCards(t *testing.T, teacherCard, studentCard string) *e2eFixtur
 	return &e2eFixture{
 		t:            t,
 		repoRoot:     repoRoot,
+		configDir:    tmp,
 		registryPort: registryPort,
 		teacherPort:  teacherPort,
 		studentPort:  studentPort,
@@ -231,31 +233,42 @@ func setupE2EWithCards(t *testing.T, teacherCard, studentCard string) *e2eFixtur
 	}
 }
 
-// sendMessage POSTs an A2A message/send to the given agent port and returns
-// the final agent reply text (last 'agent'-role entry in result.history).
-// On JSON-RPC error, returns a descriptive error. The full request timeout
-// is bounded so a stuck claude doesn't hang the test indefinitely.
+// sendMessageToAgent POSTs an A2A message/send through the scheduler-owned
+// /a2a/{agent} endpoint and returns the final agent reply text.
+func (f *e2eFixture) sendMessageToAgent(agentName, messageID, contextID, text string) (string, error) {
+	f.t.Helper()
+
+	url := fmt.Sprintf("http://127.0.0.1:%d/a2a/%s", f.registryPort, agentName)
+	return f.postMessage(url, messageID, contextID, text)
+}
+
+// sendMessage keeps the historical port-shaped API but routes public traffic
+// through the scheduler. Use sendDirectMessage for internal-port assertions.
 func (f *e2eFixture) sendMessage(agentPort int, messageID, contextID, text string) (string, error) {
 	f.t.Helper()
-	payload := map[string]any{
-		"jsonrpc": "2.0",
-		"method":  "message/send",
-		"params": map[string]any{
-			"message": map[string]any{
-				"messageId": messageID,
-				"contextId": contextID,
-				"role":      "user",
-				"parts":     []map[string]any{{"kind": "text", "text": text}},
-			},
-		},
-		"id": 1,
+	agentName, err := f.agentNameForPort(agentPort)
+	if err != nil {
+		return "", err
 	}
-	body, _ := json.Marshal(payload)
+	return f.sendMessageToAgent(agentName, messageID, contextID, text)
+}
+
+// sendDirectMessage POSTs directly to an agent's internal A2A endpoint. It is
+// only for negative/debug assertions; normal E2E traffic should use scheduler
+// helpers so ledger/proxy/token behavior is covered.
+func (f *e2eFixture) sendDirectMessage(agentPort int, messageID, contextID, text string) (string, error) {
+	f.t.Helper()
+	url := fmt.Sprintf("http://127.0.0.1:%d/", agentPort)
+	return f.postMessage(url, messageID, contextID, text)
+}
+
+func (f *e2eFixture) postMessage(url, messageID, contextID, text string) (string, error) {
+	f.t.Helper()
+	body, _ := json.Marshal(a2aMessagePayload("message/send", messageID, contextID, text))
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
 
-	url := fmt.Sprintf("http://127.0.0.1:%d/", agentPort)
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
 	if err != nil {
 		return "", fmt.Errorf("build request: %w", err)
@@ -289,6 +302,9 @@ func (f *e2eFixture) sendMessage(agentPort int, messageID, contextID, text strin
 			Data    any    `json:"data"`
 		} `json:"error"`
 	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return "", fmt.Errorf("HTTP %d from %s: %s", resp.StatusCode, url, string(raw))
+	}
 	if err := json.Unmarshal(raw, &jr); err != nil {
 		return "", fmt.Errorf("parse JSON-RPC: %w; raw: %s", err, string(raw))
 	}
@@ -309,6 +325,37 @@ func (f *e2eFixture) sendMessage(agentPort int, messageID, contextID, text strin
 		}
 	}
 	return "", fmt.Errorf("no agent text reply in history; raw: %s", string(raw))
+}
+
+func a2aMessagePayload(method, messageID, contextID, text string) map[string]any {
+	return map[string]any{
+		"jsonrpc": "2.0",
+		"method":  method,
+		"params": map[string]any{
+			"message": map[string]any{
+				"messageId": messageID,
+				"contextId": contextID,
+				"role":      "user",
+				"parts":     []map[string]any{{"kind": "text", "text": text}},
+			},
+		},
+		"id": 1,
+	}
+}
+
+func (f *e2eFixture) agentNameForPort(port int) (string, error) {
+	switch port {
+	case f.teacherPort:
+		return "teacher", nil
+	case f.studentPort:
+		return "student", nil
+	default:
+		return "", fmt.Errorf("unknown e2e agent port %d", port)
+	}
+}
+
+func (f *e2eFixture) ledgerPath() string {
+	return filepath.Join(f.configDir, ".ahsir", "ledger.jsonl")
 }
 
 // schedulerLog returns the cumulative stdout+stderr captured from the
@@ -342,27 +389,28 @@ type streamEvent struct {
 //
 // Timeout is bounded so a stuck claude process can't hang the whole test
 // run — same shape as sendMessage.
+func (f *e2eFixture) sendMessageStreamToAgent(agentName, messageID, contextID, text string) ([]streamEvent, error) {
+	f.t.Helper()
+	url := fmt.Sprintf("http://127.0.0.1:%d/a2a/%s", f.registryPort, agentName)
+	return f.postMessageStream(url, messageID, contextID, text)
+}
+
 func (f *e2eFixture) sendMessageStream(agentPort int, messageID, contextID, text string) ([]streamEvent, error) {
 	f.t.Helper()
-	payload := map[string]any{
-		"jsonrpc": "2.0",
-		"method":  "message/stream",
-		"params": map[string]any{
-			"message": map[string]any{
-				"messageId": messageID,
-				"contextId": contextID,
-				"role":      "user",
-				"parts":     []map[string]any{{"kind": "text", "text": text}},
-			},
-		},
-		"id": 1,
+	agentName, err := f.agentNameForPort(agentPort)
+	if err != nil {
+		return nil, err
 	}
-	body, _ := json.Marshal(payload)
+	return f.sendMessageStreamToAgent(agentName, messageID, contextID, text)
+}
+
+func (f *e2eFixture) postMessageStream(url, messageID, contextID, text string) ([]streamEvent, error) {
+	f.t.Helper()
+	body, _ := json.Marshal(a2aMessagePayload("message/stream", messageID, contextID, text))
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
 
-	url := fmt.Sprintf("http://127.0.0.1:%d/", agentPort)
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
 	if err != nil {
 		return nil, fmt.Errorf("build request: %w", err)

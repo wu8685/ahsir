@@ -9,6 +9,8 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -442,6 +444,71 @@ func TestGatewayA2AProxyRecordsInvocationLifecycle(t *testing.T) {
 	completed := waitForLedgerStatus(t, sch, "teacher", InvocationStatusCompleted)
 	if completed.ID != inFlight.ID {
 		t.Fatalf("completed ID = %q, want %q", completed.ID, inFlight.ID)
+	}
+}
+
+func TestGatewayA2AProxyPersistsInvocationLedgerFile(t *testing.T) {
+	dir := t.TempDir()
+	cfg := &Config{
+		Registry:  RegistryConfig{Host: "127.0.0.1", Port: 0},
+		PortRange: PortRange{Start: 9801, End: 9900},
+		path:      filepath.Join(dir, "ahsir.yaml"),
+	}
+	cfg.nextPort = cfg.PortRange.Start
+	sch := New(cfg)
+	regHandler := registry.NewHTTPHandler(sch.Registry())
+	gw := newGatewayHandler(sch, regHandler)
+	srv := httptest.NewServer(gw)
+	defer srv.Close()
+
+	upstream := realAgent(t, "teacher", "persistent ledger reply", 0)
+	sch.Registry().Register(&a2a.AgentCard{
+		Name:               "teacher",
+		URL:                upstream,
+		PreferredTransport: a2a.TransportProtocolJSONRPC,
+	})
+
+	body := []byte(`{"jsonrpc":"2.0","method":"message/send","params":{"message":{"messageId":"msg-persist-a2a","contextId":"ctx-persist-a2a","role":"user","parts":[{"kind":"text","text":"persist this proxy call"}]}},"id":1}`)
+	resp, err := http.Post(srv.URL+"/a2a/teacher", "application/json", bytes.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	rawResp, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", resp.StatusCode, rawResp)
+	}
+
+	ledgerPath := filepath.Join(dir, ".ahsir", "ledger.jsonl")
+	rawLedger, err := os.ReadFile(ledgerPath)
+	if err != nil {
+		t.Fatalf("read ledger file: %v", err)
+	}
+	ledger := string(rawLedger)
+	for _, marker := range []string{
+		`"type":"started"`,
+		`"source":"a2a_proxy"`,
+		`"agentName":"teacher"`,
+		`"contextId":"ctx-persist-a2a"`,
+		`"messageId":"msg-persist-a2a"`,
+		`"type":"completed"`,
+	} {
+		if !strings.Contains(ledger, marker) {
+			t.Fatalf("ledger file missing %q\n--- ledger ---\n%s", marker, ledger)
+		}
+	}
+
+	replayed, err := NewInvocationLedgerFromFile(ledgerPath)
+	if err != nil {
+		t.Fatalf("replay ledger: %v", err)
+	}
+	snapshot := replayed.Snapshot()
+	if len(snapshot) != 1 {
+		t.Fatalf("replayed snapshot len = %d, want 1: %+v", len(snapshot), snapshot)
+	}
+	rec := snapshot[0]
+	if rec.Status != InvocationStatusCompleted || rec.Source != InvocationSourceA2AProxy || rec.ContextID != "ctx-persist-a2a" {
+		t.Fatalf("unexpected replayed record: %+v", rec)
 	}
 }
 

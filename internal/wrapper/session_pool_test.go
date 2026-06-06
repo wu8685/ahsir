@@ -3,6 +3,7 @@ package wrapper
 import (
 	"context"
 	"fmt"
+	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -1139,6 +1140,49 @@ func TestSessionPool_MaxEvictedDeletesOldestInactiveMappings(t *testing.T) {
 		if rec, ok := snap[kept]; !ok || rec.State != persistStateEvicted {
 			t.Fatalf("expected %s to remain evicted, got rec=%+v ok=%t snapshot=%v", kept, rec, ok, snap)
 		}
+	}
+}
+
+func TestSessionPool_MaxEvictedPrunesFilePersistence(t *testing.T) {
+	factory, _, _, _ := newRecordingFactory()
+	path := filepath.Join(t.TempDir(), "sessions.json")
+	fp := NewFilePersistence(path)
+	p := NewSessionPoolWithPersistence(factory, 30*time.Minute, 30*24*time.Hour, fp)
+	defer p.Stop()
+	p.SetMaxEvicted(2)
+
+	now := time.Date(2026, 6, 7, 10, 0, 0, 0, time.UTC)
+	p.setClock(func() time.Time { return now })
+
+	ctx := context.Background()
+	if _, err := p.LookupOrCreate(ctx, "ctx-active"); err != nil {
+		t.Fatal(err)
+	}
+	for _, contextID := range []string{"ctx-oldest", "ctx-middle", "ctx-newest"} {
+		if _, err := p.LookupOrCreate(ctx, contextID); err != nil {
+			t.Fatal(err)
+		}
+		now = now.Add(31 * time.Minute)
+		if _, err := p.LookupOrCreate(ctx, "ctx-active"); err != nil {
+			t.Fatal(err)
+		}
+		p.reapOnce()
+	}
+
+	reloaded, err := fp.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := reloaded["ctx-oldest"]; ok {
+		t.Fatalf("sessions.json retained oldest evicted mapping: %+v", reloaded)
+	}
+	for _, kept := range []string{"ctx-middle", "ctx-newest"} {
+		if rec, ok := reloaded[kept]; !ok || rec.State != persistStateEvicted {
+			t.Fatalf("expected %s to remain evicted in sessions.json, rec=%+v ok=%t all=%+v", kept, rec, ok, reloaded)
+		}
+	}
+	if rec, ok := reloaded["ctx-active"]; !ok || rec.State != persistStateActive {
+		t.Fatalf("expected active mapping to remain in sessions.json, rec=%+v ok=%t all=%+v", rec, ok, reloaded)
 	}
 }
 

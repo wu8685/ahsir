@@ -10,8 +10,8 @@ import (
 func TestMixedClaudeAndCodexCollaborate_E2E(t *testing.T) {
 	fix := setupMixedProviderE2E(t)
 
-	reply, err := fix.sendMessage(
-		fix.studentPort,
+	reply, err := fix.sendMessageToAgent(
+		"student",
 		"msg-mixed-1",
 		"mixed-provider-collab",
 		"Ask the teacher for the classroom passphrase and relay the exact answer.",

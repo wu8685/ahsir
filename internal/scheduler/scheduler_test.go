@@ -155,6 +155,51 @@ func TestSchedulerChatWithAgent(t *testing.T) {
 	}
 }
 
+func TestSchedulerChatWithAgentAddsInternalToken(t *testing.T) {
+	cfg := &Config{
+		Registry: RegistryConfig{
+			Host: "127.0.0.1",
+			Port: freePort(t),
+		},
+		PortRange: PortRange{Start: 9801, End: 9900},
+	}
+	cfg.nextPort = cfg.PortRange.Start
+	sch := New(cfg)
+
+	var sawToken string
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		sawToken = r.Header.Get("X-Ahsir-Internal-Token")
+		if sawToken != "scheduler-token" {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		writeTestA2AReply(t, w, "token accepted")
+	}))
+	defer upstream.Close()
+
+	sch.Registry().Register(&a2a.AgentCard{
+		Name:               "teacher",
+		Version:            "1.0.0",
+		URL:                upstream.URL,
+		PreferredTransport: a2a.TransportProtocolJSONRPC,
+	})
+	sch.agents["teacher"] = &agentProcess{
+		cfg:           AgentConfig{Name: "teacher"},
+		internalToken: "scheduler-token",
+	}
+
+	resp, err := sch.ChatWithAgent("teacher", "ctx-token", "hello")
+	if err != nil {
+		t.Fatalf("ChatWithAgent: %v", err)
+	}
+	if !strings.Contains(resp, "token accepted") {
+		t.Fatalf("response = %q", resp)
+	}
+	if sawToken != "scheduler-token" {
+		t.Fatalf("chat token header = %q, want scheduler-token", sawToken)
+	}
+}
+
 func TestSchedulerChatWithAgentZeroChatTimeoutDoesNotExpireImmediately(t *testing.T) {
 	cfg := &Config{
 		Registry: RegistryConfig{
@@ -263,6 +308,83 @@ func TestSchedulerRestartsLocalAgentAfterUnexpectedExit(t *testing.T) {
 	if firstPort != secondPort {
 		t.Fatalf("restart should reuse port: first %s second %s", firstPort, secondPort)
 	}
+}
+
+func TestSchedulerRestartTriggersContinuationForFailedInvocation(t *testing.T) {
+	dir := t.TempDir()
+	countPath := filepath.Join(dir, "starts.log")
+	scriptPath := filepath.Join(dir, "agent.sh")
+	script := fmt.Sprintf("#!/bin/sh\nprintf '%%s\\n' \"$*\" >> %q\nexit 0\n", countPath)
+	if err := os.WriteFile(scriptPath, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	portStart := freePort(t)
+
+	cfg := &Config{
+		Agents: []AgentConfig{{
+			Name:      "worker",
+			Workspace: dir,
+			Port:      0,
+		}},
+		Registry:  RegistryConfig{Host: "127.0.0.1", Port: freePort(t)},
+		PortRange: PortRange{Start: portStart, End: portStart + 20},
+	}
+	cfg.nextPort = cfg.PortRange.Start
+	sch := New(cfg)
+	sch.supervisor.InitialBackoff = 10 * time.Millisecond
+	sch.supervisor.MaxBackoff = 10 * time.Millisecond
+	sch.agentCommand = func(ctx context.Context, agentExe string, cfg AgentConfig, registryURL string) *exec.Cmd {
+		return exec.CommandContext(ctx, scriptPath,
+			"--workspace", cfg.Workspace,
+			"--port", fmt.Sprint(cfg.Port),
+			"--registry", registryURL,
+		)
+	}
+
+	rec := sch.Invocations().Begin(InvocationMetadata{
+		Source:    InvocationSourceA2AProxy,
+		AgentName: "worker",
+		ContextID: "ctx-restart-continuation",
+		MessageID: "msg-before-crash",
+		UserText:  "continue me after restart",
+	})
+	sch.Invocations().FailMessage(rec.ID, "agent exited before completion")
+
+	type recoveryCall struct {
+		agent   string
+		context string
+		prompt  string
+	}
+	calls := make(chan recoveryCall, 1)
+	sch.recoveryDispatch = func(ctx context.Context, agentName, contextID, prompt string) (string, error) {
+		calls <- recoveryCall{agent: agentName, context: contextID, prompt: prompt}
+		return "continued", nil
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if err := sch.Start(ctx); err != nil {
+		t.Fatal(err)
+	}
+	defer sch.Stop()
+
+	_ = waitForLines(t, countPath, 2, 2*time.Second)
+	select {
+	case call := <-calls:
+		if call.agent != "worker" {
+			t.Fatalf("recovery agent = %q", call.agent)
+		}
+		if call.context != "ctx-restart-continuation" {
+			t.Fatalf("recovery context = %q", call.context)
+		}
+		if !strings.Contains(call.prompt, "continue the interrupted work") {
+			t.Fatalf("unexpected continuation prompt: %q", call.prompt)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timeout waiting for restart continuation dispatch")
+	}
+
+	assertLedgerStatus(t, sch.Invocations().Snapshot(), rec.ID, InvocationStatusRecovered, "")
 }
 
 func TestSchedulerRecoverySendsContinuationForInterruptedContext(t *testing.T) {

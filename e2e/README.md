@@ -1,6 +1,6 @@
 # `e2e/` — Real-LLM Integration Tests
 
-Top-to-bottom integration tests that spawn the real `ahsir` scheduler subprocess against real `claude` CLIs and a real LLM provider (DeepSeek by default). Gated behind the `e2e` build tag so the default `go test ./...` pipeline never runs them.
+Top-to-bottom integration tests that spawn the real `ahsir` scheduler subprocess against real provider CLIs. Public traffic goes through the scheduler-owned `/a2a/{agent}` or `/agents/{agent}/chat` gateway; direct agent ports are only used for explicit internal-port assertions. Gated behind the `e2e` build tag so the default `go test ./...` pipeline never runs them.
 
 This README is for **future contributors (humans or agents) adding new test cases**. If you just want to run the existing suite, jump to [Run](#run).
 
@@ -10,10 +10,17 @@ This README is for **future contributors (humans or agents) adding new test case
 e2e/
 ├── README.md                 ← you are here
 ├── framework_test.go         ← fixture + helpers + agent-card YAML templates
-└── delegation_test.go        ← TestStudentDelegatesToTeacher_E2E (the first case)
+├── scheduler_entrypoint_test.go
+├── cli_chat_test.go
+├── delegation_test.go
+├── session_reuse_test.go
+├── concurrent_test.go
+├── sse_streaming_test.go
+├── codex_provider_test.go
+└── mixed_provider_test.go
 ```
 
-Both files use `package e2e` (internal test package) + `//go:build e2e` at the top. Go is happy with a directory containing only build-tagged `_test.go` files — no separate `package e2e` non-test file is needed.
+All files use `package e2e` (internal test package) + `//go:build e2e` at the top. Go is happy with a directory containing only build-tagged `_test.go` files — no separate `package e2e` non-test file is needed.
 
 ## Run
 
@@ -22,16 +29,24 @@ Both files use `package e2e` (internal test package) + `//go:build e2e` at the t
 go build -o bin/ahsir ./cmd/ahsir
 go build -o bin/ahsir-agent ./cmd/ahsir-agent
 
-# Run all cases
+# Claude / Anthropic-compatible provider cases
 AHSIR_E2E_CLAUDE=1 MODEL_API_KEY=<your-deepseek-key> \
   go test -tags=e2e -timeout=5m -v ./e2e/
 
-# Run one case
+# Codex provider cases
+AHSIR_E2E_CODEX=1 \
+  go test -tags=e2e -timeout=8m -v ./e2e/ -run TestCodexProvider_E2E
+
+# Mixed provider case: Claude student delegates to Codex teacher
+AHSIR_E2E_MIXED=1 MODEL_API_KEY=<your-deepseek-key> \
+  go test -tags=e2e -timeout=8m -v ./e2e/ -run TestMixedClaudeAndCodexCollaborate_E2E
+
+# Run one Claude case
 AHSIR_E2E_CLAUDE=1 MODEL_API_KEY=<your-deepseek-key> \
   go test -tags=e2e -timeout=5m -v -run TestStudentDelegatesToTeacher_E2E ./e2e/
 ```
 
-Without `AHSIR_E2E_CLAUDE=1` (or with binaries unbuilt / `claude` not on PATH / `MODEL_API_KEY` unset), tests skip cleanly so CI can safely run `go test -tags=e2e ./...` with no gating logic.
+Without the matching gate env (`AHSIR_E2E_CLAUDE`, `AHSIR_E2E_CODEX`, or `AHSIR_E2E_MIXED`) or with missing binaries/provider CLIs, tests skip cleanly so CI can safely run `go test -tags=e2e ./...` with no extra gating logic.
 
 ---
 
@@ -53,9 +68,9 @@ func TestMyNewScenario_E2E(t *testing.T) {
     // ① Spin up the whole stack (skip if prereqs missing, hermetic temp config).
     fix := setupE2E(t)
 
-    // ② Drive it with one or more sendMessage calls.
-    reply, err := fix.sendMessage(
-        fix.studentPort,      // or fix.teacherPort to hit teacher directly
+    // ② Drive it through the scheduler-owned A2A endpoint.
+    reply, err := fix.sendMessageToAgent(
+        "student",
         "msg-id-unique",      // messageId — must differ across calls
         "my-conv-1",          // contextId — same across calls = session reuse
         "What does X mean? Answer in one sentence.",
@@ -84,21 +99,30 @@ Save as `e2e/<scenario>_test.go` (e.g. `session_reuse_test.go`, `kill_recovery_t
 
 Idempotently sets up the whole stack:
 
-1. **Prereq gates** — skips with a hint if `AHSIR_E2E_CLAUDE` / `MODEL_API_KEY` / `claude` / `bin/ahsir(-agent)` are missing.
+1. **Prereq gates** — skips with a hint if the selected provider gate/env, provider CLI, or `bin/ahsir(-agent)` are missing.
 2. **Hermetic config** — writes a temp `ahsir.yaml` + two agent cards (teacher, student) into `t.TempDir()`. **No filesystem access** (`filesystem.enabled: false`) so the test never depends on host-specific paths like `/Users/wuke/...`.
 3. **Random free ports** — picks three unused ports for registry + teacher + student so multiple e2e runs (or a manually-running scheduler) don't collide.
 4. **Subprocess scheduler** — spawns `bin/ahsir start <temp-config>` in **its own process group** (`SysProcAttr.Setpgid: true`). Critical: without the process group, `cleanup` only kills the scheduler — children (ahsir-agent → claude) survive holding inherited stdout/stderr pipes, hanging `cmd.Wait` indefinitely.
 5. **`t.Cleanup` wired** — on test exit (success, failure, or panic), kills the **whole process group** (`syscall.Kill(-pid, SIGKILL)`) with a bounded 5s `Wait`.
 6. **Ready-wait** — polls both agent ports until they accept TCP (30s budget) before returning.
 
-### `fix.sendMessage(port, messageId, contextId, text) (string, error)`
+### `fix.sendMessageToAgent(agentName, messageId, contextId, text) (string, error)`
 
-POSTs an A2A `message/send` JSON-RPC request and returns the **last `agent`-role text part** from `result.history` — i.e. what a user would see as the final reply.
+POSTs an A2A `message/send` JSON-RPC request through `http://127.0.0.1:<scheduler>/a2a/{agentName}` and returns the **last `agent`-role text part** from `result.history` — i.e. what a user would see as the final reply.
 
 - Bound by a 5-minute context (LLM can be slow under load).
 - Returns a descriptive error on transport failure, JSON-RPC error, or empty history.
 - `messageId` MUST differ between calls within one conversation — the A2A SDK may dedupe and replay the prior task otherwise.
 - `contextId` controls session reuse: same value across calls → pool keys on the same entry → reuse / resume / etc.
+- Because it goes through the scheduler, it covers proxying, internal token injection, and `.ahsir/ledger.jsonl` lifecycle recording.
+
+### `fix.sendMessageStreamToAgent(agentName, messageId, contextId, text) ([]streamEvent, error)`
+
+Same scheduler-owned path, using A2A `message/stream` and parsing SSE frames as they arrive.
+
+### `fix.sendDirectMessage(port, messageId, contextId, text) (string, error)`
+
+POSTs directly to an internal agent port. Use this only for internal-port negative tests or low-level debugging. Public e2e scenarios should use `sendMessageToAgent`.
 
 ### `fix.schedulerLog() string`
 
@@ -108,9 +132,10 @@ Returns the cumulative stdout+stderr captured from the scheduler subprocess. Sin
 
 | Field | Use |
 |---|---|
-| `fix.teacherPort` | POST direct to teacher (skip delegation) |
-| `fix.studentPort` | POST to student (triggers delegation if prompt asks for it) |
-| `fix.registryPort` | Hit scheduler registry / gateway endpoints |
+| `fix.registryPort` | Scheduler registry / gateway / `/a2a/{agent}` port |
+| `fix.teacherPort` | Internal teacher port; use only with `sendDirectMessage` or readiness diagnostics |
+| `fix.studentPort` | Internal student port; use only with `sendDirectMessage` or readiness diagnostics |
+| `fix.configDir` | Temp directory containing `ahsir.yaml` and `.ahsir/ledger.jsonl` |
 | `fix.repoRoot` | Absolute path to repo root (rarely needed; useful for shelling out) |
 
 The `cmd` / `cancel` / `logBuf` fields exist but are private to the fixture — don't touch them from a case file.
@@ -134,10 +159,10 @@ Pick the subset relevant to your scenario. For session reuse you want **absence*
 
 ## Common patterns
 
-### Hit teacher directly (no delegation involved)
+### Hit teacher through scheduler (no delegation involved)
 
 ```go
-reply, err := fix.sendMessage(fix.teacherPort, "msg-1", "conv-direct", "What is HTTP?")
+reply, err := fix.sendMessageToAgent("teacher", "msg-1", "conv-direct", "What is HTTP?")
 // teacher answers, no [student → teacher] in log
 ```
 
@@ -147,11 +172,11 @@ reply, err := fix.sendMessage(fix.teacherPort, "msg-1", "conv-direct", "What is 
 fix := setupE2E(t)
 
 // Turn 1: establish state
-_, err := fix.sendMessage(fix.teacherPort, "m1", "reuse-conv", "Remember the codeword: alpha-42.")
+_, err := fix.sendMessageToAgent("teacher", "m1", "reuse-conv", "Remember the codeword: alpha-42.")
 if err != nil { t.Fatal(err) }
 
 // Turn 2: same contextId → pool MUST reuse claude
-reply, err := fix.sendMessage(fix.teacherPort, "m2", "reuse-conv", "What codeword did I tell you?")
+reply, err := fix.sendMessageToAgent("teacher", "m2", "reuse-conv", "What codeword did I tell you?")
 if err != nil { t.Fatal(err) }
 
 if !strings.Contains(reply, "alpha-42") {
@@ -171,7 +196,7 @@ if n := strings.Count(logs, "claude session: started"); n != 1 {
 fix := setupE2E(t)
 
 // Turn 1: spawn teacher's claude.
-_, _ = fix.sendMessage(fix.teacherPort, "m1", "ha-conv", "Remember beta-77.")
+_, _ = fix.sendMessageToAgent("teacher", "m1", "ha-conv", "Remember beta-77.")
 
 // Extract teacher's claude pid from the log and SIGKILL it.
 pid := extractFirstPid(t, fix.schedulerLog())
@@ -181,7 +206,7 @@ if err := syscall.Kill(pid, syscall.SIGKILL); err != nil {
 time.Sleep(500 * time.Millisecond) // let the wrapper's reader see EOF
 
 // Turn 2: pool must detect zombie via IsHealthy, recreate with --resume.
-reply, err := fix.sendMessage(fix.teacherPort, "m2", "ha-conv", "What codeword?")
+reply, err := fix.sendMessageToAgent("teacher", "m2", "ha-conv", "What codeword?")
 if err != nil { t.Fatal(err) }
 if !strings.Contains(reply, "beta-77") {
     t.Errorf("resume didn't recover memory: %q", reply)
@@ -190,6 +215,15 @@ if !strings.Contains(reply, "beta-77") {
 logs := fix.schedulerLog()
 if !strings.Contains(logs, "--resume=") {
     t.Errorf("expected --resume= in log after kill, got:\n%s", logs)
+}
+```
+
+### Internal-port protection
+
+```go
+_, err := fix.sendDirectMessage(fix.studentPort, "msg-direct", "ctx-direct", "should be rejected")
+if err == nil || !strings.Contains(err.Error(), "401") {
+    t.Fatalf("direct agent port should require scheduler internal token, got %v", err)
 }
 ```
 
@@ -249,7 +283,7 @@ import (
 
 func TestMyScenario_E2E(t *testing.T) {
     fix := setupE2E(t)
-    reply, err := fix.sendMessage(fix.studentPort, "msg-1", "my-conv-1", "<your prompt>")
+    reply, err := fix.sendMessageToAgent("student", "msg-1", "my-conv-1", "<your prompt>")
     if err != nil {
         t.Fatalf("send: %v\nlog:\n%s", err, fix.schedulerLog())
     }
