@@ -163,6 +163,32 @@ You:  for angle in security performance maintainability; do
 - `ahsir list` returns empty → scheduler is up but no agents registered. The config file may have agents disabled, or agents may have failed to start (the user should check the scheduler's stdout).
 - `ahsir chat` returns non-zero → the agent itself errored (timeout, runtime crash, etc.). Show the user the stderr message; common fix is to retry, or check the agent's runtime config.
 
+## Performance debugging
+
+When the user says ahsir is slow, stuck, or asks where time is going, ask them
+for the scheduler stdout around the relevant `contextID` (or inspect it if this
+thread has access to the terminal). Do not guess from the final `ahsir chat`
+latency alone.
+
+Useful log patterns:
+
+```bash
+grep 'contextID=<id>' scheduler.log
+grep 'executor turn done' scheduler.log
+grep 'session pool: lookup' scheduler.log
+grep 'A2A_CALL' scheduler.log
+```
+
+How to read the waterfall:
+
+- `[agent] send done ... took=...` is the full A2A handler time for one inbound request.
+- `session pool: lookup ... outcome=hit|create|resume|capacity_reject ... took=...` shows whether time is going into session reuse, process creation, resume, or capacity limits.
+- `executor open_session done ... took=...` is the executor's view of pool/session acquisition.
+- `executor prompt_ready ... agents=N ... prompt_bytes=... took=...` covers registry listing plus prompt construction.
+- `executor turn done ... took=... provider_duration_ms=... input_tokens=... output_tokens=...` is the provider turn. If wrapper `took` is much larger than provider duration, suspect CLI/process/stream overhead.
+- `[X → Y] A2A_CALL ...` and `[X ← Y] reply ... took=...` wrap a child-agent call. The child agent will also have its own `executor turn done` lines with the same `contextID`.
+- `executor injection_ready ... took=...` is usually tiny; if it is not, result payloads may be too large.
+
 ## Flags reference
 
 | Flag | Default | Notes |

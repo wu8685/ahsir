@@ -320,15 +320,38 @@ codex session: started pid=70548 cmd=codex args=[exec --json --sandbox=read-only
 Inter-agent traffic and per-request receive markers:
 
 ```
-[teacher] receive: contextID=demo msgID=... text="..."
-[student → teacher] A2A_CALL: task="..."
-[student ← teacher] reply: took=12.3s bytes=... preview="..."
+[teacher] receive: contextID=demo msgID=... mode=send text="..."
+[student → teacher] A2A_CALL: contextID=demo depth=0 source=legacy_text task="..."
+[student ← teacher] reply: contextID=demo depth=0 took=12.3s bytes=... preview="..."
 ```
 
 Agent-to-agent dispatch prefers structured runtime tool-use events named
 `a2a_call` / `call_agent` with JSON input `{"agent":"...","task":"..."}`.
 The legacy `---A2A_CALL---` text block is still supported as a fallback for
 providers or prompts that cannot emit structured tool calls.
+
+Performance timing logs are emitted for every major phase in the path:
+
+```
+[student] send done contextID=demo msgID=... state=completed history=3 took=24.7s
+[student] executor open_session done contextID=demo msgID=... took=12.4ms
+[student] executor prompt_ready contextID=demo msgID=... agents=2 user_bytes=91 prompt_bytes=812 took=1.1ms
+[student] executor turn done contextID=demo depth=0 took=7.2s stream_open=1.3ms events=4 response_bytes=120 input_tokens=... output_tokens=... provider_duration_ms=...
+session pool: lookup contextID=demo outcome=hit state=active sessionID=... took=35µs
+```
+
+Read them as a waterfall:
+
+- `send done` is the whole inbound A2A handler time for one request.
+- `executor open_session` plus `session pool: lookup` shows pool overhead and
+  whether this was `hit`, `create`, `resume`, or `capacity_reject`.
+- `executor prompt_ready` is prompt construction and registry agent listing.
+- `executor turn done` is the provider turn. `took` is wrapper-observed wall
+  time; `provider_duration_ms` is what the provider reported, when available.
+- `[X → Y] A2A_CALL` / `[X ← Y] reply` wraps the full child-agent call,
+  including that child agent's own provider work.
+- `executor injection_ready` is result-injection prompt construction before
+  the parent agent's follow-up turn.
 
 Useful greps:
 
@@ -340,6 +363,9 @@ Useful greps:
 | ` exec resume ` | Codex turn resumed from a prior `thread_id` |
 | `[teacher]` / `[student]` | Per-agent request/log filtering |
 | `[X → Y] A2A_CALL` | Cross-agent delegations |
+| `contextID=<id>` | Full waterfall for one conversation |
+| `executor turn done` | Provider turn timings and token/cost stats |
+| `session pool: lookup` | Session reuse / create / resume / capacity behavior |
 
 If you suspect the time is being spent outside the LLM (in scheduler /
 serialization), compare the elapsed sum across all agent log lines

@@ -193,9 +193,9 @@ claude session [teacher] stderr: <line>
 Inter-agent traffic shows up as:
 
 ```
-[teacher] receive: contextID=... msgID=... text="..."
-[student → teacher] A2A_CALL: task="..."
-[student ← teacher] reply: took=12.3s bytes=... preview="..."
+[teacher] receive: contextID=... msgID=... mode=send text="..."
+[student → teacher] A2A_CALL: contextID=... depth=0 source=legacy_text task="..."
+[student ← teacher] reply: contextID=... depth=0 took=12.3s bytes=... preview="..."
 ```
 
 Common patterns:
@@ -203,6 +203,7 @@ Common patterns:
 - **Per-conversation tracing**: one `pid=` per `contextId` per agent. Reused requests don't emit new start lines.
 - **Resume detection**: grep for `--resume=` to spot pool eviction recovery or self-healing on SIGKILL.
 - **Per-agent filtering**: agent name appears in `[teacher]` / `[student]` brackets.
+- **Performance tracing**: grep `contextID=<id>` for the full waterfall, then compare `send done`, `session pool: lookup`, `executor turn done`, and `[X ← Y] reply` timings.
 - **Failures**: missing process-start log means `cmd.Start()` failed (check `MODEL_API_KEY`, claude binary path, or the resolved `args` block from `agent-card.yaml`).
 
 ### 8. Shut down
