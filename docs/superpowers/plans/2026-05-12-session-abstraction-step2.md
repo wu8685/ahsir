@@ -274,6 +274,7 @@ Status as of 2026-06-06:
 - **~~V2-资源控制~~** ✅ **Done**. `pool.max_active` plus overload policies `reject` / `evict-lru`.
 - **V2-A2A_CALL → tool_call**：partially done. Runtime tool-use events named `a2a_call` / `call_agent` are promoted to provider-neutral `EventAgentCall`; legacy `---A2A_CALL---` text markers remain as fallback until prompts/providers can rely on structured tools everywhere.
 - **V2-多 provider**：partially done. `CodexSession` landed after this plan and is verified with Codex-only plus mixed Claude+Codex e2e; `GeminiSession` still open over the same `Session` interface.
+- **P0/P1 observability follow-up** ✅ **Done** (commits `5c437ea` / `cd83745`). Executor, A2A server, and SessionPool now emit per-stage timing logs for `open_session`, prompt construction, provider turns, A2A child calls, injection, pool hit/create/resume, and handler totals; README and Claude Code skill document the performance waterfall.
 
 ### Bonus capabilities delivered beyond original Step 2 scope (commit `22f7a2e`)
 
@@ -281,3 +282,4 @@ Status as of 2026-06-06:
 - **contextID propagation through A2A_CALL**: `executor.interact` threads `task.ContextID` into `e.callAgent`, which `AgentClient.SendMessage` sets on the outgoing message. Callee's pool keys on the propagated id, reusing one session across multiple delegations within one conversation.
 - **Inter-agent log markers**: `[X] receive` / `[X → Y] A2A_CALL` / `[X ← Y] reply` lines for operator visibility into cross-agent traffic.
 - **Pool ctx fix**: `SessionPool` owns a long-lived `sessionCtx` and hands it to the factory, decoupled from per-request ctx. Without this fix, `exec.CommandContext` killed `claude` the moment the A2A response was sent.
+- **Full real-provider e2e verification**: On 2026-06-06, `AHSIR_E2E_CLAUDE=1 AHSIR_E2E_CODEX=1 AHSIR_E2E_MIXED=1 go test -tags=e2e -count=1 -timeout=15m ./e2e -v` passed end-to-end (`597.191s`) after the observability changes.
