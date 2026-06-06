@@ -1,7 +1,9 @@
 package wrapper
 
 import (
+	"bytes"
 	"context"
+	"log"
 	"strings"
 	"testing"
 
@@ -177,6 +179,62 @@ func (f *fakeAgentCallSession) Turn(ctx context.Context, userText string) (strin
 func (f *fakeAgentCallSession) SessionID() string { return "" }
 func (f *fakeAgentCallSession) IsHealthy() bool   { return true }
 func (f *fakeAgentCallSession) Close() error      { return nil }
+
+func captureLogOutput(t *testing.T) *bytes.Buffer {
+	t.Helper()
+	var buf bytes.Buffer
+	oldWriter := log.Writer()
+	oldFlags := log.Flags()
+	log.SetOutput(&buf)
+	log.SetFlags(0)
+	t.Cleanup(func() {
+		log.SetOutput(oldWriter)
+		log.SetFlags(oldFlags)
+	})
+	return &buf
+}
+
+func TestExecutor_PerformanceLogs(t *testing.T) {
+	logs := captureLogOutput(t)
+	fake := &fakeAgentCallSession{calls: []EventAgentCall{{Agent: "backend", Task: "design API"}}}
+
+	executor := NewExecutor(ExecutorConfig{
+		OpenSession: func(ctx context.Context, contextID string) (Session, error) { return fake, nil },
+		ListAgents: func() []*a2a.AgentCard {
+			return []*a2a.AgentCard{{Name: "backend", URL: "http://127.0.0.1:9801/"}}
+		},
+		CallAgent: func(ctx context.Context, agentName, contextID, task string) (string, error) {
+			return "backend result", nil
+		},
+		MaxDepth:   5,
+		BasePrompt: "You are a router.",
+		SelfName:   "student",
+	})
+
+	msg := a2a.NewMessage(a2a.MessageRoleUser, a2a.TextPart{Text: "build API"})
+	msg.ContextID = "perf-context"
+	msg.ID = "perf-msg"
+	if _, err := executor.Execute(context.Background(), msg); err != nil {
+		t.Fatal(err)
+	}
+
+	out := logs.String()
+	for _, want := range []string{
+		"[student] executor start contextID=perf-context msgID=perf-msg mode=send",
+		"[student] executor open_session done contextID=perf-context msgID=perf-msg took=",
+		"[student] executor prompt_ready contextID=perf-context msgID=perf-msg agents=1",
+		"[student] executor turn done contextID=perf-context depth=0 took=",
+		"input_tokens=0 output_tokens=0 cost_usd=0.000000 provider_duration_ms=0",
+		"[student → backend] A2A_CALL: contextID=perf-context depth=0 source=structured",
+		"[student ← backend] reply: contextID=perf-context depth=0 took=",
+		"[student] executor injection_ready contextID=perf-context depth=0 agent=backend",
+		"[student] executor done contextID=perf-context msgID=perf-msg history=3 took=",
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("expected performance log %q in:\n%s", want, out)
+		}
+	}
+}
 
 func TestExecutorWithStructuredAgentCall(t *testing.T) {
 	fake := &fakeAgentCallSession{calls: []EventAgentCall{{Agent: "backend", Task: "design a user API"}}}

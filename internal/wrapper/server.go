@@ -97,6 +97,7 @@ func (s *A2AServer) OnCancelTask(ctx context.Context, id *a2a.TaskIDParams) (*a2
 
 // OnSendMessage handles 'message/send'.
 func (s *A2AServer) OnSendMessage(ctx context.Context, params *a2a.MessageSendParams) (a2a.SendMessageResult, error) {
+	started := time.Now()
 	// One log line per inbound A2A message so operators can see who is being
 	// hit, with which contextID, and a preview of the user/peer text. A2A
 	// messages don't carry sender identity, so caller name is only visible
@@ -119,6 +120,7 @@ func (s *A2AServer) OnSendMessage(ctx context.Context, params *a2a.MessageSendPa
 			// (which the scheduler tees into its own terminal). Without
 			// this, JSON-RPC errors are only visible to whoever is calling
 			// the endpoint — the scheduler operator sees nothing.
+			log.Printf("[%s] send done contextID=%s msgID=%s state=failed took=%v err=%v", name, params.Message.ContextID, params.Message.ID, time.Since(started), err)
 			log.Printf("OnSendMessage: executor failed: %v", err)
 			return nil, err
 		}
@@ -127,10 +129,18 @@ func (s *A2AServer) OnSendMessage(ctx context.Context, params *a2a.MessageSendPa
 		if task != nil {
 			s.tasks.Save(task)
 		}
+		state := a2a.TaskStateCompleted
+		history := 0
+		if task != nil {
+			state = task.Status.State
+			history = len(task.History)
+		}
+		log.Printf("[%s] send done contextID=%s msgID=%s state=%s history=%d took=%v", name, params.Message.ContextID, params.Message.ID, state, history, time.Since(started))
 		return task, nil
 	}
 	task := a2a.NewSubmittedTask(a2a.TaskInfo{}, params.Message)
 	s.tasks.Save(task)
+	log.Printf("[%s] send done contextID=%s msgID=%s state=%s history=%d took=%v executor=false", name, params.Message.ContextID, params.Message.ID, task.Status.State, len(task.History), time.Since(started))
 	return task, nil
 }
 
@@ -147,6 +157,7 @@ func (s *A2AServer) OnResubscribeToTask(ctx context.Context, id *a2a.TaskIDParam
 // OnSendMessage.
 func (s *A2AServer) OnSendMessageStream(ctx context.Context, params *a2a.MessageSendParams) iter.Seq2[a2a.Event, error] {
 	return func(yield func(a2a.Event, error) bool) {
+		started := time.Now()
 		name := s.selfName
 		if name == "" {
 			name = "agent"
@@ -168,7 +179,6 @@ func (s *A2AServer) OnSendMessageStream(ctx context.Context, params *a2a.Message
 		// updates (the initial "working" announcement) and the terminal Task
 		// don't. The summary is logged on stream end regardless of how it
 		// ended (normal, error yield, client disconnect).
-		started := time.Now()
 		var deltaCount, deltaBytes int
 		defer func() {
 			log.Printf("[%s] stream done contextID=%s msgID=%s deltas=%d bytes=%d took=%v", name, params.Message.ContextID, params.Message.ID, deltaCount, deltaBytes, time.Since(started))

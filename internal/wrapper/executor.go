@@ -60,40 +60,67 @@ func NewExecutor(cfg ExecutorConfig) *Executor {
 	}
 }
 
+type turnResult struct {
+	text            string
+	call            *A2ACall
+	turnErr         error
+	took            time.Duration
+	streamOpen      time.Duration
+	events          int
+	textEvents      int
+	deltas          int
+	deltaBytes      int
+	agentCallEvents int
+	toolUseEvents   int
+	callSource      string
+	stats           TurnStats
+}
+
 // Execute runs the agent execution loop for an incoming message.
 func (e *Executor) Execute(ctx context.Context, msg *a2a.Message) (*a2a.Task, error) {
+	started := time.Now()
+	selfTag := e.logName()
 	// Pass msg as the TaskInfoProvider so msg.ContextID propagates onto the
 	// new task — this is what links sequential message/send calls into one
 	// conversation. NewSubmittedTask generates a fresh ContextID only if
 	// msg.ContextID is empty.
 	task := a2a.NewSubmittedTask(msg, msg)
+	log.Printf("[%s] executor start contextID=%s msgID=%s mode=send", selfTag, task.ContextID, msg.ID)
 
 	// Open a Session for this request. SessionPool.LookupOrCreate returns
 	// the same long-running Session for a given contextID; Session lifetime
 	// is owned by the pool, so this code intentionally does NOT defer Close.
+	openStarted := time.Now()
 	session, err := e.openSession(ctx, task.ContextID)
+	openTook := time.Since(openStarted)
 	if err != nil {
 		task.Status = a2a.TaskStatus{State: a2a.TaskStateFailed}
+		log.Printf("[%s] executor open_session failed contextID=%s msgID=%s took=%v err=%v", selfTag, task.ContextID, msg.ID, openTook, err)
 		return task, err
 	}
+	log.Printf("[%s] executor open_session done contextID=%s msgID=%s took=%v", selfTag, task.ContextID, msg.ID, openTook)
 
 	// Build the full system prompt with available agents. Conversation
 	// history is held inside the claude process across turns — wrapper no
 	// longer prepends it to the prompt.
+	promptStarted := time.Now()
 	agents := e.listAgents()
 	systemPrompt := BuildSystemPrompt(e.basePrompt, agents, e.maxDepth)
 	userText := messageText(msg)
 	fullPrompt := systemPrompt + "\n\n" + userText + "\n"
+	log.Printf("[%s] executor prompt_ready contextID=%s msgID=%s agents=%d user_bytes=%d prompt_bytes=%d took=%v", selfTag, task.ContextID, msg.ID, len(agents), len(userText), len(fullPrompt), time.Since(promptStarted))
 
 	resultText, history, err := e.interact(ctx, session, task, fullPrompt, 0, userText)
 	if err != nil {
 		task.Status = a2a.TaskStatus{State: a2a.TaskStateFailed}
+		log.Printf("[%s] executor failed contextID=%s msgID=%s took=%v err=%v", selfTag, task.ContextID, msg.ID, time.Since(started), err)
 		return task, err
 	}
 
 	task.Status = a2a.TaskStatus{State: a2a.TaskStateCompleted}
 	task.History = history
 	_ = resultText
+	log.Printf("[%s] executor done contextID=%s msgID=%s history=%d took=%v", selfTag, task.ContextID, msg.ID, len(task.History), time.Since(started))
 
 	return task, nil
 }
@@ -104,93 +131,115 @@ func (e *Executor) Execute(ctx context.Context, msg *a2a.Message) (*a2a.Task, er
 // handles the initial user turn and any sub-agent injection rounds, with
 // claude's own memory of intermediate state intact.
 func (e *Executor) interact(ctx context.Context, session Session, task *a2a.Task, prompt string, depth int, originalTask string) (string, []*a2a.Message, error) {
-	responseText, call, err := e.runTurn(ctx, session, prompt, nil)
+	selfTag := e.logName()
+	log.Printf("[%s] executor turn start contextID=%s depth=%d prompt_bytes=%d", selfTag, task.ContextID, depth, len(prompt))
+	turn, err := e.runTurn(ctx, session, prompt, nil)
 	if err != nil {
+		log.Printf("[%s] executor turn stream_open failed contextID=%s depth=%d took=%v stream_open=%v err=%v", selfTag, task.ContextID, depth, turn.took, turn.streamOpen, err)
 		return "", task.History, fmt.Errorf("session turn: %w", err)
+	}
+	log.Printf("[%s] executor turn done contextID=%s depth=%d took=%v stream_open=%v events=%d text_events=%d deltas=%d delta_bytes=%d agent_call_events=%d tool_use_events=%d response_bytes=%d input_tokens=%d output_tokens=%d cost_usd=%.6f provider_duration_ms=%d call=%t call_source=%s turn_err=%v", selfTag, task.ContextID, depth, turn.took, turn.streamOpen, turn.events, turn.textEvents, turn.deltas, turn.deltaBytes, turn.agentCallEvents, turn.toolUseEvents, len(turn.text), turn.stats.InputTokens, turn.stats.OutputTokens, turn.stats.CostUSD, turn.stats.DurationMS, turn.call != nil, turn.callSource, turn.turnErr)
+	if turn.turnErr != nil {
+		return "", task.History, fmt.Errorf("session turn: %w", turn.turnErr)
 	}
 
 	// Record agent response in history
-	respMsg := a2a.NewMessage(a2a.MessageRoleAgent, a2a.TextPart{Text: responseText})
+	respMsg := a2a.NewMessage(a2a.MessageRoleAgent, a2a.TextPart{Text: turn.text})
 	task.History = append(task.History, respMsg)
 
-	if call == nil {
-		return responseText, task.History, nil
+	if turn.call == nil {
+		return turn.text, task.History, nil
 	}
 
 	// If max depth reached, stop making sub-calls
 	if depth >= e.maxDepth {
-		return responseText, task.History, nil
+		log.Printf("[%s] executor max_depth_reached contextID=%s depth=%d max_depth=%d call_agent=%s", selfTag, task.ContextID, depth, e.maxDepth, turn.call.Agent)
+		return turn.text, task.History, nil
 	}
 
-	if err := ValidateA2ACall(*call); err != nil {
+	if err := ValidateA2ACall(*turn.call); err != nil {
 		// Invalid call, but continue processing
 		errorMsg := fmt.Sprintf("\n[A2A_CALL error: %v]\n", err)
 		return e.interact(ctx, session, task, errorMsg, depth, originalTask)
 	}
 
 	if e.callAgent == nil {
-		errorMsg := fmt.Sprintf("\n[Cannot call agent %s: no agent caller configured]\n", call.Agent)
+		errorMsg := fmt.Sprintf("\n[Cannot call agent %s: no agent caller configured]\n", turn.call.Agent)
 		return e.interact(ctx, session, task, errorMsg, depth, originalTask)
 	}
 
 	// Execute the sub-agent call. Logs surround it so the scheduler tee shows
 	// the cross-agent traffic — without these, A2A_CALL dispatches are
 	// invisible at the wrapper layer.
-	selfTag := e.selfName
-	if selfTag == "" {
-		selfTag = "agent"
-	}
-	log.Printf("[%s → %s] A2A_CALL: task=%q", selfTag, call.Agent, truncateForLog(call.Task, 300))
+	log.Printf("[%s → %s] A2A_CALL: contextID=%s depth=%d source=%s task=%q", selfTag, turn.call.Agent, task.ContextID, depth, turn.callSource, truncateForLog(turn.call.Task, 300))
 	callStart := time.Now()
 	// Thread task.ContextID through so the callee's SessionPool can reuse a
 	// session across multiple delegations within the same conversation.
-	agentResult, err := e.callAgent(ctx, call.Agent, task.ContextID, call.Task)
+	agentResult, err := e.callAgent(ctx, turn.call.Agent, task.ContextID, turn.call.Task)
 	if err != nil {
-		log.Printf("[%s ← %s] A2A_CALL failed in %v: %v", selfTag, call.Agent, time.Since(callStart), err)
-		errorMsg := fmt.Sprintf("\n[Agent %s call failed: %v]\n", call.Agent, err)
+		log.Printf("[%s ← %s] A2A_CALL failed contextID=%s depth=%d took=%v err=%v", selfTag, turn.call.Agent, task.ContextID, depth, time.Since(callStart), err)
+		errorMsg := fmt.Sprintf("\n[Agent %s call failed: %v]\n", turn.call.Agent, err)
 		return e.interact(ctx, session, task, errorMsg, depth, originalTask)
 	}
-	log.Printf("[%s ← %s] reply: took=%v bytes=%d preview=%q", selfTag, call.Agent, time.Since(callStart), len(agentResult), truncateForLog(agentResult, 300))
+	log.Printf("[%s ← %s] reply: contextID=%s depth=%d took=%v bytes=%d preview=%q", selfTag, turn.call.Agent, task.ContextID, depth, time.Since(callStart), len(agentResult), truncateForLog(agentResult, 300))
 
 	// Inject the result and continue
-	injection := BuildInjectionPrompt(call.Agent, originalTask, agentResult)
+	injectStarted := time.Now()
+	injection := BuildInjectionPrompt(turn.call.Agent, originalTask, agentResult)
+	log.Printf("[%s] executor injection_ready contextID=%s depth=%d agent=%s result_bytes=%d injection_bytes=%d took=%v", selfTag, task.ContextID, depth, turn.call.Agent, len(agentResult), len(injection), time.Since(injectStarted))
 	return e.interact(ctx, session, task, injection, depth+1, originalTask)
 }
 
-func (e *Executor) runTurn(ctx context.Context, session Session, prompt string, onDelta func(string) bool) (string, *A2ACall, error) {
+func (e *Executor) runTurn(ctx context.Context, session Session, prompt string, onDelta func(string) bool) (turnResult, error) {
+	turnStarted := time.Now()
+	streamStarted := time.Now()
 	ch, err := session.Stream(ctx, prompt)
+	streamOpen := time.Since(streamStarted)
 	if err != nil {
-		return "", nil, err
+		return turnResult{took: time.Since(turnStarted), streamOpen: streamOpen}, err
 	}
 
 	var fullText strings.Builder
-	var turnErr error
-	var call *A2ACall
+	result := turnResult{streamOpen: streamOpen}
 	stopDeltas := false
 	for ev := range ch {
+		result.events++
 		switch x := ev.(type) {
 		case EventTextDelta:
+			result.deltas++
+			result.deltaBytes += len(x.Text)
 			if onDelta != nil && !stopDeltas {
 				if !onDelta(x.Text) {
 					stopDeltas = true
 				}
 			}
 		case EventText:
+			result.textEvents++
 			fullText.WriteString(x.Text)
 		case EventAgentCall:
+			result.agentCallEvents++
 			c := A2ACall{Agent: x.Agent, Task: x.Task}
-			call = &c
+			result.call = &c
+			result.callSource = "structured"
+		case EventToolUse:
+			result.toolUseEvents++
 		case EventTurnDone:
-			turnErr = x.Err
+			result.turnErr = x.Err
+			result.stats = x.Stats
 		}
 	}
-	responseText := fullText.String()
-	if call == nil {
-		if parsed, ok := ParseA2ACall(responseText); ok {
-			call = &parsed
+	result.text = fullText.String()
+	if result.call == nil {
+		if parsed, ok := ParseA2ACall(result.text); ok {
+			result.call = &parsed
+			result.callSource = "legacy_text"
 		}
 	}
-	return responseText, call, turnErr
+	if result.call == nil {
+		result.callSource = "none"
+	}
+	result.took = time.Since(turnStarted)
+	return result, nil
 }
 
 // ExecuteStream is the streaming counterpart of Execute. It runs the same
@@ -206,19 +255,28 @@ func (e *Executor) runTurn(ctx context.Context, session Session, prompt string, 
 // the same contextID gets a healthy session.
 func (e *Executor) ExecuteStream(ctx context.Context, msg *a2a.Message) iter.Seq2[a2a.Event, error] {
 	return func(yield func(a2a.Event, error) bool) {
+		started := time.Now()
+		selfTag := e.logName()
 		task := a2a.NewSubmittedTask(msg, msg)
+		log.Printf("[%s] executor start contextID=%s msgID=%s mode=stream", selfTag, task.ContextID, msg.ID)
 
+		openStarted := time.Now()
 		session, err := e.openSession(ctx, task.ContextID)
+		openTook := time.Since(openStarted)
 		if err != nil {
 			task.Status = a2a.TaskStatus{State: a2a.TaskStateFailed}
+			log.Printf("[%s] executor open_session failed contextID=%s msgID=%s took=%v err=%v", selfTag, task.ContextID, msg.ID, openTook, err)
 			yield(task, err)
 			return
 		}
+		log.Printf("[%s] executor open_session done contextID=%s msgID=%s took=%v", selfTag, task.ContextID, msg.ID, openTook)
 
+		promptStarted := time.Now()
 		agents := e.listAgents()
 		systemPrompt := BuildSystemPrompt(e.basePrompt, agents, e.maxDepth)
 		userText := messageText(msg)
 		fullPrompt := systemPrompt + "\n\n" + userText + "\n"
+		log.Printf("[%s] executor prompt_ready contextID=%s msgID=%s agents=%d user_bytes=%d prompt_bytes=%d took=%v", selfTag, task.ContextID, msg.ID, len(agents), len(userText), len(fullPrompt), time.Since(promptStarted))
 
 		// Announce that we've picked up the task. State==Working so subscribers
 		// can show a spinner before the first delta lands.
@@ -231,6 +289,7 @@ func (e *Executor) ExecuteStream(ctx context.Context, msg *a2a.Message) iter.Seq
 		}
 
 		task.Status = a2a.TaskStatus{State: a2a.TaskStateCompleted}
+		log.Printf("[%s] executor done contextID=%s msgID=%s history=%d took=%v", selfTag, task.ContextID, msg.ID, len(task.History), time.Since(started))
 		yield(task, nil)
 	}
 }
@@ -241,7 +300,9 @@ func (e *Executor) ExecuteStream(ctx context.Context, msg *a2a.Message) iter.Seq
 // yield (so the caller can stop the outer iteration cleanly).
 func (e *Executor) interactStream(ctx context.Context, session Session, task *a2a.Task, prompt string, depth int, originalTask string, yield func(a2a.Event, error) bool) bool {
 	stopYielding := false
-	responseText, call, turnErr := e.runTurn(ctx, session, prompt, func(delta string) bool {
+	selfTag := e.logName()
+	log.Printf("[%s] executor turn start contextID=%s depth=%d prompt_bytes=%d stream=true", selfTag, task.ContextID, depth, len(prompt))
+	turn, err := e.runTurn(ctx, session, prompt, func(delta string) bool {
 		deltaMsg := a2a.NewMessage(a2a.MessageRoleAgent, a2a.TextPart{Text: delta})
 		if !yield(a2a.NewStatusUpdateEvent(task, a2a.TaskStateWorking, deltaMsg), nil) {
 			stopYielding = true
@@ -249,49 +310,62 @@ func (e *Executor) interactStream(ctx context.Context, session Session, task *a2
 		}
 		return true
 	})
+	if err != nil {
+		task.Status = a2a.TaskStatus{State: a2a.TaskStateFailed}
+		log.Printf("[%s] executor turn stream_open failed contextID=%s depth=%d err=%v", selfTag, task.ContextID, depth, err)
+		yield(task, fmt.Errorf("session stream: %w", err))
+		return false
+	}
+	log.Printf("[%s] executor turn done contextID=%s depth=%d took=%v stream_open=%v events=%d text_events=%d deltas=%d delta_bytes=%d agent_call_events=%d tool_use_events=%d response_bytes=%d input_tokens=%d output_tokens=%d cost_usd=%.6f provider_duration_ms=%d call=%t call_source=%s turn_err=%v stream=true", selfTag, task.ContextID, depth, turn.took, turn.streamOpen, turn.events, turn.textEvents, turn.deltas, turn.deltaBytes, turn.agentCallEvents, turn.toolUseEvents, len(turn.text), turn.stats.InputTokens, turn.stats.OutputTokens, turn.stats.CostUSD, turn.stats.DurationMS, turn.call != nil, turn.callSource, turn.turnErr)
 	if stopYielding {
 		return false
 	}
-	if turnErr != nil {
+	if turn.turnErr != nil {
 		task.Status = a2a.TaskStatus{State: a2a.TaskStateFailed}
-		yield(task, fmt.Errorf("session turn: %w", turnErr))
+		yield(task, fmt.Errorf("session turn: %w", turn.turnErr))
 		return false
 	}
 
-	respMsg := a2a.NewMessage(a2a.MessageRoleAgent, a2a.TextPart{Text: responseText})
+	respMsg := a2a.NewMessage(a2a.MessageRoleAgent, a2a.TextPart{Text: turn.text})
 	task.History = append(task.History, respMsg)
 
-	if call == nil {
+	if turn.call == nil {
 		return true
 	}
 	if depth >= e.maxDepth {
+		log.Printf("[%s] executor max_depth_reached contextID=%s depth=%d max_depth=%d call_agent=%s stream=true", selfTag, task.ContextID, depth, e.maxDepth, turn.call.Agent)
 		return true
 	}
-	if err := ValidateA2ACall(*call); err != nil {
+	if err := ValidateA2ACall(*turn.call); err != nil {
 		errorMsg := fmt.Sprintf("\n[A2A_CALL error: %v]\n", err)
 		return e.interactStream(ctx, session, task, errorMsg, depth, originalTask, yield)
 	}
 	if e.callAgent == nil {
-		errorMsg := fmt.Sprintf("\n[Cannot call agent %s: no agent caller configured]\n", call.Agent)
+		errorMsg := fmt.Sprintf("\n[Cannot call agent %s: no agent caller configured]\n", turn.call.Agent)
 		return e.interactStream(ctx, session, task, errorMsg, depth, originalTask, yield)
 	}
 
-	selfTag := e.selfName
-	if selfTag == "" {
-		selfTag = "agent"
-	}
-	log.Printf("[%s → %s] A2A_CALL: task=%q", selfTag, call.Agent, truncateForLog(call.Task, 300))
+	log.Printf("[%s → %s] A2A_CALL: contextID=%s depth=%d source=%s task=%q stream=true", selfTag, turn.call.Agent, task.ContextID, depth, turn.callSource, truncateForLog(turn.call.Task, 300))
 	callStart := time.Now()
-	agentResult, err := e.callAgent(ctx, call.Agent, task.ContextID, call.Task)
+	agentResult, err := e.callAgent(ctx, turn.call.Agent, task.ContextID, turn.call.Task)
 	if err != nil {
-		log.Printf("[%s ← %s] A2A_CALL failed in %v: %v", selfTag, call.Agent, time.Since(callStart), err)
-		errorMsg := fmt.Sprintf("\n[Agent %s call failed: %v]\n", call.Agent, err)
+		log.Printf("[%s ← %s] A2A_CALL failed contextID=%s depth=%d took=%v err=%v stream=true", selfTag, turn.call.Agent, task.ContextID, depth, time.Since(callStart), err)
+		errorMsg := fmt.Sprintf("\n[Agent %s call failed: %v]\n", turn.call.Agent, err)
 		return e.interactStream(ctx, session, task, errorMsg, depth, originalTask, yield)
 	}
-	log.Printf("[%s ← %s] reply: took=%v bytes=%d preview=%q", selfTag, call.Agent, time.Since(callStart), len(agentResult), truncateForLog(agentResult, 300))
+	log.Printf("[%s ← %s] reply: contextID=%s depth=%d took=%v bytes=%d preview=%q stream=true", selfTag, turn.call.Agent, task.ContextID, depth, time.Since(callStart), len(agentResult), truncateForLog(agentResult, 300))
 
-	injection := BuildInjectionPrompt(call.Agent, originalTask, agentResult)
+	injectStarted := time.Now()
+	injection := BuildInjectionPrompt(turn.call.Agent, originalTask, agentResult)
+	log.Printf("[%s] executor injection_ready contextID=%s depth=%d agent=%s result_bytes=%d injection_bytes=%d took=%v stream=true", selfTag, task.ContextID, depth, turn.call.Agent, len(agentResult), len(injection), time.Since(injectStarted))
 	return e.interactStream(ctx, session, task, injection, depth+1, originalTask, yield)
+}
+
+func (e *Executor) logName() string {
+	if e.selfName != "" {
+		return e.selfName
+	}
+	return "agent"
 }
 
 // messageText extracts text content from a message's parts.

@@ -98,6 +98,33 @@ func TestSessionPool_LookupOrCreate_New(t *testing.T) {
 	}
 }
 
+func TestSessionPool_PerformanceLogs(t *testing.T) {
+	logs := captureLogOutput(t)
+	factory, _, _, _ := newRecordingFactory()
+	p := NewSessionPool(factory, 30*time.Minute, 24*time.Hour)
+	defer p.Stop()
+
+	ctx := context.Background()
+	if _, err := p.LookupOrCreate(ctx, "perf-context"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := p.LookupOrCreate(ctx, "perf-context"); err != nil {
+		t.Fatal(err)
+	}
+
+	out := logs.String()
+	for _, want := range []string{
+		"session pool: lookup contextID=perf-context outcome=create",
+		"factory=",
+		"session pool: lookup contextID=perf-context outcome=hit state=active",
+		"took=",
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("expected session pool performance log %q in:\n%s", want, out)
+		}
+	}
+}
+
 // TestSessionPool_LookupOrCreate_ReuseRefreshesTTL verifies that a second
 // lookup of the same contextID returns the same Session AND advances the
 // entry's lastUsed timestamp so the reaper doesn't evict it prematurely.
@@ -650,8 +677,8 @@ func TestSessionPool_RecreatesOnUnhealthy(t *testing.T) {
 // reuse stays the fast path.
 func TestSessionPool_HealthySessionStillReused(t *testing.T) {
 	var (
-		mu       sync.Mutex
-		hits     int
+		mu   sync.Mutex
+		hits int
 	)
 	factory := func(ctx context.Context, contextID, resumeID string) (Session, error) {
 		mu.Lock()

@@ -251,11 +251,11 @@ func (p *SessionPool) rehydrateLocked(records map[string]PersistedRecord) {
 // reached on a new LookupOrCreate:
 //
 //   - OverloadReject:    return an error to the caller; existing sessions
-//                        are untouched. Honest about the limit.
+//     are untouched. Honest about the limit.
 //   - OverloadEvictLRU:  evict the least-recently-used ACTIVE entry so the
-//                        new one can take its slot. The victim's sessionID
-//                        is preserved (the EVICTED→Resume path still works
-//                        if the displaced contextID comes back).
+//     new one can take its slot. The victim's sessionID
+//     is preserved (the EVICTED→Resume path still works
+//     if the displaced contextID comes back).
 //
 // Safe to call at any point after construction — the cap is consulted on
 // every LookupOrCreate, not just at startup. EVICTED entries (no live
@@ -279,6 +279,7 @@ func (p *SessionPool) setClock(fn func() time.Time) {
 // calls for the same contextID are serialized so the factory runs exactly
 // once.
 func (p *SessionPool) LookupOrCreate(ctx context.Context, contextID string) (Session, error) {
+	started := time.Now()
 	p.mu.Lock()
 	if p.stopped {
 		p.mu.Unlock()
@@ -298,11 +299,13 @@ func (p *SessionPool) LookupOrCreate(ctx context.Context, contextID string) (Ses
 		if entry.session.IsHealthy() {
 			entry.lastUsed = now
 			s := entry.session
+			sid := entry.sessionID
 			entry.mu.Unlock()
 			// Hot-path hit: lastUsed change is in-memory only — we don't
 			// persist it because that would write the file on every request.
 			// After restart all entries come back as EVICTED anyway, so the
 			// missing lastUsed bump is harmless.
+			log.Printf("session pool: lookup contextID=%s outcome=hit state=active sessionID=%s took=%v", contextID, truncateForLog(sid, 80), time.Since(started))
 			return s, nil
 		}
 		// Cached session is dead (e.g. claude was kill -9'd, or `-p` stream
@@ -314,25 +317,36 @@ func (p *SessionPool) LookupOrCreate(ctx context.Context, contextID string) (Ses
 		entry.session = nil
 		entry.state = entryEvicted
 		entry.evictedAt = now
+		log.Printf("session pool: lookup contextID=%s outcome=unhealthy_evicted sessionID=%s took=%v", contextID, truncateForLog(entry.sessionID, 80), time.Since(started))
 	}
 
 	// About to create or resume an entry — this is the first chance to
 	// enforce the cap, since hot-path hits above don't change the active
 	// count. Skip when maxActive==0 (unlimited, the historical default).
 	if p.maxActive > 0 {
+		capStarted := time.Now()
 		if err := p.enforceCap(contextID); err != nil {
 			entry.mu.Unlock()
+			log.Printf("session pool: lookup contextID=%s outcome=capacity_reject max_active=%d policy=%s took=%v cap_check=%v err=%v", contextID, p.maxActive, p.overloadPolicy, time.Since(started), time.Since(capStarted), err)
 			return nil, err
 		}
+		log.Printf("session pool: cap_check contextID=%s max_active=%d policy=%s took=%v", contextID, p.maxActive, p.overloadPolicy, time.Since(capStarted))
 	}
 
 	// Fresh entry (sessionID=="") or EVICTED (sessionID preserved).
 	resumeID := entry.sessionID
+	outcome := "create"
+	if resumeID != "" {
+		outcome = "resume"
+	}
 	// Use the pool's long-lived ctx for the factory, NOT the per-request
 	// ctx — see sessionCtx field doc for the underlying reason.
+	factoryStarted := time.Now()
 	s, err := p.factory(p.sessionCtx, contextID, resumeID)
+	factoryTook := time.Since(factoryStarted)
 	if err != nil {
 		entry.mu.Unlock()
+		log.Printf("session pool: lookup contextID=%s outcome=%s_failed resumeID=%s factory=%v took=%v err=%v", contextID, outcome, truncateForLog(resumeID, 80), factoryTook, time.Since(started), err)
 		return nil, err
 	}
 	entry.session = s
@@ -380,6 +394,7 @@ func (p *SessionPool) LookupOrCreate(ctx context.Context, contextID string) (Ses
 			LastUsed:  lastUsed,
 		})
 	}
+	log.Printf("session pool: lookup contextID=%s outcome=%s resumeID=%s sessionID=%s notifier=%t factory=%v took=%v", contextID, outcome, truncateForLog(resumeID, 80), truncateForLog(sid, 80), hasNotifier, factoryTook, time.Since(started))
 	return s, nil
 }
 
@@ -392,7 +407,7 @@ func (p *SessionPool) LookupOrCreate(ctx context.Context, contextID string) (Ses
 //
 //   - OverloadReject:    return an error; caller surfaces to user
 //   - OverloadEvictLRU:  transition the LRU ACTIVE entry to EVICTED so a
-//                        slot opens up, then return nil
+//     slot opens up, then return nil
 //
 // Held without p.mu; acquires it internally for the scan + (for LRU) for
 // the eviction. The caller holds the per-entry lock for `contextID` so
@@ -481,6 +496,7 @@ func (p *SessionPool) handleSessionIDKnown(contextID string, owner Session, sess
 	if sessionID == "" {
 		return
 	}
+	started := time.Now()
 	p.mu.Lock()
 	entry, ok := p.entries[contextID]
 	p.mu.Unlock()
@@ -508,6 +524,7 @@ func (p *SessionPool) handleSessionIDKnown(contextID string, owner Session, sess
 		State:     persistStateActive,
 		LastUsed:  lastUsed,
 	})
+	log.Printf("session pool: session_id_known contextID=%s sessionID=%s took=%v", contextID, truncateForLog(sessionID, 80), time.Since(started))
 }
 
 // upsertPersist mirrors one entry's persistent state into persistState and
