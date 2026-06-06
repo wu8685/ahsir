@@ -1,12 +1,13 @@
 # AHSIR Examples
 
-Three self-contained worked examples, increasing in complexity. Pick where to start based on what you want to learn.
+Four self-contained worked examples, increasing in complexity. Pick where to start based on what you want to learn.
 
 | Example | Demonstrates | Read order |
 |---|---|---|
 | [`simple/`](./simple/) | The smallest possible end-to-end path: one agent, one curl, one answer | **Start here** to verify your build + API key |
 | [`session-reuse/`](./session-reuse/) | Conversation memory across multiple curls via stable `contextId` — in-process reuse, cross-restart resume, and self-healing on SIGKILL | Next, to see what `SessionPool` actually does |
-| [`multi-agent/`](./multi-agent/) | Two-agent setup (Student delegates to Teacher via `---A2A_CALL---`), filesystem access, scheduler gateway, Claude Code plugin/CLI integration | Last, for the full multi-agent + gateway story |
+| [`recovery-continuation/`](./recovery-continuation/) | Scheduler ledger, supervised restart, continuation prompt, and `sessions.json` inactive mapping retention | Then, to see failure recovery mechanics |
+| [`multi-agent/`](./multi-agent/) | Two-agent setup (Student delegates to Teacher via `---A2A_CALL---`), filesystem access, scheduler gateway, Claude/Codex plugin + CLI integration | Last, for the full multi-agent + gateway story |
 
 Each subdirectory is self-contained: own `ahsir.yaml`, agent card(s), and walkthrough README. Pick one and read its README from top to bottom — they don't share state, can be run independently, and use the same default ports (only run one at a time).
 

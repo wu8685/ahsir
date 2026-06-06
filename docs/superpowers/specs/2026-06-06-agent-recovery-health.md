@@ -36,8 +36,8 @@ tests, and docs stay aligned.
 - Detect an in-flight provider turn that is still producing no events. That
   requires executor/session-level turn progress tracking and is a separate
   watchdog.
-- Guarantee task-level replay in this step. The restart prompt is planned as
-  the next recovery layer.
+- Replay the original user prompt verbatim. Recovery uses a continuation prompt
+  against the existing `contextId` instead.
 
 ## 4. Operational Endpoints
 
@@ -105,11 +105,11 @@ Default health watcher tuning:
 Restarting the process is only the first layer. After a supervised restart,
 the scheduler now:
 
-- consume scheduler invocation ledger records created by the
+- consumes scheduler invocation ledger records created by the
   scheduler-owned `/a2a/{agent}` and `/agents/{agent}/chat` entrypoints;
-- reuse the persisted session metadata for the same A2A `contextId`;
-- detect unfinished or failed work;
-- enqueue a continuation prompt after restart asking the runtime to
+- reuses the persisted session metadata for the same A2A `contextId`;
+- detects unfinished or failed work;
+- enqueues a continuation prompt after restart asking the runtime to
   inspect prior context and continue the interrupted task;
-- log the recovery attempt, resumed session id, continuation prompt dispatch,
+- logs the recovery attempt, resumed session id, continuation prompt dispatch,
   and resulting task state.

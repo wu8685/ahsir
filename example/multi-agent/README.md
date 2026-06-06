@@ -1,6 +1,6 @@
 # Example: Student-Teacher Multi-Agent Setup
 
-The full multi-agent walkthrough: two agents — **Student** and **Teacher** — collaborating via the [A2A protocol](https://google.github.io/A2A/), plus filesystem access, scheduler gateway endpoints, and Claude Code plugin/CLI integration.
+The full multi-agent walkthrough: two agents — **Student** and **Teacher** — collaborating via the [A2A protocol](https://google.github.io/A2A/), plus filesystem access, scheduler gateway endpoints, and Claude Code / Codex plugin + CLI integration.
 
 - **Teacher**: Answers questions, summarizes articles, explains concepts. Has filesystem read access to a configurable allow-list (defaults include `/Users/wuke/workspace/brain-spark` — adjust to your own path).
 - **Student**: Receives user requests. When it needs help, delegates to the Teacher via `---A2A_CALL---`.
@@ -238,11 +238,11 @@ Common patterns:
 
 `Ctrl+C` in the scheduler terminal. The scheduler stops the registry and kills all agent subprocesses.
 
-## Use ahsir from your local Claude Code
+## Use ahsir from Claude Code or Codex
 
-Install the Claude Code plugin described in the root README, put
-`plugin/bin` on PATH, and keep the scheduler running from step 2. The skill
-will guide Claude to use CLI commands such as:
+Install the Claude Code or Codex plugin described in the root README, put
+`plugin/bin` on PATH, and keep the scheduler running from step 2. The
+orchestrator skill guides the host model to use CLI commands such as:
 
 ```bash
 ahsir ping
@@ -250,9 +250,9 @@ ahsir list
 ahsir chat student "Please delegate this to the teacher agent: explain what a goroutine is in one paragraph." --context demo-multi
 ```
 
-The flow is **Claude Code skill → Bash tool → `ahsir` CLI → scheduler gateway
-→ A2A → agent**. The CLI spawns no agents and loads no `ahsir.yaml`; it talks to
-the already-running scheduler.
+The flow is **orchestrator skill → shell tool → `ahsir` CLI → scheduler gateway
+→ A2A → agent**. The CLI spawns no agents and loads no `ahsir.yaml`; it talks
+to the already-running scheduler.
 
 ## Run the Tests
 

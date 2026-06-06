@@ -25,6 +25,28 @@ supervisor: if an `ahsir-agent` process exits unexpectedly, or if its
 port with exponential backoff. Explicit `ahsir agent delete` / scheduler
 shutdown still stop the process without restart.
 
+## Current Feature Set
+
+- **Scheduler-owned A2A entrypoint**: public native A2A traffic goes through
+  `POST /a2a/{agent}` so user calls and agent-to-agent calls are visible to the
+  scheduler.
+- **CLI + plugin workflow**: Claude Code and Codex use the bundled
+  `orchestrator` skill and `ahsir` CLI. The old MCP shim design is historical
+  only.
+- **Multi-provider sessions**: Claude-backed agents resume with
+  `claude --resume=<session_id>`; Codex-backed agents resume with
+  `codex exec resume <thread_id>`.
+- **Persistent session mapping**: each agent writes
+  `<workspace>/.a2a/sessions.json`, bounded by `pool.evicted_ttl` and
+  `pool.max_evicted`.
+- **Process health and restart**: scheduler monitors exits and `/healthz`
+  failures, restarts local agents on the same port, and leaves intentional
+  stops terminal.
+- **Invocation ledger and continuation prompt**: scheduler records
+  mediated calls in `.ahsir/ledger.jsonl`, replays it on startup, compacts old
+  records, and sends a continuation prompt after a supervised restart for
+  recoverable work with a `contextId`.
+
 ## Architecture
 
 ```
@@ -84,8 +106,8 @@ for abnormal process exits.
 
 Scheduler-mediated chat and A2A proxy calls are recorded in an append-only
 invocation ledger at `<dir-of-ahsir.yaml>/.ahsir/ledger.jsonl`. The scheduler
-replays this JSONL file on startup so future recovery layers can continue from
-interrupted `contextId` work even after a scheduler restart.
+replays this JSONL file on startup, compacts old records, and uses it after an
+agent restart to continue interrupted `contextId` work.
 
 ## Repo layout
 
@@ -97,7 +119,7 @@ interrupted `contextId` work even after a scheduler restart.
 | `internal/registry/` | Agent registration / heartbeat / lookup |
 | `internal/wrapper/` | A2A server/client, executor, `SessionPool`, `ClaudeSession`, `CodexSession`, persistence + HA |
 | `internal/schedulerclient/` | HTTP client used by the CLI to talk to the scheduler gateway |
-| `example/` | Working two-agent setup (student delegates to teacher) |
+| `example/` | Runnable walkthroughs: simple, session reuse, restart recovery, multi-agent delegation |
 | `docs/superpowers/` | Specs, plans, and design notes |
 
 ## Quick start
@@ -115,8 +137,11 @@ export MODEL_API_KEY=<your-deepseek-key>
 ```
 
 Then either curl the scheduler A2A endpoint, hit the scheduler chat gateway, or
-drive the fleet from Claude Code / Codex through the plugin skill and `ahsir chat`. Full
-hands-on instructions live in [`example/README.md`](example/README.md).
+drive the fleet from Claude Code / Codex through the plugin skill and
+`ahsir chat`. Hands-on walkthroughs live in [`example/README.md`](example/README.md):
+`simple/` for the smallest path, `session-reuse/` for `contextId` continuity,
+`recovery-continuation/` for restart continuation and session retention, and
+`multi-agent/` for delegation.
 
 ## Install as a Codex plugin
 

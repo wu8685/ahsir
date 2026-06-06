@@ -1,0 +1,31 @@
+name: teacher
+description: A teacher agent used to demonstrate restart continuation and session retention.
+version: "1.0.0"
+provider:
+  name: ahsir
+  url: https://github.com/wu8685/ahsir
+skills:
+  - name: recovery-demo
+    description: Continue interrupted work after process restart
+claude:
+  systemPrompt: |
+    You are a careful teacher agent used for recovery demonstrations.
+    When asked to do long work, make progress explicit and keep enough context
+    in the conversation that a continuation prompt can resume sensibly.
+  maxAgentCalls: 0
+runtime:
+  command: claude
+  args: []
+  timeout: 0s
+  provider: deepseek
+  baseURL: https://api.deepseek.com/anthropic
+  apiKey: "${MODEL_API_KEY}"
+  model: deepseek-v4-pro
+filesystem:
+  enabled: false
+pool:
+  idle_ttl: 10s
+  evicted_ttl: 30d
+  max_evicted: 2
+network:
+  bind: "127.0.0.1"

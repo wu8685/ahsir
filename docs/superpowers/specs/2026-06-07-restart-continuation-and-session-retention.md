@@ -13,13 +13,13 @@ Scheduler recovery now has three layers:
 3. persist each agent's `contextId -> provider session id` mapping in
    `<workspace>/.a2a/sessions.json`.
 
-The missing layer is the post-restart continuation prompt. After the process is
-back, the scheduler should nudge the recovered agent to inspect the existing
-provider session for unfinished work and continue.
+The post-restart continuation prompt is now the active recovery layer. After
+the process is back, the scheduler nudges the recovered agent to inspect the
+existing provider session for unfinished work and continue.
 
-The session mapping file also needs bounded retention. It is a conversation
-resume cache, not a task ledger. It should be maintained by maximum inactive
-record count and remove the oldest inactive mappings first.
+The session mapping file also has bounded retention. It is a conversation
+resume cache, not a task ledger. It is maintained by maximum inactive record
+count and removes the oldest inactive mappings first.
 
 ## 2. Goals
 
