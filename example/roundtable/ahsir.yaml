@@ -1,0 +1,24 @@
+agents:
+  - name: advocate
+    workspace: example/roundtable/workspaces/advocate
+    port: 0
+  - name: critic
+    workspace: example/roundtable/workspaces/critic
+    port: 0
+
+registry:
+  host: "127.0.0.1"
+  port: 9800
+  heartbeat_interval: 10s
+  heartbeat_timeout: 30s
+
+# A roundtable turn is a normal per-agent chat, so `chat` must be >= each
+# agent's runtime.timeout. With N participants over several rounds, total
+# wall-clock is N×rounds provider turns — keep this generous.
+timeouts:
+  chat: 10m
+  task_status: 30s
+
+port_range:
+  start: 9802
+  end: 9900

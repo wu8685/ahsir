@@ -1,0 +1,976 @@
+//go:build e2e
+
+// Package e2e holds top-to-bottom integration tests that spawn the real
+// ahsir scheduler subprocess against real `claude` CLIs. Gated behind the
+// `e2e` build tag so the default `go test ./...` pipeline never runs them.
+//
+// Run:
+//
+//	AHSIR_E2E_CLAUDE=1 go test -tags=e2e -timeout=5m ./e2e/ -v
+//
+// Prerequisites:
+//   - `bin/ahsir` and `bin/ahsir-agent` built at repo root (the test skips
+//     gracefully with a hint if they're missing).
+//   - `claude` CLI on PATH.
+//   - MODEL_API_KEY env var pointing at a DeepSeek key (or another
+//     Anthropic-compatible endpoint configured in the agent cards).
+//
+// Each test calls setupE2E(t) which materializes a hermetic ahsir.yaml +
+// agent cards in t.TempDir, allocates random free ports, spawns the
+// scheduler in its own process group (so cleanup can SIGKILL the whole
+// tree), and registers a t.Cleanup to tear everything down even on test
+// failure. Tests are isolated from each other and from any manually
+// running scheduler.
+//
+// This file is the framework — fixtures, helpers, YAML templates. Actual
+// test cases live in sibling *_test.go files (see delegation_test.go).
+package e2e
+
+import (
+	"bufio"
+	"bytes"
+	"context"
+	"encoding/json"
+	"fmt"
+	"io"
+	"net"
+	"net/http"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"regexp"
+	"runtime"
+	"strconv"
+	"strings"
+	"sync"
+	"syscall"
+	"testing"
+	"time"
+
+	ahprocess "github.com/wu8685/ahsir/internal/process"
+)
+
+// e2eFixture spawns the scheduler subprocess against a generated config and
+// exposes helpers for sending A2A messages and inspecting captured logs.
+// Cleanup (SIGKILL + reap) is registered via t.Cleanup so individual tests
+// don't have to remember.
+type e2eFixture struct {
+	t            *testing.T
+	repoRoot     string
+	configDir    string
+	registryPort int
+	teacherPort  int
+	studentPort  int
+
+	cmd    *exec.Cmd
+	cancel context.CancelFunc
+	logBuf *syncBuffer
+}
+
+// syncBuffer is a goroutine-safe bytes.Buffer. *bytes.Buffer is not safe for
+// concurrent writes, and exec.Cmd's stdout/stderr capture is driven from a
+// goroutine inside os/exec — without serialization a parallel reader (the
+// test's schedulerLog() helper) could race with the writer.
+type syncBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (s *syncBuffer) Write(p []byte) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.buf.Write(p)
+}
+func (s *syncBuffer) String() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.buf.String()
+}
+
+// setupE2E enforces the prereq gates, materializes a hermetic test
+// workspace, and starts the scheduler subprocess. The returned fixture is
+// ready for sendMessage calls — t.Cleanup tears the subprocess down even
+// on test failure.
+func setupE2E(t *testing.T) *e2eFixture {
+	t.Helper()
+	requireClaudeE2E(t)
+	return setupE2EWithCards(t, teacherCardYAML, studentCardYAML)
+}
+
+// requireClaudeE2E enforces the claude-provider prereq gates without building
+// a fixture. Case files that need custom agent cards (timeout variants, ghost
+// delegation targets, ...) call this then setupE2EWithCards directly.
+func requireClaudeE2E(t *testing.T) {
+	t.Helper()
+	if os.Getenv("AHSIR_E2E_CLAUDE") != "1" {
+		t.Skip("set AHSIR_E2E_CLAUDE=1 to run real-claude e2e tests")
+	}
+	if os.Getenv("MODEL_API_KEY") == "" {
+		t.Skip("MODEL_API_KEY required for real-claude e2e tests")
+	}
+	if _, err := exec.LookPath("claude"); err != nil {
+		t.Skipf("claude binary not on PATH: %v", err)
+	}
+}
+
+func setupCodexE2E(t *testing.T) *e2eFixture {
+	t.Helper()
+
+	if os.Getenv("AHSIR_E2E_CODEX") != "1" {
+		t.Skip("set AHSIR_E2E_CODEX=1 to run real-codex e2e tests")
+	}
+	if _, err := exec.LookPath("codex"); err != nil {
+		t.Skipf("codex binary not on PATH: %v", err)
+	}
+	return setupE2EWithCards(t, codexTeacherCardYAML, codexStudentCardYAML)
+}
+
+func setupMixedProviderE2E(t *testing.T) *e2eFixture {
+	t.Helper()
+
+	if os.Getenv("AHSIR_E2E_MIXED") != "1" {
+		t.Skip("set AHSIR_E2E_MIXED=1 to run real mixed claude+codex e2e tests")
+	}
+	if os.Getenv("MODEL_API_KEY") == "" {
+		t.Skip("MODEL_API_KEY required for mixed claude+codex e2e tests")
+	}
+	if _, err := exec.LookPath("claude"); err != nil {
+		t.Skipf("claude binary not on PATH: %v", err)
+	}
+	if _, err := exec.LookPath("codex"); err != nil {
+		t.Skipf("codex binary not on PATH: %v", err)
+	}
+	return setupE2EWithCards(t, mixedCodexTeacherCardYAML, mixedClaudeStudentCardYAML)
+}
+
+func setupE2EWithCards(t *testing.T, teacherCard, studentCard string) *e2eFixture {
+	t.Helper()
+
+	repoRoot := findRepoRoot(t)
+	ahsirBin := filepath.Join(repoRoot, "bin", "ahsir")
+	ahsirAgentBin := filepath.Join(repoRoot, "bin", "ahsir-agent")
+	for _, b := range []string{ahsirBin, ahsirAgentBin} {
+		if _, err := os.Stat(b); err != nil {
+			t.Skipf("missing %s — from repo root run: go build -o bin/ahsir ./cmd/ahsir && go build -o bin/ahsir-agent ./cmd/ahsir-agent", b)
+		}
+	}
+
+	// Three free ports: registry + teacher + student. Bound + immediately
+	// released so the scheduler can claim them. Race window is small in
+	// practice (no other process snipes between release and scheduler
+	// listen) — accept it; if it ever flakes we'll switch to a real
+	// reservation scheme.
+	registryPort, teacherPort, studentPort := allocateFreePorts(t, 3)
+
+	// Generate the temp workspace + cards. Agents are configured WITHOUT
+	// filesystem access so the test doesn't depend on any host-specific
+	// directories (the production example/multi-agent cards include
+	// /Users/wuke/workspace/brain-spark which only exists on the author's
+	// laptop).
+	tmp := t.TempDir()
+	teacherWS := filepath.Join(tmp, "workspaces", "teacher")
+	studentWS := filepath.Join(tmp, "workspaces", "student")
+	writeAgentCard(t, teacherWS, teacherCard)
+	writeAgentCard(t, studentWS, studentCard)
+
+	cfgPath := filepath.Join(tmp, "ahsir.yaml")
+	writeSchedulerConfig(t, cfgPath, registryPort, teacherPort, studentPort, teacherWS, studentWS)
+
+	// Spawn the scheduler. Use a context we control so t.Cleanup can
+	// cancel + kill deterministically.
+	ctx, cancel := context.WithCancel(context.Background())
+	cmd := exec.CommandContext(ctx, ahsirBin, "start", cfgPath)
+	cmd.Env = os.Environ() // inherit PATH, MODEL_API_KEY, etc.
+	// Put the scheduler into its own process group. Without this, killing
+	// the scheduler leaves its children (ahsir-agent → claude) alive
+	// holding the inherited stdout/stderr pipes — cmd.Wait then blocks
+	// indefinitely on its internal pipe-drain goroutines. With a process
+	// group we kill the whole tree on cleanup.
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+
+	logBuf := &syncBuffer{}
+	cmd.Stdout = logBuf
+	cmd.Stderr = logBuf
+
+	// Run from repo root so any relative paths the scheduler emits in
+	// log lines are interpretable. The scheduler discovers ahsir-agent
+	// via os.Executable(), not cwd, so this is purely for log clarity.
+	cmd.Dir = repoRoot
+
+	if err := cmd.Start(); err != nil {
+		cancel()
+		t.Fatalf("start scheduler: %v", err)
+	}
+
+	t.Cleanup(func() {
+		cleanupSchedulerProcess(cmd, cancel, []int{teacherPort, studentPort}, t.Logf)
+	})
+
+	// Wait for both agents to be listening. 30s is generous — claude
+	// startup itself can take ~1-3s, and the agent has to register with
+	// the scheduler heartbeat first.
+	for _, p := range []int{teacherPort, studentPort} {
+		if err := waitForPort(p, 30*time.Second); err != nil {
+			t.Fatalf("agent on port %d not ready: %v\nscheduler log:\n%s", p, err, logBuf.String())
+		}
+	}
+
+	return &e2eFixture{
+		t:            t,
+		repoRoot:     repoRoot,
+		configDir:    tmp,
+		registryPort: registryPort,
+		teacherPort:  teacherPort,
+		studentPort:  studentPort,
+		cmd:          cmd,
+		cancel:       cancel,
+		logBuf:       logBuf,
+	}
+}
+
+func cleanupSchedulerProcess(cmd *exec.Cmd, cancel context.CancelFunc, agentPorts []int, logf func(string, ...any)) {
+	if cmd == nil || cmd.Process == nil {
+		if cancel != nil {
+			cancel()
+		}
+		return
+	}
+	if logf == nil {
+		logf = func(string, ...any) {}
+	}
+
+	done := make(chan error, 1)
+	go func() { done <- cmd.Wait() }()
+
+	// Prefer scheduler's own SIGTERM handler. The scheduler knows its agents
+	// and can run the same graceful Stop path production uses.
+	_ = cmd.Process.Signal(syscall.SIGTERM)
+
+	if waitForSchedulerExit(done, 2*time.Second) {
+		if cancel != nil {
+			cancel()
+		}
+		killLingeringAgentListeners(agentPorts, logf)
+		return
+	}
+
+	// Newer agents own their own process groups, so killing the scheduler's
+	// group is no longer enough. Sweep the generated agent ports before
+	// escalating so os/exec pipe-copy goroutines can observe EOF.
+	killLingeringAgentListeners(agentPorts, logf)
+	if waitForSchedulerExit(done, 5*time.Second) {
+		if cancel != nil {
+			cancel()
+		}
+		return
+	}
+
+	if cancel != nil {
+		cancel()
+	}
+	_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+	_ = cmd.Process.Kill()
+	killLingeringAgentListeners(agentPorts, logf)
+	if !waitForSchedulerExit(done, 5*time.Second) {
+		logf("scheduler subprocess did not exit within cleanup timeout after SIGTERM/SIGKILL and agent listener sweep")
+	}
+}
+
+func waitForSchedulerExit(done <-chan error, timeout time.Duration) bool {
+	select {
+	case <-done:
+		return true
+	case <-time.After(timeout):
+		return false
+	}
+}
+
+func killLingeringAgentListeners(ports []int, logf func(string, ...any)) {
+	seen := make(map[int]bool)
+	for _, port := range ports {
+		for _, pid := range listenerPIDs(port) {
+			if pid <= 0 || seen[pid] {
+				continue
+			}
+			seen[pid] = true
+			proc, err := os.FindProcess(pid)
+			if err != nil {
+				continue
+			}
+			logf("cleanup: killing lingering listener pid=%d port=%d", pid, port)
+			_ = ahprocess.KillTree(proc)
+		}
+	}
+}
+
+func listenerPIDs(port int) []int {
+	out, err := exec.Command("lsof", "-nP", fmt.Sprintf("-iTCP:%d", port), "-sTCP:LISTEN", "-Fp").Output()
+	if err != nil {
+		return nil
+	}
+	var pids []int
+	for _, line := range strings.Split(string(out), "\n") {
+		if !strings.HasPrefix(line, "p") || len(line) == 1 {
+			continue
+		}
+		pid, err := strconv.Atoi(strings.TrimSpace(strings.TrimPrefix(line, "p")))
+		if err == nil {
+			pids = append(pids, pid)
+		}
+	}
+	return pids
+}
+
+// sendMessageToAgent POSTs an A2A message/send through the scheduler-owned
+// /a2a/{agent} endpoint and returns the final agent reply text.
+func (f *e2eFixture) sendMessageToAgent(agentName, messageID, contextID, text string) (string, error) {
+	f.t.Helper()
+
+	url := fmt.Sprintf("http://127.0.0.1:%d/a2a/%s", f.registryPort, agentName)
+	return f.postMessage(url, messageID, contextID, text)
+}
+
+// sendMessage keeps the historical port-shaped API but routes public traffic
+// through the scheduler. Use sendDirectMessage for internal-port assertions.
+func (f *e2eFixture) sendMessage(agentPort int, messageID, contextID, text string) (string, error) {
+	f.t.Helper()
+	agentName, err := f.agentNameForPort(agentPort)
+	if err != nil {
+		return "", err
+	}
+	return f.sendMessageToAgent(agentName, messageID, contextID, text)
+}
+
+// sendDirectMessage POSTs directly to an agent's internal A2A endpoint. It is
+// only for negative/debug assertions; normal E2E traffic should use scheduler
+// helpers so ledger/proxy/token behavior is covered.
+func (f *e2eFixture) sendDirectMessage(agentPort int, messageID, contextID, text string) (string, error) {
+	f.t.Helper()
+	url := fmt.Sprintf("http://127.0.0.1:%d/", agentPort)
+	return f.postMessage(url, messageID, contextID, text)
+}
+
+func (f *e2eFixture) postMessage(url, messageID, contextID, text string) (string, error) {
+	f.t.Helper()
+	body, _ := json.Marshal(a2aMessagePayload("message/send", messageID, contextID, text))
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
+	if err != nil {
+		return "", fmt.Errorf("build request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("POST %s: %w", url, err)
+	}
+	defer resp.Body.Close()
+
+	raw, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "", fmt.Errorf("read response: %w", err)
+	}
+
+	var jr struct {
+		Result struct {
+			History []struct {
+				Role  string `json:"role"`
+				Parts []struct {
+					Kind string `json:"kind"`
+					Text string `json:"text"`
+				} `json:"parts"`
+			} `json:"history"`
+		} `json:"result"`
+		Error *struct {
+			Code    int    `json:"code"`
+			Message string `json:"message"`
+			Data    any    `json:"data"`
+		} `json:"error"`
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return "", fmt.Errorf("HTTP %d from %s: %s", resp.StatusCode, url, string(raw))
+	}
+	if err := json.Unmarshal(raw, &jr); err != nil {
+		return "", fmt.Errorf("parse JSON-RPC: %w; raw: %s", err, string(raw))
+	}
+	if jr.Error != nil {
+		return "", fmt.Errorf("JSON-RPC error %d %s: %v", jr.Error.Code, jr.Error.Message, jr.Error.Data)
+	}
+
+	// The final agent reply is the last entry with role=agent.
+	for i := len(jr.Result.History) - 1; i >= 0; i-- {
+		msg := jr.Result.History[i]
+		if msg.Role != "agent" {
+			continue
+		}
+		for _, part := range msg.Parts {
+			if part.Kind == "text" && part.Text != "" {
+				return part.Text, nil
+			}
+		}
+	}
+	return "", fmt.Errorf("no agent text reply in history; raw: %s", string(raw))
+}
+
+func a2aMessagePayload(method, messageID, contextID, text string) map[string]any {
+	return map[string]any{
+		"jsonrpc": "2.0",
+		"method":  method,
+		"params": map[string]any{
+			"message": map[string]any{
+				"messageId": messageID,
+				"contextId": contextID,
+				"role":      "user",
+				"parts":     []map[string]any{{"kind": "text", "text": text}},
+			},
+		},
+		"id": 1,
+	}
+}
+
+func (f *e2eFixture) agentNameForPort(port int) (string, error) {
+	switch port {
+	case f.teacherPort:
+		return "teacher", nil
+	case f.studentPort:
+		return "student", nil
+	default:
+		return "", fmt.Errorf("unknown e2e agent port %d", port)
+	}
+}
+
+func (f *e2eFixture) ledgerPath() string {
+	return filepath.Join(f.configDir, ".ahsir", "ledger.jsonl")
+}
+
+// schedulerLog returns the cumulative stdout+stderr captured from the
+// scheduler subprocess (which also tees agent subprocess output into its
+// own streams). Useful for asserting log markers like
+// "[student → teacher] A2A_CALL" to prove a delegation actually happened.
+func (f *e2eFixture) schedulerLog() string { return f.logBuf.String() }
+
+// streamEvent is one parsed entry from a `message/stream` SSE response.
+// Kind mirrors the A2A event marshaller's `kind` field on the result object:
+//   - "status-update" — TaskStatusUpdateEvent (per-delta updates)
+//   - "task"          — Task (terminal — emitted once)
+//   - "message"       — Message (alternative terminal shape)
+//
+// Raw is the result object (one level below the JSON-RPC envelope), so
+// tests can unmarshal into the precise a2a type if needed. ArrivedAt is
+// captured as soon as the SSE `data:` line is read from the wire, so tests
+// can assert temporal properties (e.g. deltas arrived incrementally rather
+// than as one buffered chunk).
+type streamEvent struct {
+	Kind      string
+	Raw       json.RawMessage
+	ArrivedAt time.Time
+}
+
+// sendMessageStream POSTs an A2A `message/stream` JSON-RPC request and reads
+// the SSE response body until the underlying iter completes. Each SSE
+// `data: <json>` line is parsed as a JSON-RPC response envelope and the
+// inner `result.kind` is extracted so the caller can assert on event order
+// and the terminal state without re-implementing SSE parsing per test.
+//
+// Timeout is bounded so a stuck claude process can't hang the whole test
+// run — same shape as sendMessage.
+func (f *e2eFixture) sendMessageStreamToAgent(agentName, messageID, contextID, text string) ([]streamEvent, error) {
+	f.t.Helper()
+	url := fmt.Sprintf("http://127.0.0.1:%d/a2a/%s", f.registryPort, agentName)
+	return f.postMessageStream(url, messageID, contextID, text)
+}
+
+func (f *e2eFixture) sendMessageStream(agentPort int, messageID, contextID, text string) ([]streamEvent, error) {
+	f.t.Helper()
+	agentName, err := f.agentNameForPort(agentPort)
+	if err != nil {
+		return nil, err
+	}
+	return f.sendMessageStreamToAgent(agentName, messageID, contextID, text)
+}
+
+func (f *e2eFixture) postMessageStream(url, messageID, contextID, text string) ([]streamEvent, error) {
+	f.t.Helper()
+	body, _ := json.Marshal(a2aMessagePayload("message/stream", messageID, contextID, text))
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
+	if err != nil {
+		return nil, fmt.Errorf("build request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "text/event-stream")
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("POST %s: %w", url, err)
+	}
+	defer resp.Body.Close()
+
+	if ct := resp.Header.Get("Content-Type"); ct != "text/event-stream" {
+		// Read whatever did come back so the test can see the JSON-RPC error
+		// (e.g. method-not-found if the server forgot to register stream).
+		raw, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("expected SSE content-type, got %q; body: %s", ct, string(raw))
+	}
+
+	// The SDK's SSE format is one event per blank-line-separated block:
+	//   id: <uuid>
+	//   data: {"jsonrpc":"2.0","id":1,"result":{...}}
+	//
+	// Read line-by-line and extract `data:` payloads. The Scanner buffer is
+	// bumped from the default 64KB because terminal Task events with a
+	// populated history can easily exceed that.
+	scanner := bufio.NewScanner(resp.Body)
+	scanner.Buffer(make([]byte, 64*1024), 4*1024*1024)
+
+	var events []streamEvent
+	for scanner.Scan() {
+		line := scanner.Text()
+		if !strings.HasPrefix(line, "data:") {
+			continue
+		}
+		data := strings.TrimPrefix(line, "data:")
+		data = strings.TrimPrefix(data, " ") // SSE allows either "data:foo" or "data: foo"
+		var env struct {
+			Result json.RawMessage `json:"result"`
+			Error  *struct {
+				Code    int    `json:"code"`
+				Message string `json:"message"`
+			} `json:"error"`
+		}
+		if err := json.Unmarshal([]byte(data), &env); err != nil {
+			return events, fmt.Errorf("parse SSE envelope: %w; raw=%s", err, data)
+		}
+		if env.Error != nil {
+			return events, fmt.Errorf("JSON-RPC error %d: %s", env.Error.Code, env.Error.Message)
+		}
+		var head struct {
+			Kind string `json:"kind"`
+		}
+		_ = json.Unmarshal(env.Result, &head)
+		events = append(events, streamEvent{Kind: head.Kind, Raw: env.Result, ArrivedAt: time.Now()})
+	}
+	if err := scanner.Err(); err != nil {
+		return events, fmt.Errorf("read SSE body: %w", err)
+	}
+	return events, nil
+}
+
+// schedulerURL returns the base URL CLI subcommands should target.
+func (f *e2eFixture) schedulerURL() string {
+	return fmt.Sprintf("http://127.0.0.1:%d", f.registryPort)
+}
+
+// restartScheduler stops the running scheduler subprocess (graceful SIGTERM
+// path, escalating like t.Cleanup does) and starts a fresh one against the
+// SAME config + workspaces. Ports are pinned in the config, so agents come
+// back on the same addresses; session persistence (sessions.json) and the
+// invocation ledger live under the fixture's tmp dirs and survive.
+//
+// Log capture continues into the same buffer — restart-spanning assertions
+// (e.g. "exactly one --resume= after restart") read one cumulative log.
+func (f *e2eFixture) restartScheduler() {
+	f.t.Helper()
+
+	cleanupSchedulerProcess(f.cmd, f.cancel, []int{f.teacherPort, f.studentPort}, f.t.Logf)
+
+	ahsirBin := filepath.Join(f.repoRoot, "bin", "ahsir")
+	cfgPath := filepath.Join(f.configDir, "ahsir.yaml")
+	ctx, cancel := context.WithCancel(context.Background())
+	cmd := exec.CommandContext(ctx, ahsirBin, "start", cfgPath)
+	cmd.Env = os.Environ()
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.Stdout = f.logBuf
+	cmd.Stderr = f.logBuf
+	cmd.Dir = f.repoRoot
+	if err := cmd.Start(); err != nil {
+		cancel()
+		f.t.Fatalf("restart scheduler: %v", err)
+	}
+	f.cmd, f.cancel = cmd, cancel
+	f.t.Cleanup(func() {
+		cleanupSchedulerProcess(cmd, cancel, []int{f.teacherPort, f.studentPort}, f.t.Logf)
+	})
+
+	for _, p := range []int{f.teacherPort, f.studentPort} {
+		if err := waitForPort(p, 30*time.Second); err != nil {
+			f.t.Fatalf("agent on port %d not ready after restart: %v\nscheduler log:\n%s", p, err, f.schedulerLog())
+		}
+	}
+}
+
+// runCLI executes `bin/ahsir <args...>` from the fixture's config dir and
+// returns (stdout, stderr, exitCode). LLM-bound subcommands (chat) can be
+// slow, so the context budget matches sendMessageToAgent's 5 minutes.
+func (f *e2eFixture) runCLI(args ...string) (string, string, int) {
+	f.t.Helper()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx, filepath.Join(f.repoRoot, "bin", "ahsir"), args...)
+	cmd.Env = os.Environ()
+	cmd.Dir = f.configDir
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+
+	err := cmd.Run()
+	exit := 0
+	if err != nil {
+		exit = -1 // start/signal failure (not a clean process exit)
+		if ee, ok := err.(*exec.ExitError); ok {
+			exit = ee.ExitCode()
+		}
+	}
+	return stdout.String(), stderr.String(), exit
+}
+
+// extractFirstPid pulls the first `claude session: started pid=N` out of the
+// scheduler log. Used by kill/recovery scenarios to SIGKILL the LLM process
+// behind an agent.
+func extractFirstPid(t *testing.T, log string) int {
+	t.Helper()
+	m := claudePidRe.FindStringSubmatch(log)
+	if m == nil {
+		t.Fatalf("no 'claude session: started pid=' marker in scheduler log:\n%s", log)
+	}
+	pid, err := strconv.Atoi(m[1])
+	if err != nil {
+		t.Fatalf("parse pid %q: %v", m[1], err)
+	}
+	return pid
+}
+
+var claudePidRe = regexp.MustCompile(`claude session: started pid=(\d+)`)
+
+// --- helpers ---
+
+// findRepoRoot walks up from this file's directory looking for go.mod.
+// The test file lives at e2e/framework_test.go, so the root is one parent
+// up — but we walk generically so refactors of the directory layout don't
+// silently break the test.
+func findRepoRoot(t *testing.T) string {
+	t.Helper()
+	_, file, _, ok := runtime.Caller(0)
+	if !ok {
+		t.Fatal("runtime.Caller failed — can't locate test source")
+	}
+	dir := filepath.Dir(file)
+	for {
+		if _, err := os.Stat(filepath.Join(dir, "go.mod")); err == nil {
+			return dir
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			t.Fatal("walked to filesystem root without finding go.mod")
+		}
+		dir = parent
+	}
+}
+
+// allocateFreePorts binds N sockets to :0 to get OS-assigned ports, then
+// closes them and returns the numbers. The next process to listen on those
+// ports may race with anyone else binding to them, but for a hermetic test
+// this window is acceptable.
+func allocateFreePorts(t *testing.T, n int) (int, int, int) {
+	t.Helper()
+	if n != 3 {
+		t.Fatalf("allocateFreePorts: expected n=3, got %d (helper is hardcoded for the three-port layout: registry, teacher, student)", n)
+	}
+	ports := make([]int, 0, n)
+	listeners := make([]net.Listener, 0, n)
+	for i := 0; i < n; i++ {
+		l, err := net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			t.Fatalf("listen: %v", err)
+		}
+		listeners = append(listeners, l)
+		ports = append(ports, l.Addr().(*net.TCPAddr).Port)
+	}
+	for _, l := range listeners {
+		_ = l.Close()
+	}
+	return ports[0], ports[1], ports[2]
+}
+
+// waitForPort polls a TCP connect until the agent's listener is up.
+func waitForPort(port int, timeout time.Duration) error {
+	deadline := time.Now().Add(timeout)
+	addr := fmt.Sprintf("127.0.0.1:%d", port)
+	for time.Now().Before(deadline) {
+		c, err := net.DialTimeout("tcp", addr, 200*time.Millisecond)
+		if err == nil {
+			_ = c.Close()
+			return nil
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+	return fmt.Errorf("port %d not listening within %v", port, timeout)
+}
+
+func writeAgentCard(t *testing.T, workspace, body string) {
+	t.Helper()
+	dir := filepath.Join(workspace, ".a2a")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatalf("mkdir %s: %v", dir, err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "agent-card.yaml"), []byte(body), 0o644); err != nil {
+		t.Fatalf("write agent card: %v", err)
+	}
+}
+
+// writeSchedulerConfig emits a minimal ahsir.yaml at path with EXPLICIT
+// per-agent ports (port != 0). Don't use the scheduler's auto-allocation
+// here — its allocator just increments port_range.start sequentially
+// without consulting the OS, so the third "free" port the test harness
+// picked is not necessarily the port student will end up on. Pinning
+// each agent to the exact port allocateFreePorts handed us keeps the
+// harness and the scheduler in lockstep.
+//
+// teacherWS and studentWS are absolute paths to the per-agent workspace
+// dirs — relative paths would be interpreted relative to cmd.Dir, which
+// would surface in log lines noisily across test runs.
+func writeSchedulerConfig(t *testing.T, path string, registryPort, teacherPort, studentPort int, teacherWS, studentWS string) {
+	t.Helper()
+	content := fmt.Sprintf(`agents:
+  - name: teacher
+    workspace: %s
+    port: %d
+  - name: student
+    workspace: %s
+    port: %d
+
+registry:
+  host: "127.0.0.1"
+  port: %d
+  heartbeat_interval: 10s
+  heartbeat_timeout: 30s
+
+timeouts:
+  chat: 10m
+  task_status: 30s
+
+# port_range is required by the scheduler config but unused — every agent
+# above has an explicit port set, so the auto-allocator path never fires.
+port_range:
+  start: %d
+  end: %d
+`, teacherWS, teacherPort, studentWS, studentPort, registryPort, teacherPort, teacherPort+100)
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatalf("write ahsir.yaml: %v", err)
+	}
+}
+
+// teacherCardYAML is the minimal teacher card for e2e: no filesystem access,
+// no delegation, just answer questions. Filesystem is deliberately disabled
+// so the test doesn't require any particular host directories.
+//
+// streaming.partial_messages is on so the SSE test can observe content
+// deltas. The non-streaming send tests (delegation_test, session_reuse_test)
+// continue to work because Turn() ignores EventTextDelta and only reads
+// EventText.
+const teacherCardYAML = `name: teacher
+description: e2e teacher agent
+version: "1.0.0"
+provider:
+  name: ahsir
+  url: https://github.com/wu8685/ahsir
+skills:
+  - name: teaching
+    description: answer questions concisely
+claude:
+  systemPrompt: |
+    You are a teacher. Answer the user's question in one concise sentence.
+  maxAgentCalls: 0
+runtime:
+  command: claude
+  args: []
+  timeout: 300s
+  provider: deepseek
+  baseURL: https://api.deepseek.com/anthropic
+  apiKey: "${MODEL_API_KEY}"
+  model: deepseek-v4-pro
+filesystem:
+  enabled: false
+network:
+  bind: "127.0.0.1"
+streaming:
+  partial_messages: true
+`
+
+// studentCardYAML is the minimal student card for e2e: delegate every user
+// question to the teacher via the A2A_CALL marker, then relay the answer.
+// The prompt is deliberately blunt so DeepSeek-v4-pro doesn't shortcut
+// the delegation (it tends to answer directly when the instruction is
+// loose).
+const studentCardYAML = `name: student
+description: e2e student agent
+version: "1.0.0"
+provider:
+  name: ahsir
+  url: https://github.com/wu8685/ahsir
+skills:
+  - name: learning
+    description: delegate questions to the teacher
+claude:
+  systemPrompt: |
+    You are a student. For every user question, you MUST delegate to the
+    teacher agent using exactly this format:
+
+    ---A2A_CALL---
+    {"agent": "teacher", "task": "<the user's question, verbatim>"}
+    ---END---
+
+    Then in your follow-up turn, relay the teacher's answer back to the user.
+    Do not answer the question yourself.
+
+    Available agents:
+    - teacher: teaching
+  maxAgentCalls: 3
+runtime:
+  command: claude
+  args: []
+  timeout: 300s
+  provider: deepseek
+  baseURL: https://api.deepseek.com/anthropic
+  apiKey: "${MODEL_API_KEY}"
+  model: deepseek-v4-pro
+filesystem:
+  enabled: false
+network:
+  bind: "127.0.0.1"
+`
+
+const codexTeacherCardYAML = `name: teacher
+description: e2e codex teacher agent
+version: "1.0.0"
+provider:
+  name: ahsir
+  url: https://github.com/wu8685/ahsir
+skills:
+  - name: teaching
+    description: answer questions concisely
+claude:
+  systemPrompt: |
+    You are a teacher. Follow the user's instruction exactly and answer
+    concisely. If asked to remember a codeword, remember it for later turns.
+    For any question about your, the teacher's, or this teacher's favorite
+    fruit, answer exactly: papaya-5
+  maxAgentCalls: 0
+runtime:
+  command: codex
+  args: ["--ignore-user-config", "--ignore-rules"]
+  timeout: 300s
+  provider: codex
+filesystem:
+  enabled: false
+network:
+  bind: "127.0.0.1"
+`
+
+const codexStudentCardYAML = `name: student
+description: e2e codex student agent
+version: "1.0.0"
+provider:
+  name: ahsir
+  url: https://github.com/wu8685/ahsir
+skills:
+  - name: learning
+    description: delegate questions to the teacher
+claude:
+  systemPrompt: |
+    Classroom exercise: you do not know the teacher's favorite fruit. You are
+    not allowed to answer user questions directly.
+
+    You are a student. For every user question, you MUST delegate to the
+    teacher agent. Your first response to a user request must contain exactly
+    this block, with no markdown fences and no surrounding prose:
+
+    ---A2A_CALL---
+    {"agent": "teacher", "task": "<the user's question, verbatim>"}
+    ---END---
+
+    Then in your follow-up turn, relay the teacher's answer back to the user.
+    Do not answer the question yourself.
+  maxAgentCalls: 3
+runtime:
+  command: codex
+  args: ["--ignore-user-config", "--ignore-rules"]
+  timeout: 300s
+  provider: codex
+filesystem:
+  enabled: false
+network:
+  bind: "127.0.0.1"
+`
+
+const mixedCodexTeacherCardYAML = `name: teacher
+description: e2e mixed-provider codex teacher agent
+version: "1.0.0"
+provider:
+  name: ahsir
+  url: https://github.com/wu8685/ahsir
+skills:
+  - name: teaching
+    description: answer questions concisely
+claude:
+  systemPrompt: |
+    You are the teacher in a mixed-provider integration test.
+    If asked for the classroom passphrase, answer exactly: cross-provider-papaya-17
+    Otherwise answer in one concise sentence.
+  maxAgentCalls: 0
+runtime:
+  command: codex
+  args: ["--ignore-user-config", "--ignore-rules"]
+  timeout: 300s
+  provider: codex
+filesystem:
+  enabled: false
+network:
+  bind: "127.0.0.1"
+`
+
+const mixedClaudeStudentCardYAML = `name: student
+description: e2e mixed-provider claude student agent
+version: "1.0.0"
+provider:
+  name: ahsir
+  url: https://github.com/wu8685/ahsir
+skills:
+  - name: learning
+    description: delegate questions to the teacher
+claude:
+  systemPrompt: |
+    You are the student in a mixed-provider integration test. You do not know
+    the teacher's classroom passphrase.
+
+    For every user question, you MUST delegate to the teacher agent using
+    exactly this format:
+
+    ---A2A_CALL---
+    {"agent": "teacher", "task": "<the user's question, verbatim>"}
+    ---END---
+
+    Then in your follow-up turn, relay the teacher's answer back to the user.
+    Do not answer the question yourself.
+  maxAgentCalls: 3
+runtime:
+  command: claude
+  args: []
+  timeout: 300s
+  provider: deepseek
+  baseURL: https://api.deepseek.com/anthropic
+  apiKey: "${MODEL_API_KEY}"
+  model: deepseek-v4-pro
+filesystem:
+  enabled: false
+network:
+  bind: "127.0.0.1"
+`

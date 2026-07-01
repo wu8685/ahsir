@@ -1,0 +1,196 @@
+<!doctype html>
+<html lang="zh-CN" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ahsir · 工作台</title>
+<link rel="stylesheet" href="/app.css">
+<style>
+/* Console-specific tweaks layered on top of the shared design CSS. */
+.muted-line{padding:14px;color:var(--muted);font-size:12px;}
+/* header title never wraps — a long room topic stays single-line + ellipsis */
+.chead .title{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:52vw;}
+.thread-empty{display:flex;height:100%;align-items:center;justify-content:center;color:var(--muted);font-size:13px;}
+select.talk{appearance:none;background:var(--panel-2);border:1px solid var(--border);border-radius:99px;padding:5px 26px 5px 11px;font-size:11.5px;color:var(--fg-2);}
+.amsg.failed p{color:var(--red);}
+.sess .meta{margin-left:auto;font-family:var(--mono);font-size:10px;color:var(--faint);}
+
+/* per-bubble meta header: role + clock */
+.tw .msg-head{display:flex;align-items:center;gap:7px;margin:16px 0 3px;font-size:11px;color:var(--muted);}
+.tw .msg-head.u{justify-content:flex-end;}
+.tw .msg-head .role{font-weight:600;color:var(--fg-2);font-size:13px;}
+.tw .msg-head .t{font-family:var(--mono);font-size:10.5px;color:var(--faint);}
+.tw .umsg{margin:0 0 4px;}
+.tw .amsg{margin:0 0 8px;}
+
+/* markdown rendering inside agent replies */
+.amsg .md-p{margin:0 0 9px;}
+.amsg .md-p:last-child{margin-bottom:0;}
+.amsg .md-h{font-weight:600;line-height:1.3;margin:12px 0 6px;}
+.amsg h1.md-h{font-size:17px;} .amsg h2.md-h{font-size:15px;} .amsg h3.md-h{font-size:13.5px;}
+.amsg h4.md-h,.amsg h5.md-h,.amsg h6.md-h{font-size:12.5px;color:var(--fg-2);}
+.amsg .md-ul,.amsg .md-ol{margin:0 0 9px;padding-left:20px;}
+.amsg .md-ul{list-style:disc;} .amsg .md-ol{list-style:decimal;}
+.amsg .md-ul li,.amsg .md-ol li{margin:3px 0;}
+.amsg .md-code{font-family:var(--mono);font-size:11.5px;background:var(--panel-2);border:1px solid var(--border-soft);border-radius:5px;padding:1px 5px;color:var(--fg);}
+.amsg .md-pre{background:var(--panel-2);border:1px solid var(--border);border-radius:var(--r-md);padding:11px 13px;overflow-x:auto;margin:0 0 10px;}
+.amsg .md-pre code{font-family:var(--mono);font-size:11.5px;line-height:1.55;color:var(--fg);background:none;border:none;padding:0;}
+.amsg .md-bq{border-left:3px solid var(--border);padding:2px 0 2px 11px;margin:0 0 9px;color:var(--fg-2);}
+.amsg .md-hr{border:none;border-top:1px solid var(--border);margin:12px 0;}
+.amsg strong{color:var(--fg);font-weight:600;}
+.amsg a{color:var(--accent);}
+/* markdown inside the right-side (user/operator) bubble — same rules as agent
+   replies, but trim the leading/trailing block margins so the bubble stays tight */
+.umsg .b .md-p,.umsg .b .md-h,.umsg .b .md-ul,.umsg .b .md-ol,.umsg .b .md-pre,.umsg .b .md-bq,.umsg .b .md-table{margin-bottom:8px;}
+.umsg .b > :first-child{margin-top:0;}
+.umsg .b > :last-child{margin-bottom:0;}
+.umsg .b .md-ul,.umsg .b .md-ol{padding-left:20px;}
+.umsg .b .md-h{font-weight:600;margin-top:6px;}
+.umsg .b .md-code,.umsg .b .md-pre{background:color-mix(in oklab,var(--fg) 8%,transparent);}
+.amsg .md-table{border-collapse:collapse;margin:0 0 10px;font-size:12px;display:block;overflow-x:auto;max-width:100%;}
+.amsg .md-table th,.amsg .md-table td{border:1px solid var(--border);padding:6px 10px;text-align:left;vertical-align:top;}
+.amsg .md-table th{background:var(--elev);font-weight:600;color:var(--fg);}
+.amsg .md-table tbody tr:nth-child(even){background:var(--hover);}
+
+/* roundtable */
+.roomlist{flex:0 0 auto;padding:2px 8px 0;max-height:34vh;overflow-y:auto;}
+.roomlist .grp{padding:8px 8px 4px;}
+.room-form{max-width:560px;margin:0 auto;padding:8px 22px;}
+.room-form h3{font-size:14px;font-weight:600;margin:6px 0 14px;}
+.room-form label{display:block;font-size:11.5px;color:var(--muted);margin:12px 0 5px;}
+.room-form input[type=text],.room-form textarea,.room-form select{width:100%;background:var(--panel-2);border:1px solid var(--border);border-radius:var(--r-md);padding:8px 10px;font-size:13px;outline:none;}
+.room-form textarea{resize:vertical;min-height:54px;}
+.room-form .roster{display:flex;flex-wrap:wrap;gap:6px;}
+.room-form .pchip{display:inline-flex;align-items:center;gap:6px;padding:5px 10px;border:1px solid var(--border);border-radius:99px;font-size:12px;color:var(--fg-2);cursor:pointer;}
+.room-form .pchip.on{background:var(--accent-soft);border-color:var(--accent);color:var(--accent);}
+.room-form .go{margin-top:16px;width:100%;padding:9px;border-radius:var(--r-md);background:var(--accent);color:#08121a;font-weight:600;font-size:13px;}
+.room-form .hint{font-size:11.5px;color:var(--muted);line-height:1.65;margin:2px 0 4px;}
+.room-form .go:disabled{opacity:.45;cursor:not-allowed;}
+.room-form .go:disabled{opacity:.4;cursor:not-allowed;}
+.rhdr{display:flex;align-items:center;gap:8px;flex-wrap:wrap;max-width:720px;margin:0 auto 8px;padding:10px 22px 0;}
+.rhdr .pill{font-family:var(--mono);font-size:10.5px;padding:2px 8px;border-radius:99px;border:1px solid var(--border);color:var(--fg-2);}
+.rhdr .pill.active{color:var(--accent);border-color:color-mix(in oklab,var(--accent) 50%,var(--border));}
+.rhdr .pill.waiting{color:#caa54a;} .rhdr .pill.stopped{color:var(--muted);}
+.rhdr .sp{flex:1;}
+.rhdr .stop{font-size:12px;padding:5px 11px;border:1px solid var(--border);border-radius:var(--r-sm);color:var(--red);}
+.rhdr .stop:hover{background:var(--hover);}
+/* group-chat turn separation: a divider above each speaker block so
+   consecutive agent turns (e.g. student → teacher) read as distinct turns. */
+#room-thread > .msg-head{border-top:1px solid var(--border);margin-top:20px;padding-top:16px;}
+#room-thread > .msg-head:first-child{border-top:none;margin-top:4px;padding-top:0;}
+#room-thread .msg-head .role{font-size:13.5px;font-weight:700;color:var(--fg);}
+#room-thread .msg-head.a .role{padding:1px 7px;border-radius:5px;background:var(--accent-soft);color:var(--accent);}
+
+/* agent lifecycle: detail-card actions + command generator */
+.detail-actions{display:flex;align-items:center;gap:10px;margin-top:12px;padding:0 13px;}
+.detail-actions .stop{font-size:11.5px;padding:5px 11px;border:1px solid var(--border);border-radius:var(--r-sm);background:var(--panel-2);color:var(--red);cursor:pointer;transition:background .12s,color .12s,border-color .12s;}
+.detail-actions .stop:hover{background:var(--hover);}
+.detail-actions .stop.armed{background:var(--red);border-color:var(--red);color:#fff;}
+/* restart button: neutral outline, armed = accent fill */
+.detail-actions #da-restart{font-size:11.5px;padding:5px 11px;border:1px solid var(--border);border-radius:var(--r-sm);background:var(--panel-2);color:var(--fg-2);cursor:pointer;transition:background .12s,color .12s,border-color .12s;}
+.detail-actions #da-restart:hover{background:var(--hover);color:var(--fg);}
+.detail-actions #da-restart.armed{background:var(--accent);border-color:var(--accent);color:#08121a;}
+.detail-actions #da-restart:disabled{opacity:.6;cursor:default;}
+/* read-only config detail */
+.cfg-box{padding:0 13px 2px;}
+.cfg-head{display:flex;align-items:center;margin:0 0 5px;font-size:11px;color:var(--muted);}
+.cfg-head .copy{margin-left:auto;font-size:10.5px;padding:2px 9px;border:1px solid var(--border);border-radius:99px;background:var(--panel);color:var(--fg-2);cursor:pointer;}
+.cfg-head .copy:hover{background:var(--hover);color:var(--fg);}
+.cfg-path{display:block;font-family:var(--mono);font-size:10.5px;color:var(--fg-2);word-break:break-all;background:var(--panel-2);border:1px solid var(--border-soft);border-radius:var(--r-sm);padding:6px 8px;}
+.cfg-yaml{margin-top:8px;}
+.cfg-yaml summary{font-size:11.5px;color:var(--muted);cursor:pointer;}
+.cfg-yaml summary:hover{color:var(--fg-2);}
+.cfg-yaml pre{margin:7px 0 0;background:var(--panel-2);border:1px solid var(--border);border-radius:var(--r-md);padding:10px 11px;overflow:auto;max-height:340px;font-family:var(--mono);font-size:11px;line-height:1.55;color:var(--fg);white-space:pre;}
+/* secondary action stays a quiet text link — it only copies a command, never executes */
+.detail-actions .linkbtn{font-size:11.5px;padding:4px 2px;color:var(--muted);text-decoration:underline;text-underline-offset:2px;cursor:pointer;transition:color .12s;}
+.detail-actions .linkbtn:hover{color:var(--fg-2);}
+.da-note{margin-top:7px;padding:0 13px 13px;font-size:10.5px;color:var(--faint);line-height:1.5;}
+/* highlight the participant whose detail is shown below the roster */
+.agent-row.on{border-color:color-mix(in oklab,var(--accent) 50%,var(--border));background:var(--elev);}
+/* form fields: accent focus ring matching the composer (outline suppressed in app.css) */
+.room-form input:focus-visible,.room-form textarea:focus-visible,.room-form select:focus-visible{border-color:color-mix(in oklab,var(--accent) 60%,var(--border));box-shadow:0 0 0 3px var(--accent-soft);}
+.agent-form .hint{font-size:11.5px;color:var(--muted);line-height:1.65;margin:4px 0 0;}
+.agent-form .row2{display:flex;gap:10px;}
+.agent-form .row2>div{flex:1;}
+.cmd-preview{position:relative;margin-top:18px;}
+.cmd-preview .lbl{display:flex;align-items:center;margin:0 0 5px;font-size:11.5px;color:var(--muted);}
+.cmd-preview pre{background:var(--panel-2);border:1px solid var(--border);border-radius:var(--r-md);padding:12px 13px;overflow-x:auto;font-family:var(--mono);font-size:11.5px;line-height:1.65;color:var(--fg);white-space:pre-wrap;word-break:break-word;}
+.cmd-preview .copy{margin-left:auto;font-size:11px;padding:3px 11px;border:1px solid var(--border);border-radius:99px;background:var(--panel);color:var(--fg-2);cursor:pointer;}
+.cmd-preview .copy:hover{background:var(--hover);color:var(--fg);}
+</style>
+</head>
+<body>
+<div class="app">
+  <aside class="rail left">
+    <div class="win">
+      <div class="wb"><span class="g">ah</span>ahsir</div>
+    </div>
+    <nav class="nav">
+      <button id="newConvo"><svg class="ic" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"></path></svg>新对话</button>
+      <button id="newRoom"><svg class="ic" viewBox="0 0 24 24"><circle cx="6" cy="7" r="2.4"></circle><circle cx="18" cy="7" r="2.4"></circle><circle cx="12" cy="17" r="2.4"></circle><path d="M8 8l3 7M16 8l-3 7"></path></svg>多 Agent 协同</button>
+      <button id="newRoundtable"><svg class="ic" viewBox="0 0 24 24"><circle cx="12" cy="12" r="8"></circle><circle cx="12" cy="5.5" r="1.4"></circle><circle cx="18.5" cy="12" r="1.4"></circle><circle cx="12" cy="18.5" r="1.4"></circle><circle cx="5.5" cy="12" r="1.4"></circle></svg>圆桌</button>
+      <button id="newAgent"><svg class="ic" viewBox="0 0 24 24"><circle cx="12" cy="8" r="3.2"></circle><path d="M6 20a6 6 0 0 1 9-5.2M17 14v6M14 17h6"></path></svg>新 Agent</button>
+    </nav>
+    <div id="rooms" class="roomlist"></div>
+    <div class="sessions" id="contexts"><div class="muted-line">加载中…</div></div>
+    <div class="left-foot">
+      <button id="schedStatus"><svg class="ic" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"></circle><path d="M12 7v5l3 2"></path></svg><span id="schedLabel">scheduler…</span></button>
+    </div>
+  </aside>
+
+  <main class="center">
+    <header class="chead">
+      <span class="title" id="ctxTitle">新对话</span>
+      <span class="ctx mono" id="ctxId">ctx</span>
+      <span class="sp"></span>
+      <button class="ico" id="themeBtn" title="深/浅主题">
+        <svg class="ic" viewBox="0 0 24 24"><path d="M21 12.8A9 9 0 1 1 11.2 3 7 7 0 0 0 21 12.8z"></path></svg>
+      </button>
+    </header>
+
+    <div class="thread" id="thread">
+      <div class="thread-empty">选择一个 agent，开始对话</div>
+    </div>
+
+    <div class="composer">
+      <button class="jump-btn hidden" id="jumpBtn" title="跳到最底端" aria-label="跳到最底端">
+        <svg class="ic" viewBox="0 0 24 24"><path d="M12 4v12M7 11l5 5 5-5"></path><path d="M5 20h14"></path></svg>
+      </button>
+      <div class="cwrap">
+        <textarea id="ta" rows="1" placeholder="给 agent 下发任务…  ⌘↩ 发送 · 可拖入或粘贴文件插入路径"></textarea>
+        <div class="crow">
+          <span class="sp"></span>
+          <select class="talk mono" id="agentSel" title="对话对象"></select>
+          <button class="send" id="sendBtn" title="发送">
+            <svg class="ic" viewBox="0 0 24 24" style="stroke-width:2"><path d="M7 11l5-5 5 5M12 6v13"></path></svg>
+          </button>
+        </div>
+      </div>
+    </div>
+  </main>
+
+  <aside class="rail right">
+    <header class="rhead">
+      <button class="rtab on" data-tab="detail"><svg class="ic" viewBox="0 0 24 24"><rect x="4" y="4" width="16" height="16" rx="2"></rect><path d="M8 9h8M8 13h5"></path></svg>详情</button>
+      <button class="rtab" data-tab="trace"><svg class="ic" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"></circle><path d="M12 7v5l3 2"></path></svg>轨迹</button>
+      <span class="sp"></span>
+    </header>
+    <div class="rbody">
+      <section class="panel on" data-panel="detail">
+        <div class="psec">参与本 context 的 Agent<span class="c mono" id="agentCount">0</span></div>
+        <div id="agentRows"></div>
+        <div class="psec">Agent 详情<span class="c mono" id="detailName">-</span></div>
+        <div class="card" id="detailCard"><div class="muted-line">选择一个 agent 查看详情</div></div>
+      </section>
+      <section class="panel" data-panel="trace">
+        <div class="psec">调用轨迹<span class="c mono">invocations</span></div>
+        <div class="tl" id="trace"><div class="muted-line">-</div></div>
+      </section>
+    </div>
+  </aside>
+</div>
+
+<div class="toast" id="toast"><span class="dot"></span><span id="toastMsg"></span></div>
+<script src="/app.js"></script>
+</body>
+</html>
