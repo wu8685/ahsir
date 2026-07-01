@@ -1,0 +1,667 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ahsir — 文档</title>
+<style>
+  :root {
+    --bg: #0f1115;
+    --panel: #171a21;
+    --panel-2: #1d2129;
+    --ink: #d7dce4;
+    --ink-soft: #9aa4b2;
+    --ink-faint: #6b7480;
+    --accent: #6ea8fe;
+    --accent-2: #8ad0a8;
+    --warn: #e0b673;
+    --danger: #e08585;
+    --border: #272c36;
+    --code-bg: #11141a;
+    --radius: 10px;
+    --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+    --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", Roboto, Helvetica, Arial, sans-serif;
+  }
+  * { box-sizing: border-box; }
+  html { scroll-behavior: smooth; }
+  body {
+    margin: 0; background: var(--bg); color: var(--ink);
+    font-family: var(--sans); font-size: 15.5px; line-height: 1.75;
+  }
+  a { color: var(--accent); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+  code { font-family: var(--mono); font-size: 0.88em; background: var(--code-bg);
+    padding: 0.12em 0.4em; border-radius: 5px; border: 1px solid var(--border); }
+  pre { background: var(--code-bg); border: 1px solid var(--border); border-radius: var(--radius);
+    padding: 16px 18px; overflow-x: auto; font-family: var(--mono); font-size: 13px; line-height: 1.55; }
+  pre code { background: none; border: none; padding: 0; font-size: inherit; }
+  .layout { display: grid; grid-template-columns: 290px 1fr; min-height: 100vh; }
+  nav.toc {
+    position: sticky; top: 0; align-self: start; height: 100vh; overflow-y: auto;
+    background: var(--panel); border-right: 1px solid var(--border); padding: 26px 20px 60px;
+  }
+  nav.toc .brand { font-family: var(--mono); font-weight: 700; font-size: 20px; color: #fff;
+    letter-spacing: 0.5px; margin-bottom: 2px; }
+  nav.toc .brand span { color: var(--accent); }
+  nav.toc .tag { color: var(--ink-faint); font-size: 12px; margin-bottom: 14px; }
+  nav.toc .lang { display: flex; gap: 6px; margin-bottom: 22px; font-family: var(--mono); font-size: 12px; }
+  nav.toc .lang a { padding: 3px 10px; border: 1px solid var(--border); border-radius: 20px; color: var(--ink-soft); }
+  nav.toc .lang a.active { background: var(--accent); border-color: var(--accent); color: #0f1115; font-weight: 700; }
+  nav.toc .lang a:hover { text-decoration: none; color: var(--ink); }
+  nav.toc .lang a.active:hover { color: #0f1115; }
+  nav.toc ol { list-style: none; margin: 0; padding: 0; counter-reset: sec; }
+  nav.toc > ol > li { margin: 2px 0; }
+  nav.toc > ol > li > a { display: block; padding: 5px 8px; border-radius: 6px; color: var(--ink-soft);
+    font-weight: 600; font-size: 13.5px; }
+  nav.toc > ol > li > a:hover { background: var(--panel-2); color: var(--ink); text-decoration: none; }
+  nav.toc ol ol { margin: 2px 0 8px 6px; padding-left: 10px; border-left: 1px solid var(--border); }
+  nav.toc ol ol a { display: block; padding: 3px 8px; border-radius: 6px; color: var(--ink-faint);
+    font-size: 12.5px; }
+  nav.toc ol ol a:hover { color: var(--ink); text-decoration: none; }
+  main { padding: 0 0 120px; max-width: 920px; }
+  .wrap { padding: 40px 56px 0; }
+  header.hero { padding: 56px 56px 30px; border-bottom: 1px solid var(--border);
+    background: linear-gradient(180deg, #14171d, var(--bg)); }
+  header.hero h1 { margin: 0 0 8px; font-size: 32px; letter-spacing: -0.5px; color: #fff; }
+  header.hero h1 .mono { font-family: var(--mono); color: var(--accent); }
+  header.hero p.lead { margin: 0; font-size: 17px; color: var(--ink-soft); max-width: 760px; }
+  header.hero .meta { margin-top: 18px; font-size: 12.5px; color: var(--ink-faint); font-family: var(--mono); }
+  section { padding-top: 38px; }
+  h2 { font-size: 24px; color: #fff; margin: 8px 0 6px; padding-bottom: 8px;
+    border-bottom: 1px solid var(--border); letter-spacing: -0.3px; }
+  h3 { font-size: 18px; color: #eef2f7; margin: 30px 0 6px; }
+  h4 { font-size: 15px; color: var(--accent-2); margin: 22px 0 4px; font-family: var(--mono); }
+  p { margin: 10px 0; }
+  ul, ol.body { margin: 10px 0; padding-left: 22px; }
+  li { margin: 5px 0; }
+  .lead-sub { color: var(--ink-soft); font-size: 15px; }
+  table { border-collapse: collapse; width: 100%; margin: 14px 0; font-size: 13.5px; }
+  th, td { border: 1px solid var(--border); padding: 8px 11px; text-align: left; vertical-align: top; }
+  th { background: var(--panel-2); color: #fff; font-weight: 600; }
+  td code { white-space: nowrap; }
+  .callout { border: 1px solid var(--border); border-left: 3px solid var(--accent);
+    background: var(--panel); border-radius: 8px; padding: 12px 16px; margin: 16px 0; font-size: 14px; }
+  .callout.warn { border-left-color: var(--warn); }
+  .callout.principle { border-left-color: var(--accent-2); }
+  .callout .k { font-weight: 700; color: #fff; }
+  .pill { display: inline-block; font-family: var(--mono); font-size: 11px; padding: 1px 7px;
+    border-radius: 20px; border: 1px solid var(--border); color: var(--ink-soft); background: var(--panel-2); }
+  .pill.ok { color: var(--accent-2); border-color: #2c4434; }
+  .pill.soon { color: var(--warn); border-color: #4a3c25; }
+  .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+  .card { background: var(--panel); border: 1px solid var(--border); border-radius: var(--radius); padding: 14px 16px; }
+  .card h4 { margin-top: 0; }
+  .muted { color: var(--ink-faint); }
+  hr.soft { border: none; border-top: 1px solid var(--border); margin: 30px 0; }
+  .anchor { scroll-margin-top: 16px; }
+  @media (max-width: 880px) {
+    .layout { grid-template-columns: 1fr; }
+    nav.toc { position: static; height: auto; border-right: none; border-bottom: 1px solid var(--border); }
+    .wrap, header.hero { padding-left: 22px; padding-right: 22px; }
+    .grid2 { grid-template-columns: 1fr; }
+  }
+</style>
+</head>
+<body>
+<div class="layout">
+
+<nav class="toc">
+  <div class="brand"><span>ah</span>sir</div>
+  <div class="tag">local-first multi-agent control plane</div>
+  <div class="lang"><a href="index.html">EN</a><a href="index.zh.html" class="active">中文</a></div>
+  <ol>
+    <li><a href="#overview">1 · 概览</a>
+      <ol>
+        <li><a href="#what">ahsir 是什么</a></li>
+        <li><a href="#what-not">它不是什么</a></li>
+        <li><a href="#mental-model">心智模型</a></li>
+      </ol>
+    </li>
+    <li><a href="#principles">2 · 设计原则</a></li>
+    <li><a href="#architecture">3 · 架构</a>
+      <ol>
+        <li><a href="#components">组件</a></li>
+        <li><a href="#flow">请求流</a></li>
+        <li><a href="#process-model">进程与信任模型</a></li>
+      </ol>
+    </li>
+    <li><a href="#concepts">4 · 核心概念</a></li>
+    <li><a href="#features">5 · 功能</a>
+      <ol>
+        <li><a href="#f-lifecycle">调度与生命周期</a></li>
+        <li><a href="#f-sessions">Session 与恢复</a></li>
+        <li><a href="#f-shared">共享 context 协作</a></li>
+        <li><a href="#f-roundtable">圆桌（群聊）</a></li>
+        <li><a href="#f-console">Web 控制台</a></li>
+        <li><a href="#f-mcp">MCP 隔离</a></li>
+        <li><a href="#f-providers">模型 Provider</a></li>
+        <li><a href="#f-obs">可观测性</a></li>
+        <li><a href="#f-auth">鉴权</a></li>
+      </ol>
+    </li>
+    <li><a href="#cli">6 · CLI 参考</a></li>
+    <li><a href="#config">7 · 配置</a>
+      <ol>
+        <li><a href="#cfg-scheduler">ahsir.yaml</a></li>
+        <li><a href="#cfg-agent">agent-card.yaml</a></li>
+      </ol>
+    </li>
+    <li><a href="#api">8 · HTTP API</a></li>
+    <li><a href="#security">9 · 安全模型</a></li>
+    <li><a href="#roadmap">10 · Roadmap</a></li>
+  </ol>
+</nav>
+
+<main>
+<header class="hero">
+  <h1><span class="mono">ahsir</span> — 基于 A2A 的多 Agent 调度器</h1>
+  <p class="lead">一个小型 Go control plane：把 LLM 驱动的 agent 作为本地进程运行，让它们通过 A2A
+  协议互相通信，并让 Claude Code 或 Codex 通过 CLI 与内置 skill 驱动整个 fleet——local-first、
+  可恢复、可审计。</p>
+  <div class="meta">官方文档 · 生成于 2026-06-08</div>
+</header>
+
+<div class="wrap">
+
+<!-- ===================== 1 概览 ===================== -->
+<section id="overview" class="anchor">
+  <h2>1 · 概览</h2>
+
+  <h3 id="what" class="anchor">ahsir 是什么</h3>
+  <p><code>ahsir</code> 把 <strong>Claude</strong> 和 <strong>Codex</strong> CLI 变成
+  <strong>A2A-compatible runtime</strong>，并在单机上调度一组这样的 runtime。每个 agent 都是一个
+  持久化的 persona——固定的 system prompt、一个 provider 后端、独立的文件系统权限、以及按会话持久的
+  记忆——通过 <a href="https://google.github.io/A2A/">A2A 协议</a> 寻址。一个中心 scheduler 负责
+  agent 生命周期、一个发现用的 registry、以及一个 HTTP gateway，所有调用都经它中转，从而做到可见、
+  可恢复、可审计。</p>
+  <p>你有两种驱动方式，底层都是同一个 CLI：</p>
+  <ul>
+    <li><strong>直接驱动</strong> —— <code>ahsir list / chat / status / trace / history / doctor</code>。</li>
+    <li><strong>通过 agentic host 驱动</strong> —— Claude Code 或 Codex 加载内置的
+      <code>orchestrator</code> skill，由它告诉 host 何时该把任务委派给某个 specialist agent、
+      以及如何调用 CLI。</li>
+  </ul>
+
+  <h3 id="what-not" class="anchor">它不是什么</h3>
+  <ul>
+    <li><span class="k">不是 MCP 的替代品。</span> 控制面是 CLI 加 skill。MCP server 模式被评估过、
+      但被有意推迟（见 <a href="#roadmap">Roadmap</a>）。</li>
+    <li><span class="k">不是云端 agent platform。</span> 差异化在于 local-first、CLI-native、
+      可恢复、可审计——不是一个托管的多租户服务。</li>
+    <li><span class="k">（暂）不是多机系统。</span> scheduler 只绑 loopback；信任边界是单机上的
+      单个 OS 用户。</li>
+  </ul>
+
+  <h3 id="mental-model" class="anchor">心智模型</h3>
+  <p>把 ahsir 想成一个 <em>面向 persona 的进程 supervisor + 消息路由器</em>。一个 persona（agent）
+  在 <code>agent-card.yaml</code> 里配置一次；scheduler 负责把它拉起、保活、注册到 registry 供发现、
+  并把 A2A 消息路由给它。会话以 A2A <code>contextId</code> 为 key；agent 把该 context 的记忆保存在
+  一个长驻的 provider 子进程里，scheduler 能在崩溃后恢复它。</p>
+</section>
+
+<!-- ===================== 2 设计原则 ===================== -->
+<section id="principles" class="anchor">
+  <h2>2 · 设计原则</h2>
+  <p class="lead-sub">下面所有功能都是这五条承诺的体现。当两个目标冲突时，按此优先级裁决。</p>
+
+  <div class="callout principle"><span class="k">1 · Local-first，默认零配置。</span>
+    最常见的路径——单机单 OS 用户——必须无需任何配置即可工作。secret 自动生成、CLI 自动发现、
+    端口自动分配。只有在真实威胁成立的地方才引入摩擦。</div>
+
+  <div class="callout principle"><span class="k">2 · CLI-native，而非 protocol-first。</span>
+    控制面是文本进、文本出的命令，agent（或人、或 shell 管道）都能驱动。结构化协议（线上的 A2A、
+    未来的 MCP 模式）服务于 CLI，而不是反过来。</div>
+
+  <div class="callout principle"><span class="k">3 · 可恢复。</span>
+    agent 崩溃、<code>claude</code> 被 kill、scheduler 重启——任何一种都不应丢失会话。重要的状态
+    （context→session 映射、invocation ledger、transcript）都被持久化，让工作得以续跑而非重来。</div>
+
+  <div class="callout principle"><span class="k">4 · 可审计。</span>
+    每一次中转的调用都被记录。<code>ahsir trace</code> 重建 agent 调用图；<code>ahsir history</code>
+    回放一段会话。scheduler 处在调用路径上，正是为了让一切可见。</div>
+
+  <div class="callout principle"><span class="k">5 · 诚实的边界。</span>
+    凡是尚未成立的保证，都被明确标注为"推迟"，而不是含糊地暗示已具备。Hardening 先于扩展：系统会
+    明说哪些是已可依赖的 foundation、哪些只是 potential。</div>
+</section>
+
+<!-- ===================== 3 架构 ===================== -->
+<section id="architecture" class="anchor">
+  <h2>3 · 架构</h2>
+
+  <h3 id="components" class="anchor">组件</h3>
+  <table>
+    <tr><th>组件</th><th>包</th><th>职责</th></tr>
+    <tr><td><code>ahsir</code>（scheduler + CLI）</td><td><code>cmd/ahsir</code></td>
+      <td>启动 scheduler；提供用户命令（list/chat/status/trace/history/doctor/agent）。</td></tr>
+    <tr><td><code>ahsir-agent</code></td><td><code>cmd/ahsir-agent</code></td>
+      <td>每个 persona 一个。承载 A2A 端点、加载 agent card、驱动 provider CLI。</td></tr>
+    <tr><td>Scheduler</td><td><code>internal/scheduler</code></td>
+      <td>agent 生命周期与监督、HTTP gateway、配置、invocation ledger、admin token。</td></tr>
+    <tr><td>Registry</td><td><code>internal/registry</code></td>
+      <td>agent 注册、心跳存活、name→card 查找。一个纯内存 store。</td></tr>
+    <tr><td>Wrapper</td><td><code>internal/wrapper</code></td>
+      <td>A2A server/client、executor（agent 循环）、<code>SessionPool</code>、provider session、
+      transcript store、持久化。</td></tr>
+    <tr><td>Scheduler client</td><td><code>internal/schedulerclient</code></td>
+      <td>CLI 用来与运行中的 scheduler 通信的轻量 HTTP client。</td></tr>
+  </table>
+
+  <h3 id="flow" class="anchor">请求流</h3>
+  <p>两个入口最终汇聚到同一条 agent 侧路径。scheduler 始终留在环路中，负责发现、中转与审计。</p>
+<pre>
+  Claude Code / Codex ──(orchestrator skill)──┐
+                                              ▼
+  人 / shell ─────────────► ahsir CLI ──► scheduler gateway  :9800
+                                              │   POST /agents/{name}/chat        (缓冲式)
+                                              │   POST /a2a/{name}                (原生 A2A 代理)
+                                              │   GET  /agents/{name}/tasks/{id}  (任务状态)
+                                              │   GET  /agents/{name}/history/{ctx}
+                                              │   GET  /agents, /invocations, /config/timeouts
+                                              │   POST/DELETE /admin/agents       (受控)
+                                              ▼
+                              registry (发现)  +  invocation ledger (审计)
+                                              │
+                            A2A JSON-RPC message/send | message/stream
+                                              ▼
+                    ahsir-agent  :loopback        ahsir-agent  :loopback
+                    ├ A2A server (token 校验)     ├ A2A server
+                    ├ executor (agent 循环)       ├ executor
+                    └ SessionPool by contextId    └ SessionPool by contextId
+                              │                              │
+                    claude --resume / codex exec resume &lt;thread&gt;
+</pre>
+  <p>一个 turn 的流程：gateway 在 ledger 记一条 invocation → 经 A2A 转发给 agent → executor 为该
+  <code>contextId</code> 打开（或恢复）<code>Session</code> → provider 产出回复 → executor 记一条
+  transcript turn → gateway 落定 ledger 条目并返回。</p>
+
+  <h3 id="process-model" class="anchor">进程与信任模型</h3>
+  <ul>
+    <li>scheduler 只绑 <code>127.0.0.1</code>。非 loopback 的 <code>network.bind</code> 会被显式拒绝。</li>
+    <li>agent 作为 scheduler 的子进程运行，各自占一个自动分配的 loopback 端口。</li>
+    <li>scheduler→agent 的 A2A 调用带一个 per-agent 的 <strong>internal token</strong>，由 wrapper
+      校验；scheduler 只把它发往自己在 spawn 时记录的 loopback 地址。</li>
+    <li>控制面（agent 生命周期、registry 写）由 <strong>admin token</strong> 守门。信任边界是
+      "能读到该 token 的 <code>0600</code> 文件" 的那个 OS 用户。</li>
+  </ul>
+</section>
+
+<!-- ===================== 4 核心概念 ===================== -->
+<section id="concepts" class="anchor">
+  <h2>4 · 核心概念</h2>
+  <table>
+    <tr><th>术语</th><th>含义</th></tr>
+    <tr><td><strong>Agent / persona</strong></td>
+      <td>一个配置好的 specialist：固定 system prompt、provider、文件系统权限、skills。对应一个
+      <code>ahsir-agent</code> 进程，由 <code>agent-card.yaml</code> 定义。</td></tr>
+    <tr><td><strong>contextId</strong></td>
+      <td>A2A 会话 key。共享同一 <code>contextId</code> 的消息命中同一个 provider session 并累积
+      记忆。省略它则是一次性的隔离 turn。</td></tr>
+    <tr><td><strong>Session</strong></td>
+      <td>一个 provider 后端的会话 runtime。<code>ClaudeSession</code> 是一个长驻 <code>claude</code>
+      子进程；<code>CodexSession</code> 每个 turn fork 一次 <code>codex exec</code>、按 thread id 恢复。
+      两者实现同一个 <code>Session</code> 接口。</td></tr>
+    <tr><td><strong>SessionPool</strong></td>
+      <td><code>contextId</code> → <code>Session</code> 的映射，带 idle 驱逐（保留 sessionID 供
+      resume）、并发上限、以及 per-context 的 FIFO turn gate。</td></tr>
+    <tr><td><strong>Registry</strong></td>
+      <td>发现：agent 注册 card 并心跳；查找解析 name→card。存活状态在读取时派生。</td></tr>
+    <tr><td><strong>Gateway</strong></td>
+      <td>scheduler 唯一的 HTTP 端口。中转 chat/task/history、代理原生 A2A、暴露只读视图、并守门控制面。</td></tr>
+    <tr><td><strong>Invocation ledger</strong></td>
+      <td>每次中转调用的 append-only JSONL（<code>started → queued → completed/failed</code>），
+      含有界的 user-text 预览。启动时回放；支撑 <code>ahsir trace</code> 与崩溃恢复。</td></tr>
+    <tr><td><strong>Transcript</strong></td>
+      <td>per-context 的完整会话记录（speaker、完整问、完整答），由 wrapper 写入；支撑
+      <code>ahsir history</code> 与接力工作流。</td></tr>
+  </table>
+</section>
+
+<!-- ===================== 5 功能 ===================== -->
+<section id="features" class="anchor">
+  <h2>5 · 功能</h2>
+
+  <h3 id="f-lifecycle" class="anchor">调度与生命周期</h3>
+  <ul>
+    <li><strong>scheduler 自有的 A2A 入口。</strong> 公开的原生 A2A 流量走 <code>POST /a2a/{agent}</code>，
+      于是用户调用和 agent-to-agent 调用对 scheduler 都可见、都被记录。</li>
+    <li><strong>动态 agent 生命周期 —— 无需重启 scheduler。</strong> <code>ahsir agent new</code> 生成 card、写入
+      <code>ahsir.yaml</code>、并经 <code>POST /admin/agents</code> 在<em>运行中</em>的 scheduler 上拉起它——
+      新 agent 热注册，<code>list</code> / <code>chat</code> 立刻可用；<code>ahsir agent delete</code> 停掉它（文件保留）。
+      只有这几种情况才需要重启：传了 <code>--skip-start</code>、运行 <code>agent new</code> 时 scheduler 没开、或者手改了
+      <code>ahsir.yaml</code>。（改已有 card 是重启<em>那个 agent</em>，不是 scheduler。）</li>
+    <li><strong>监督与重启。</strong> 若 agent 进程意外退出，或其 <code>/healthz</code> 连续失败，
+      scheduler 以指数退避在同一端口重启它。主动停止则是终态（不重启）。</li>
+    <li><strong>可判定的启动。</strong> listener 同步 bind，端口冲突即作为 start 错误暴露；自动分配的
+      端口会探测可 bind 性并跳过外来 listener；<code>Start</code> 中途失败会回卷已启动的一切。</li>
+    <li><strong>进程树清理。</strong> agent（及其 provider 子进程）跑在 process group 里，关停时
+      回收整棵树。</li>
+  </ul>
+
+  <h3 id="f-sessions" class="anchor">Session 与恢复</h3>
+  <ul>
+    <li><strong>多 provider session。</strong> Anthropic（Claude）、Zhipu 与 DeepSeek
+      （Anthropic 兼容端点）、以及 Codex。provider、base URL、API key、model 按 agent card 配置；
+      wrapper 把它们翻译成 CLI 所需的环境变量。</li>
+    <li><strong>可恢复会话。</strong> Claude agent 用 <code>claude --resume=&lt;session_id&gt;</code>
+      恢复；Codex agent 用 <code>codex exec resume &lt;thread_id&gt;</code> 恢复。</li>
+    <li><strong>持久化 session 映射。</strong> 每个 agent 写
+      <code>&lt;workspace&gt;/.a2a/sessions.json</code>（contextId→sessionID），受
+      <code>pool.evicted_ttl</code> / <code>pool.max_evicted</code> 约束，于是重启后恢复既有会话
+      而非从头开始。</li>
+    <li><strong>per-turn 超时对齐。</strong> 两个 provider 都把 <code>runtime.timeout</code> 作为
+      真正的 per-turn deadline；超时则该 turn 干净失败、session 被驱逐且保留 sessionID 供 resume。</li>
+    <li><strong>重启续跑。</strong> 在一次受监督的重启后，scheduler 借助 ledger 为带
+      <code>contextId</code> 的被中断工作发送一条续跑 prompt。</li>
+    <li><strong>pool 容量控制。</strong> <code>pool.max_active</code> 限制单 agent 的并发活跃 provider
+      进程数；<code>overload_policy</code> 为 <code>reject</code> 或 <code>evict-lru</code>。</li>
+    <li><strong>会话记录的留存与删除。</strong>没有手动删除入口——记录按时间在<strong>进程启动时自动清理（compaction）</strong>：invocation
+      ledger（驱动左栏会话列表与右栏轨迹）保留 completed <strong>7 天</strong>、incomplete <strong>30 天</strong>（scheduler
+      启动时清理）；每个 agent 的 transcript（每个 context 的消息历史）在最后一轮超过 <strong>30 天</strong>后，连同 <code>index.json</code>
+      条目一并删除（agent 启动时）；圆桌日志同样 <strong>30 天</strong>（scheduler 启动时）。另有 <code>pool.evicted_ttl</code>
+      控制 session 映射的遗忘，决定一段旧会话之后还能否 <code>--resume</code>。</li>
+  </ul>
+
+  <h3 id="f-shared" class="anchor">共享 context 协作 <span class="pill ok">2026-06-08</span></h3>
+  <p>同机上多个 client 可以在同一个 <code>contextId</code> 内协作。</p>
+  <ul>
+    <li><strong>Speaker 归因。</strong> <code>ahsir chat --as &lt;name&gt;</code>（默认取 OS 用户名）
+      为每个 turn 打标；executor 在 user text 前加 <code>[speaker: X]</code>，并向 system prompt 追加
+      一句多说话人指令，让模型把陈述归到正确的人。speaker 会出现在 <code>ahsir trace</code> 里。
+      不带归因时，prompt 与之前逐字节一致。</li>
+    <li><strong>per-context FIFO 队列。</strong> 当同一 context 上已有 turn 在飞时，第二个 turn
+      <em>按到达顺序排队等待</em>，而非直接失败。受 <code>pool.queue_depth</code> 限制（默认 4）；
+      队满则退化为 busy/<code>409</code> 信号，而 <code>queue_depth: 0</code> 恢复此前的 fail-fast
+      契约。不同 context 仍完全并行。</li>
+    <li><strong>基于 task 的异步。</strong> <code>ahsir chat --async</code> 提交 turn 后立即返回一个
+      task id（A2A <code>configuration.blocking=false</code>）；用 <code>ahsir status</code> 轮询。
+      默认模式则是提交后内部轮询——同样的同步体验，但不长占连接。</li>
+    <li><strong>Transcript 回放。</strong> <code>ahsir history &lt;agent&gt; &lt;contextId&gt;</code>
+      回放谁说了什么、agent 答了什么——这是有人中途接手会话时的接力路径。</li>
+  </ul>
+  <div class="callout"><span class="k">隐私说明。</span> transcript 存储<em>完整</em>会话内容（不同于
+  ledger 的有界预览），因为回放正是它的目的。它以 owner-only 权限写入（<code>0700</code> 目录 /
+  <code>0600</code> 文件）；contextId 被 hash 进文件名，所以 caller 提供的 id 永不以原文落到文件系统。
+  受认可的读取路径是受 token 校验的 <code>/history</code> 端点。</div>
+
+  <h3 id="f-roundtable" class="anchor">房间：多 Agent 协同 + 圆桌 <span class="pill ok">2026-06-11</span></h3>
+  <p>一个 <strong>room</strong> 让多个 agent 在同一个共享对话里讨论 —— 它们能看到彼此的发言。room id <em>就是</em>共享的 <code>contextId</code>，复用现有 session + speaker 机制，无需改 wrapper。room 有两种<strong>话语权模式</strong>（<code>POST /rooms</code> 的 <code>mode</code>，默认 <code>relay</code>）：</p>
+  <p><strong>① 多 Agent 协同（<code>mode: relay</code>）</strong>：hub-and-spoke、@ 点名驱动，适合委派型协作。</p>
+  <ul>
+    <li><strong>@ 点名轮转</strong>，operator <em>和</em> agent 都能用。消息里第一个 <code>@&lt;参与者&gt;</code> 成为下一个发言者，所以一个 agent 可以把问题抛给同伴。code span 里的 <code>@名字</code> 是被引用的 token，不是寻址指令。</li>
+    <li><strong>组织者回交。</strong>无人被点名时，控制权交还房间的组织者 —— <code>operator</code>（停下等你的下一条消息）或指定的<strong>主持 agent</strong>（它接手并决定谁继续）。</li>
+    <li><strong>增量转述。</strong>轮到某 agent 时，只把它上次发言以来没看过的 transcript 喂给它（首次参与者拿到全部历史）。成本有界、无广播风暴、不丢上下文 —— 它自己的 session 保留到上次发言为止的一切，delta 补齐缺口。</li>
+    <li><strong>防跑飞。</strong>自治的 agent↔agent 链由 <code>maxChain</code>（两次 operator 消息之间的轮数，默认 8）兜底；每条 operator 消息重置预算。</li>
+  </ul>
+  <p><strong>② 圆桌（<code>mode: roundtable</code>）</strong>：真正的圆桌——<strong>共识轮</strong>（德州扑克式），扁平无 chair，适合模糊、要取舍的<strong>决策</strong>（如 OKR 评审）。</p>
+  <ul>
+    <li><strong>一轮 = 随机顺序走一整圈</strong>：逐个问遍参与者（后发言者能看到本轮在先者的内容——共享广播）。每人要么发言，无异议则回 <code>同意</code>。约定由<strong>每轮 prompt 注入，无需改 agent 的 system prompt</strong>。</li>
+    <li><strong>滚动共识小结</strong>。一个专设 <strong>moderator agent</strong>（非参与者，跑在自己的 <code>&lt;roomId&gt;#mod</code> contextId、不污染共享 transcript、<strong>无权</strong>决定谁发言）每轮产出一份可见小结、<strong>作为下一轮锚点</strong>，分三栏：<strong>【已达成】</strong>（锁定、承接、不重议，除非有人推翻其假设）、<strong>【待议】</strong>（逐轮收窄）、<strong>【纠偏】</strong>（点名 <code>@&lt;agent&gt;</code> 指出谁跑偏命题/过度发散，让他下一轮收敛）。待议清空即共识，其【已达成】就是结论。</li>
+    <li><strong>预算</strong>（默认 12 轮）内未共识 → 交还 operator；operator 抛新问题即开新循环。建房：<code>POST /rooms {"mode":"roundtable","participants":[...],"moderator":"&lt;agent&gt;","budget":12,"message":"&lt;问题&gt;"}</code>。设计见 <code>specs/2026-06-10-roundtable-mode.md</code>。</li>
+  </ul>
+  <p class="muted">HTTP：<code>POST /rooms</code>、<code>GET /rooms</code>、<code>GET /rooms/{id}</code>、<code>POST /rooms/{id}/say</code>、<code>POST /rooms/{id}/stop</code>。圆桌的每个 turn 都记入 ledger（<code>source=roundtable</code>），所以 <code>trace</code> 能看到。room <strong>已持久化</strong>（每个 room 一份 <code>&lt;roomId&gt;.jsonl</code>），scheduler 重启时重建；恢复的 room 回到 <strong>waiting</strong> 状态（active/waiting 这种瞬时状态不持久，<code>stopped</code> 会持久）。超过 30 天的日志启动时清理。可运行示例：<code>example/roundtable/</code>。</p>
+
+  <h3 id="f-console" class="anchor">Web 控制台 <span class="pill ok">2026-06-09</span></h3>
+  <p>一个可选的<strong>独立进程</strong>（<code>ahsir ui</code>），提供单页浏览器控制台并代理 gateway。它不含 LLM、不做编排 —— 是个薄代理 + 静态 SPA。</p>
+  <ul>
+    <li><strong>1:1 对话</strong>任意 agent；回复按 <strong>Markdown</strong> 渲染（标题、粗斜体、代码块、列表、引用、链接、GFM 表格），每个气泡显示发言者和时间戳。</li>
+    <li>左栏的<strong>会话列表</strong>由 invocation ledger 聚合、以 <code>contextId</code> 为轴；右栏是 agent 卡详情与轨迹时间线。</li>
+    <li><strong>圆桌模式</strong>驱动 <code>/rooms</code> API：发起房间、看合并 thread、发 operator 消息（可 <code>@</code>）、结束。</li>
+    <li><strong>消息操作</strong>（hover 气泡时显形）：<strong>复制</strong>复制该条原文；<strong>直接回复</strong>（仅圆桌 agent 气泡）把 <code>@&lt;发言者&gt;</code> 放到输入框开头。右栏的参与者行 / agent 卡片头部也可<strong>拖入输入框</strong>，在光标处插入 <code>@&lt;agent&gt;</code>，省去手打点名。</li>
+    <li><strong>拖或粘贴文件进输入框</strong>插入本地路径（<code>⌘V</code> 粘贴剪贴板图片同样支持）。浏览器隐藏拖入/粘贴文件的真实路径，所以控制台把字节上传到 <code>POST /api/upload</code>、copy 到本地<strong>上传目录</strong>，再把绝对路径插到光标处（claude 自己去读，如 <code>看下 /tmp/.../shot.png 报的什么错</code>）。任意文件类型、可多选。</li>
+    <li><strong>房间 + 提醒。</strong>支持<strong>多 Agent 协同</strong>与<strong>圆桌</strong>两种建房流（见上节）；圆桌 thread 按「第 X 轮」分隔、moderator 小结渲染成独立卡片，右栏轨迹也按轮分隔。<code>@&lt;参与者&gt;</code> 显示为蓝字、<code>@operator</code>（你）为深蓝 pill；有 agent <code>@</code> 你时总会弹一个页内 toast，并且仅在标签页<strong>不活跃</strong>（隐藏或失焦）时额外触发<strong>声音 + 浏览器弹窗 + 标签页标题/favicon 闪烁</strong>，你切回（或本就在）这个页面时立即停止。点轨迹节点可跳到对应气泡;滚上去时有「跳到最底端」浮钮。</li>
+  </ul>
+  <p class="muted">上传目录默认 <code>$TMPDIR/ahsir-uploads</code>（用 <code>ahsir ui --upload-dir</code> 覆盖，或设 <code>AHSIR_UPLOAD_DIR</code> 让控制台和 agent 一处对齐）。agent 要能读到拖入的文件，需 <code>filesystem.enabled: true</code>——这类 agent 启动时会<strong>自动把上传目录加进 allowed_paths</strong>（<code>--add-dir</code>），零配置即生效。本地优先：路径有效是因为控制台、上传目录、agent 同机。Markdown 渲染 XSS 安全（先转义、再 tokenize 成固定标签集；链接限 http(s)/mailto）。启动：<code>ahsir ui --addr 127.0.0.1:9801 --scheduler http://127.0.0.1:9800</code>。</p>
+
+  <h3 id="f-mcp" class="anchor">MCP 隔离 <span class="pill ok">2026-06-09</span></h3>
+  <p>agent 运行 <code>claude</code> 时一律带 <strong><code>--strict-mcp-config</code></strong>，因此<strong>绝不继承</strong> operator 的全局（<code>~/.claude.json</code>）或项目（<code>.mcp.json</code>）MCP server。默认 —— 没有 <code>mcp:</code> 段 —— 表示<strong>零 MCP server</strong>：隔离、快、省的基线（继承宿主 MCP 会撑大一次琐碎 turn 的 input token、增加每次调用的初始化开销，也是权限外泄风险）。</p>
+  <ul>
+    <li><strong>按 agent 显式启用</strong>：卡里的 <code>mcp.servers</code>（claude <code>mcpServers</code> 形状，原样透传）或 <code>ahsir agent new --mcp-config &lt;file&gt;</code>。</li>
+    <li><strong>Codex</strong> 通过自己的 <code>CODEX_HOME</code> config.toml 配置 MCP，所以在 codex agent 上写 <code>mcp.servers</code> 会报错，而非静默忽略。</li>
+  </ul>
+
+  <h3 id="f-providers" class="anchor">模型 Provider <span class="pill ok">2026-06-10</span></h3>
+  <p>每个 agent 在 <code>agent-card.yaml</code> 的 <code>runtime</code> 块里选自己的模型后端：<code>claude</code>（Anthropic 及 DeepSeek/Zhipu 等兼容端点）或 <code>codex</code>。高层字段 <code>provider</code> / <code>baseURL</code> / <code>apiKey</code> / <code>model</code> 被翻译成 CLI 认的环境变量（见 <code>internal/wrapper/runtime.go</code>）。</p>
+  <p><strong>关键规则：</strong>wrapper 只注入你真正写了的变量。<code>baseURL</code> 和 <code>apiKey</code> <strong>同时为空</strong>时<strong>不导出任何 <code>ANTHROPIC_*</code></strong>，<code>claude</code> 就回退到<strong>它自己存的登录</strong>。<code>${VAR}</code> 严格展开（变量未设则 agent 启动即报错）；<code>baseURL</code> 非空但 <code>apiKey</code> 空会被拒绝（否则下游静默 401）。</p>
+  <p><strong>A. Claude Code 本地登录（无 API key）。</strong>复用 <code>claude</code> 已登录的订阅 / OAuth（先跑 <code>claude</code> 再 <code>/login</code>）。</p>
+  <pre><code>runtime:
+  command: claude
+  provider: anthropic
+  baseURL: ""        # 空 → 不设 ANTHROPIC_BASE_URL
+  apiKey: ""         # 空 → 无 token → claude 用自己的登录
+  model: ""          # 空 → Claude Code 默认；或写 claude-opus-4-8
+  timeout: 600s</code></pre>
+  <p class="muted">前提：跑 <code>ahsir start</code> 的用户 / <code>$HOME</code> 与 <code>~/.claude</code> 登录一致，且启动环境里<strong>没有 export <code>ANTHROPIC_API_KEY</code> / <code>ANTHROPIC_AUTH_TOKEN</code> / <code>ANTHROPIC_BASE_URL</code></strong>（否则会盖过登录、改走 API 计费）。</p>
+  <ul>
+    <li><strong>B. Anthropic API key：</strong><code>provider: anthropic</code> + <code>apiKey: ${ANTHROPIC_API_KEY}</code>，<code>model</code> 可选。</li>
+    <li><strong>C. DeepSeek / Zhipu（Anthropic 兼容）：</strong><code>provider: deepseek</code>（或 <code>zhipu</code>）+ <code>apiKey: ${MODEL_API_KEY}</code> + <code>model: deepseek-v4-pro</code>；<code>baseURL</code> 走 provider 自带默认，不用写。</li>
+    <li><strong>D. Codex：</strong><code>command: codex</code> + <code>provider: codex</code>，用每 agent 独立的 <code>CODEX_HOME</code> 和 Codex 自己的登录；此处不支持 <code>baseURL</code>。</li>
+  </ul>
+  <p class="muted"><code>ahsir agent new</code> 脚手架默认写 Anthropic —— 方案 B（<code>provider: anthropic</code>、不写 <code>baseURL</code> → 官方 <code>api.anthropic.com</code>、<code>apiKey: ${ANTHROPIC_AUTH_TOKEN}</code>、<code>model: claude-opus-4-8</code>）。要用方案 A（本地登录）传 <code>--api-key-env ""</code>；要 C/D 传 <code>--provider deepseek|zhipu|codex</code>。改卡后<strong>重启该 agent</strong>（控制台「重启生效」或 <code>POST /admin/agents/{name}/restart</code>）才生效。</p>
+
+  <h3 id="f-obs" class="anchor">可观测性</h3>
+  <ul>
+    <li><strong><code>ahsir trace [contextId]</code></strong> —— 把 invocation ledger 呈现为 agent
+      调用时间线：id、source（带 speaker）、agent、method、状态、耗时、预览。</li>
+    <li><strong><code>ahsir history &lt;agent&gt; &lt;contextId&gt;</code></strong> —— 单段会话的
+      完整 transcript 回放。</li>
+    <li><strong><code>ahsir doctor</code></strong> —— 健康检查清单：config 文件、PATH 上的 provider
+      CLI、scheduler 可达性、各 agent 在线状态、以及 CLI 是否能找到 admin token。</li>
+    <li><strong>结构化日志。</strong> scheduler 会 tee agent 的 stdout，于是 agent 间的
+      <code>A2A_CALL</code> 派发、turn 耗时、token/cost 统计都能在一处 grep 到。</li>
+  </ul>
+
+  <h3 id="f-auth" class="anchor">鉴权 <span class="pill ok">2026-06-08</span></h3>
+  <p><strong>控制面</strong>——agent 生命周期与 registry 写——由单个 admin token 守门；
+  <strong>数据面</strong>（chat、history、tasks、trace、list）在本基线中保持开放。</p>
+  <ul>
+    <li><strong>自动生成 token。</strong> <code>ahsir start</code> 首次运行时在 <code>ahsir.yaml</code>
+      旁写一个 <code>0600</code> 的 <code>admin-token</code> 文件，之后复用。<code>AHSIR_ADMIN_TOKEN</code>
+      可覆盖该文件（CI / 容器），且不落任何磁盘。</li>
+    <li><strong>同用户零摩擦。</strong> CLI 读同一个文件，所以 <code>agent new/delete</code> 直接可用；
+      另一个 OS 用户——读不到该文件——被挡在控制面之外。</li>
+    <li><strong>覆盖保护。</strong> 未鉴权的同名注册被拒（<code>401</code>），堵住 registry 静默覆盖
+      漏洞。scheduler 拉起的 agent 通过 <code>--admin-token</code> 用该 token 鉴权自己的心跳。</li>
+    <li><strong>internal token 泄漏修复。</strong> scheduler 只把 per-agent 的 internal token 发往
+      它在 spawn 时记录的 loopback 地址——绝不发往 registry card 里的 URL（写操作本可把它改指向
+      攻击者）。仅凭 card 已知的 agent 不会拿到 internal token。</li>
+  </ul>
+</section>
+
+<!-- ===================== 6 CLI ===================== -->
+<section id="cli" class="anchor">
+  <h2>6 · CLI 参考</h2>
+  <p class="lead-sub">除 <code>start</code> 外，每个命令都通过 gateway 与运行中的 scheduler 通信
+  （默认 <code>--scheduler http://127.0.0.1:9800</code>）。</p>
+  <table>
+    <tr><th>命令</th><th>用途</th></tr>
+    <tr><td><code>ahsir start [config]</code></td><td>启动长驻 scheduler（默认 config：<code>ahsir.yaml</code>）。首次运行生成 admin token。</td></tr>
+    <tr><td><code>ahsir list [--json]</code></td><td>列出已注册 agent（<code>name · url · skills</code>）。</td></tr>
+    <tr><td><code>ahsir chat &lt;agent&gt; "&lt;msg&gt;" [--context ID] [--as NAME] [--async] [--stream]</code></td>
+      <td>发消息、打印回复。<code>--context</code> 跨调用保留记忆；<code>--as</code> 用于共享 context
+      归因；<code>--async</code> 返回 task id；<code>--stream</code> 逐 token 输出。</td></tr>
+    <tr><td><code>ahsir status &lt;agent&gt; &lt;task-id&gt;</code></td><td>打印 task 状态 JSON（轮询异步 turn）。</td></tr>
+    <tr><td><code>ahsir trace [contextId] [--json]</code></td><td>invocation ledger 时间线，可按 context 过滤。</td></tr>
+    <tr><td><code>ahsir history &lt;agent&gt; &lt;contextId&gt; [--json]</code></td><td>回放某 context 的 transcript（speaker、问、答）。</td></tr>
+    <tr><td><code>ahsir doctor [--config path]</code></td><td>健康检查清单，含 auth token 可发现性。</td></tr>
+    <tr><td><code>ahsir ping</code></td><td>可达性探测；在线 exit 0，离线 exit 2。</td></tr>
+    <tr><td><code>ahsir ui [--addr host:port] [--scheduler URL]</code></td><td>启动 Web 控制台（默认 <code>127.0.0.1:9801</code>）—— 一个代理 gateway 的独立进程。</td></tr>
+    <tr><td><code>ahsir agent new &lt;name&gt; [flags]</code></td><td>生成 agent card、注册、并拉起。flags：<code>--prompt --provider --model --base-url --api-key-env --skill --allow-fs --mcp-config --pool-max-active --pool-overload-policy</code>。</td></tr>
+    <tr><td><code>ahsir agent delete &lt;name&gt;</code></td><td>停掉运行中的 agent（workspace 文件保留）。</td></tr>
+    <tr><td><code>ahsir agent list-configs</code></td><td>显示 <code>ahsir.yaml</code> 中声明的 agent，无论是否在运行。</td></tr>
+  </table>
+</section>
+
+<!-- ===================== 7 配置 ===================== -->
+<section id="config" class="anchor">
+  <h2>7 · 配置</h2>
+
+  <h3 id="cfg-scheduler" class="anchor">ahsir.yaml —— scheduler 配置</h3>
+<pre><code>agents:
+  - name: backend
+    workspace: /home/user/.ahsir/agents/backend  # 私有 .a2a 状态（每 agent 唯一）
+    workdir: /home/user/projects/backend          # 可选 cwd；默认 = workspace，可多 agent 共享
+    port: 0            # 0 = 从 port_range 自动分配
+
+registry:
+  host: "127.0.0.1"    # 仅 loopback
+  port: 9800
+  heartbeat_interval: 10s
+  heartbeat_timeout: 30s
+
+timeouts:
+  chat: 10m            # gateway 转发 deadline；须 >= 各 agent 的 runtime.timeout
+  task_status: 30s
+
+port_range:
+  start: 9802
+  end: 9900</code></pre>
+  <p class="muted">运行时状态就放在该文件旁边：<code>.ahsir/ledger.jsonl</code>（invocation ledger）
+  与 <code>admin-token</code>（0600）。两者都已 git-ignore。</p>
+
+  <h3 id="cfg-agent" class="anchor">agent-card.yaml —— 一个 persona</h3>
+<pre><code>name: teacher
+description: A teacher agent that answers questions.
+version: "1.0.0"
+skills:
+  - name: teaching
+    description: Explain concepts and answer questions
+claude:
+  systemPrompt: |
+    You are a helpful, knowledgeable teacher...
+  maxAgentCalls: 0          # 最大子 agent 委派轮数（0 = 不委派）
+runtime:
+  command: claude           # 或 codex
+  provider: anthropic       # anthropic | zhipu | deepseek | codex
+  baseURL: ""               # 留空则用 provider 默认（anthropic → api.anthropic.com）
+  apiKey: "${ANTHROPIC_AUTH_TOKEN}" # 字面值或 ${ENV}；留空则用本地 claude 登录
+  model: claude-opus-4-8
+  timeout: 300s             # per-turn deadline
+  args: []                  # 额外 CLI flag（sandbox/permission 类 flag 会被剥离）
+filesystem:
+  enabled: false            # true + allowed_paths 以授予文件工具
+  allowed_paths: []
+network:
+  bind: "127.0.0.1"         # 非 loopback 会被拒绝
+pool:
+  max_active: 0             # 单 agent 并发活跃 provider 进程上限（0 = 不限）
+  overload_policy: reject   # reject | evict-lru
+  queue_depth: 4            # per-context FIFO turn 队列（0 = fail-fast busy）
+  idle_ttl: 30m
+  evicted_ttl: 720h
+  max_evicted: 1000
+streaming:
+  partial_messages: false   # true 则通过 SSE 发送 token delta
+mcp:                        # 省略即「零 MCP server」（隔离默认）
+  servers:                  # claude mcpServers 形状，原样透传
+    docs:
+      command: npx
+      args: ["-y", "@modelcontextprotocol/server-docs"]</code></pre>
+  <p class="muted">agent 一律运行 <code>claude --strict-mcp-config</code>，因此绝不继承宿主的全局/项目 MCP server —— 只加载 <code>mcp.servers</code> 声明的内容（默认什么都没有）。</p>
+</section>
+
+<!-- ===================== 8 API ===================== -->
+<section id="api" class="anchor">
+  <h2>8 · HTTP API</h2>
+
+  <h4>Scheduler gateway (:9800)</h4>
+  <table>
+    <tr><th>Method / Path</th><th>面</th><th>用途</th></tr>
+    <tr><td><code>GET /agents</code></td><td>数据</td><td>列出 agent card（URL 经 scheduler 改写）。</td></tr>
+    <tr><td><code>GET /agents/{name}</code></td><td>数据</td><td>单个 agent card。</td></tr>
+    <tr><td><code>POST /agents/{name}/chat</code></td><td>数据</td><td>缓冲式 chat 转发；支持 <code>speaker</code> 与 <code>async</code>。</td></tr>
+    <tr><td><code>GET /agents/{name}/tasks/{id}</code></td><td>数据</td><td>task 状态（轮询异步 turn）。</td></tr>
+    <tr><td><code>GET /agents/{name}/history/{ctx}</code></td><td>数据</td><td>transcript 回放（带 internal token 代理）。</td></tr>
+    <tr><td><code>POST /a2a/{name}</code></td><td>数据</td><td>原生 A2A JSON-RPC 代理（message/send、message/stream、tasks/*）。</td></tr>
+    <tr><td><code>GET /invocations</code></td><td>数据</td><td>ledger 视图（支撑 <code>trace</code>）。</td></tr>
+    <tr><td><code>POST /rooms</code>、<code>GET /rooms[/{id}]</code></td><td>数据</td><td>房间：发起 / 列出 / 读取。<code>mode</code> = <code>relay</code>（多 Agent 协同）或 <code>roundtable</code>（共识）。</td></tr>
+    <tr><td><code>POST /rooms/{id}/say</code>、<code>POST /rooms/{id}/stop</code></td><td>数据</td><td>房间：operator 发言 / 结束。</td></tr>
+    <tr><td><code>GET /config/timeouts</code></td><td>数据</td><td>scheduler 超时（CLI 据此对齐自身）。</td></tr>
+    <tr><td><code>POST /agents</code>、<code>DELETE /agents/{name}</code></td><td><b>控制</b></td><td>registry 写 —— 需 <code>X-Ahsir-Admin-Token</code>。</td></tr>
+    <tr><td><code>POST/DELETE /admin/agents[/{name}]</code></td><td><b>控制</b></td><td>agent start/stop —— 需 <code>X-Ahsir-Admin-Token</code>。</td></tr>
+  </table>
+
+  <h4>Agent wrapper（loopback，每 agent 一个）</h4>
+  <table>
+    <tr><th>Method / Path</th><th>用途</th></tr>
+    <tr><td><code>GET /healthz</code></td><td>存活（进程 + HTTP 起来了）。</td></tr>
+    <tr><td><code>GET /readyz</code></td><td>就绪（card 已加载、executor 已接线）。</td></tr>
+    <tr><td><code>GET /.well-known/agent-card.json</code></td><td>A2A card 发现。</td></tr>
+    <tr><td><code>POST /</code>（A2A JSON-RPC）</td><td>message/send、message/stream、tasks/* —— 需 <code>X-Ahsir-Internal-Token</code>。</td></tr>
+    <tr><td><code>GET /history?contextId=</code></td><td>transcript —— 受 internal token 校验。</td></tr>
+  </table>
+</section>
+
+<!-- ===================== 9 安全 ===================== -->
+<section id="security" class="anchor">
+  <h2>9 · 安全模型</h2>
+  <p class="lead-sub">本基线确立了一条真实的信任边界，并堵上了 2026-06-07 对抗式 review 里风险最高的
+  几个洞。它同时明确说明<em>尚未</em>覆盖什么。</p>
+
+  <h4>两个 token，两种用途</h4>
+  <table>
+    <tr><th>Token</th><th>保护对象</th><th>生命周期</th></tr>
+    <tr><td><code>X-Ahsir-Admin-Token</code></td><td>控制面：agent start/stop、registry 写。</td>
+      <td>自动生成的 0600 文件（在 <code>ahsir.yaml</code> 旁），或 <code>AHSIR_ADMIN_TOKEN</code>。
+      由 scheduler、CLI、被拉起的 agent 共享。</td></tr>
+    <tr><td><code>X-Ahsir-Internal-Token</code></td><td>scheduler→agent 的 A2A 调用（每 agent 一个）。</td>
+      <td>每次 spawn 生成；只发往该 agent 记录在案的 loopback 地址。</td></tr>
+  </table>
+
+  <h4>信任边界</h4>
+  <p>能读到 admin-token 文件的那个 OS 用户。在共享机器上，另一个用户——被 <code>0600</code> 挡住——
+  无法 start、stop 或劫持 agent。数据面（chat/读）在此层级保持开放，因为威胁模型是多用户对控制面的
+  滥用，而非在 loopback 上窃听。</p>
+
+  <h4>已就位的 hardening</h4>
+  <ul>
+    <li>race-free 的 registry 与 session pool；<code>go test -race</code> 是可信门槛。</li>
+    <li>provider arg sanitizer 从 <code>runtime.args</code> 剥离 sandbox/permission 绕过类 flag。</li>
+    <li>所有 gateway body 上 <code>MaxBytesReader</code>；ledger 预览限 512 字节；ledger、agent-card、
+      transcript 文件均 <code>0600</code> 写入。</li>
+    <li>非 loopback 的 <code>network.bind</code> 被拒；A2A 代理只在响应体转发完成后才落定 ledger
+      （中断的流记为 failed）。</li>
+  </ul>
+
+  <div class="callout warn"><span class="k">已推迟（明说，而非暗示）。</span> 非 loopback / 跨机访问；
+    多 principal 与 RBAC；数据面鉴权；把 token rotation 做成命令（今天的做法：删文件 + 重启）。
+    代码结构已为"引入非 loopback bind 时再补数据面守门"留好口子。</div>
+</section>
+
+<!-- ===================== 10 ROADMAP ===================== -->
+<section id="roadmap" class="anchor">
+  <h2>10 · Roadmap</h2>
+  <p class="lead-sub">方向由 2026-06-07 对抗式 review 与已确认的产品决策给定：<em>CLI + skill +
+  hardened scheduler + 可观测性</em>，扩展以真实信号为前置触发。</p>
+
+  <h4>已完成</h4>
+  <ul>
+    <li><span class="pill ok">已交付</span> Hardening 批次（并发、生命周期、运行时策略、ingress hygiene）。</li>
+    <li><span class="pill ok">已交付</span> CLI-first 可观测性：<code>ahsir trace</code>、<code>ahsir doctor</code>。</li>
+    <li><span class="pill ok">已交付</span> 共享 context 协作：speaker、transcript、FIFO 队列、async。</li>
+    <li><span class="pill ok">已交付</span> Auth 基线：控制面 token、internal-token 泄漏修复。</li>
+  </ul>
+
+  <h4>已推迟 —— 触发式</h4>
+  <table>
+    <tr><th>项目</th><th>触发条件</th></tr>
+    <tr><td>持久化 TaskStore + <code>tasks/resubscribe</code></td><td>真的出现外部 A2A client，或需要长任务跨重启存活。</td></tr>
+    <tr><td>Typed capability selection</td><td>fleet 规模 / 误委派超出 prompt + skill-list 路由的承载。</td></tr>
+    <tr><td>Agent template marketplace</td><td>在 policy schema 落地之后（arg sanitizer + card 权限已完成）。</td></tr>
+    <tr><td>Multi-scheduler federation</td><td>在完整的 auth / trust / bind 语义之后——<code>Remote</code> 字段今天只是占位。</td></tr>
+    <tr><td>数据面鉴权</td><td>引入非 loopback bind 时。</td></tr>
+    <tr><td>MCP server 模式 <span class="pill soon">backlog</span></td><td>有 ≥2 个 MCP-only client 需要它，或 CLI 文本协议成为故障源。已从承诺的 roadmap 移除。</td></tr>
+  </table>
+</section>
+
+<hr class="soft">
+<p class="muted" style="font-size:13px">
+  真实来源是代码与 <code>docs/superpowers/</code> 下的 spec。本页是综合性概览；与代码冲突时以代码为准。
+  生成于 2026-06-08。
+</p>
+
+</div><!-- /wrap -->
+</main>
+</div><!-- /layout -->
+</body>
+</html>

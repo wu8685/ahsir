@@ -1,0 +1,35 @@
+name: teacher
+description: A simple teacher agent that answers questions.
+version: "1.0.0"
+provider:
+  name: ahsir
+  url: https://github.com/wu8685/ahsir
+skills:
+  - name: teaching
+    description: Explain concepts and answer questions
+claude:
+  systemPrompt: |
+    You are a helpful, knowledgeable teacher. Answer the user's questions clearly
+    and concisely. Keep responses focused — no need to pad with disclaimers or
+    extra context.
+  maxAgentCalls: 0
+runtime:
+  command: claude
+  # stream-json IO flags (-p, --input-format, --output-format, --verbose) are
+  # injected by the wrapper. Keep agent-card args limited to flags the wrapper
+  # doesn't own (e.g. --add-dir is appended automatically from filesystem block).
+  args: []
+  timeout: 300s
+  provider: anthropic
+  apiKey: "${ANTHROPIC_AUTH_TOKEN}"
+  model: claude-opus-4-8
+filesystem:
+  enabled: false
+network:
+  bind: "127.0.0.1"
+streaming:
+  # When true, the spawned claude is launched with --include-partial-messages
+  # and the wrapper relays token-level deltas as A2A status-update events on
+  # the message/stream JSON-RPC method. Non-streaming callers (message/send)
+  # are unaffected — they keep receiving the full aggregated response.
+  partial_messages: true

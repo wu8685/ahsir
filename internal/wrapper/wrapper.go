@@ -1,0 +1,312 @@
+package wrapper
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"fmt"
+	"log"
+	"net"
+	"net/http"
+	"sync"
+	"time"
+
+	"github.com/a2aproject/a2a-go/a2a"
+	"github.com/a2aproject/a2a-go/a2asrv"
+)
+
+// AgentWrapperConfig configures an agent wrapper instance.
+type AgentWrapperConfig struct {
+	Port          int
+	RegistryURL   string
+	AgentCard     *a2a.AgentCard
+	InternalToken string
+	// AdminToken authenticates this agent's registry heartbeat against the
+	// scheduler's gated write path. Empty → no header (open registry).
+	AdminToken string
+}
+
+const InternalTokenHeader = "X-Ahsir-Internal-Token"
+
+// AdminTokenHeader carries the control-plane admin token on the registry
+// heartbeat. Mirrors scheduler.AdminTokenHeader (kept as a literal here to
+// avoid an import cycle wrapper↔scheduler).
+const AdminTokenHeader = "X-Ahsir-Admin-Token"
+
+// AgentWrapper ties together the A2A server, task store, and registry heartbeat.
+type AgentWrapper struct {
+	cfg        AgentWrapperConfig
+	taskStore  *TaskStore
+	transcript *TranscriptStore
+	server     *A2AServer
+	httpSrv    *http.Server
+	mu         sync.Mutex
+	running    bool
+	ready      bool
+	cancel     context.CancelFunc
+}
+
+// NewAgentWrapper creates a new agent wrapper.
+func NewAgentWrapper(cfg AgentWrapperConfig) *AgentWrapper {
+	return &AgentWrapper{
+		cfg:       cfg,
+		taskStore: NewTaskStore(),
+	}
+}
+
+// TaskStore returns the wrapper's task store.
+func (w *AgentWrapper) TaskStore() *TaskStore {
+	return w.taskStore
+}
+
+// SetTranscriptStore wires the per-context transcript store. Call before
+// SetupExecutor so turns get recorded; the /history endpoint reads whatever
+// store is set at request time (nil → empty history).
+func (w *AgentWrapper) SetTranscriptStore(store *TranscriptStore) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.transcript = store
+}
+
+// SetupExecutor wires the executor (Session factory + agent calling) into
+// the A2A server. openSession is typically SessionPool.LookupOrCreate so
+// multiple message/send calls sharing a contextID hit the same long-running
+// claude process — conversation history is held by claude itself, not by
+// the wrapper.
+func (w *AgentWrapper) SetupExecutor(openSession func(ctx context.Context, contextID string) (Session, error), listAgents func() []*a2a.AgentCard, callAgent func(ctx context.Context, agentName, contextID, task string) (string, error), maxDepth int, basePrompt string) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.server == nil {
+		return
+	}
+	executor := NewExecutor(ExecutorConfig{
+		OpenSession: openSession,
+		ListAgents:  listAgents,
+		CallAgent:   callAgent,
+		MaxDepth:    maxDepth,
+		BasePrompt:  basePrompt,
+		SelfName:    w.agentName(),
+		Transcript:  w.transcript,
+	})
+	w.server.SetExecutor(executor.Execute)
+	// Stream path uses the SAME Executor (and therefore the same Session via
+	// pool lookup), so streaming and non-streaming requests on one contextID
+	// share conversation state inside the underlying claude process.
+	w.server.SetExecutorStream(executor.ExecuteStream)
+	w.ready = true
+}
+
+// agentName returns the agent's own name from the configured card, or "" if
+// no card was supplied. Used to tag inter-agent log lines.
+func (w *AgentWrapper) agentName() string {
+	if w.cfg.AgentCard == nil {
+		return ""
+	}
+	return w.cfg.AgentCard.Name
+}
+
+// Start starts the HTTP server and begins registry heartbeat.
+func (w *AgentWrapper) Start(ctx context.Context) error {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+
+	if w.running {
+		return fmt.Errorf("wrapper already running")
+	}
+
+	ctx, w.cancel = context.WithCancel(ctx)
+
+	w.server = NewA2AServer(w.taskStore, nil)
+	w.server.SetSelfName(w.agentName())
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/healthz", w.handleHealthz)
+	mux.HandleFunc("/readyz", w.handleReadyz)
+	if w.cfg.AgentCard != nil {
+		mux.Handle(a2asrv.WellKnownAgentCardPath, a2asrv.NewStaticAgentCardHandler(w.cfg.AgentCard))
+	}
+	// /history serves the per-context transcript (full conversation content)
+	// — token-gated like the A2A surface; the file modes are only the
+	// fallback line of defence.
+	mux.Handle("/history", w.requireInternalToken(http.HandlerFunc(w.handleHistory)))
+	mux.Handle("/", w.requireInternalToken(w.server))
+
+	addr := fmt.Sprintf("127.0.0.1:%d", w.cfg.Port)
+	w.httpSrv = &http.Server{
+		Addr:    addr,
+		Handler: mux,
+	}
+
+	// Bind synchronously so a port conflict (or any listen failure) surfaces
+	// as Start's return value instead of being swallowed inside a goroutine —
+	// the caller must be able to tell "agent is up" from "agent never
+	// listened".
+	ln, err := net.Listen("tcp", addr)
+	if err != nil {
+		w.cancel()
+		w.cancel = nil
+		w.server = nil
+		w.httpSrv = nil
+		return fmt.Errorf("agent wrapper listen on %s: %w", addr, err)
+	}
+
+	// Capture the server locally so the goroutine never reads the w.httpSrv
+	// field, which other methods mutate under w.mu.
+	srv := w.httpSrv
+	name := w.agentName()
+	go func() {
+		if err := srv.Serve(ln); err != nil && err != http.ErrServerClosed {
+			log.Printf("agent wrapper [%s]: http server failed: %v", name, err)
+		}
+	}()
+
+	// Start heartbeat to registry if configured
+	if w.cfg.RegistryURL != "" {
+		go w.heartbeatLoop(ctx)
+	}
+
+	w.running = true
+	return nil
+}
+
+func (w *AgentWrapper) requireInternalToken(next http.Handler) http.Handler {
+	if w.cfg.InternalToken == "" {
+		return next
+	}
+	return http.HandlerFunc(func(rw http.ResponseWriter, r *http.Request) {
+		if r.Header.Get(InternalTokenHeader) != w.cfg.InternalToken {
+			writeWrapperStatus(rw, http.StatusUnauthorized, "unauthorized")
+			return
+		}
+		next.ServeHTTP(rw, r)
+	})
+}
+
+func (w *AgentWrapper) handleHealthz(rw http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet && r.Method != http.MethodHead {
+		rw.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+	writeWrapperStatus(rw, http.StatusOK, "ok")
+}
+
+func (w *AgentWrapper) handleReadyz(rw http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet && r.Method != http.MethodHead {
+		rw.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+	w.mu.Lock()
+	ready := w.running && w.ready && w.server != nil && w.cfg.AgentCard != nil
+	w.mu.Unlock()
+	if !ready {
+		writeWrapperStatus(rw, http.StatusServiceUnavailable, "not_ready")
+		return
+	}
+	writeWrapperStatus(rw, http.StatusOK, "ready")
+}
+
+// handleHistory serves GET /history?contextId=… — the transcript replay path
+// backing `ahsir history`. Unknown contexts (and a wrapper without a store)
+// answer an empty list: "no prior history" is a normal state, not an error.
+func (w *AgentWrapper) handleHistory(rw http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		rw.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+	contextID := r.URL.Query().Get("contextId")
+	if contextID == "" {
+		writeWrapperStatus(rw, http.StatusBadRequest, "contextId is required")
+		return
+	}
+	w.mu.Lock()
+	store := w.transcript
+	w.mu.Unlock()
+
+	turns := []TranscriptTurn{}
+	if store != nil {
+		got, err := store.Read(contextID)
+		if err != nil {
+			writeWrapperStatus(rw, http.StatusInternalServerError, "read transcript: "+err.Error())
+			return
+		}
+		if got != nil {
+			turns = got
+		}
+	}
+	rw.Header().Set("Content-Type", "application/json")
+	rw.WriteHeader(http.StatusOK)
+	_ = json.NewEncoder(rw).Encode(turns)
+}
+
+func writeWrapperStatus(rw http.ResponseWriter, status int, state string) {
+	rw.Header().Set("Content-Type", "application/json")
+	rw.WriteHeader(status)
+	_ = json.NewEncoder(rw).Encode(map[string]string{"status": state})
+}
+
+// Stop gracefully shuts down the HTTP server.
+func (w *AgentWrapper) Stop(ctx context.Context) error {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+
+	if !w.running {
+		return nil
+	}
+
+	if w.cancel != nil {
+		w.cancel()
+	}
+
+	if w.httpSrv != nil {
+		if err := w.httpSrv.Shutdown(ctx); err != nil {
+			return fmt.Errorf("shutdown server: %w", err)
+		}
+	}
+
+	w.running = false
+	w.ready = false
+	return nil
+}
+
+func (w *AgentWrapper) heartbeatLoop(ctx context.Context) {
+	ticker := time.NewTicker(10 * time.Second)
+	defer ticker.Stop()
+
+	// Register immediately
+	w.registerWithRegistry()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			w.registerWithRegistry()
+		}
+	}
+}
+
+func (w *AgentWrapper) registerWithRegistry() {
+	cardData, err := json.Marshal(w.cfg.AgentCard)
+	if err != nil {
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost,
+		w.cfg.RegistryURL+"/agents", bytes.NewReader(cardData))
+	if err != nil {
+		return
+	}
+	req.Header.Set("Content-Type", "application/json")
+	if w.cfg.AdminToken != "" {
+		req.Header.Set(AdminTokenHeader, w.cfg.AdminToken)
+	}
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return
+	}
+	resp.Body.Close()
+}

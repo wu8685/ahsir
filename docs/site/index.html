@@ -1,0 +1,786 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ahsir — Documentation</title>
+<style>
+  :root {
+    --bg: #0f1115;
+    --panel: #171a21;
+    --panel-2: #1d2129;
+    --ink: #d7dce4;
+    --ink-soft: #9aa4b2;
+    --ink-faint: #6b7480;
+    --accent: #6ea8fe;
+    --accent-2: #8ad0a8;
+    --warn: #e0b673;
+    --danger: #e08585;
+    --border: #272c36;
+    --code-bg: #11141a;
+    --radius: 10px;
+    --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+    --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  }
+  * { box-sizing: border-box; }
+  html { scroll-behavior: smooth; }
+  body {
+    margin: 0; background: var(--bg); color: var(--ink);
+    font-family: var(--sans); font-size: 15.5px; line-height: 1.65;
+  }
+  a { color: var(--accent); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+  code { font-family: var(--mono); font-size: 0.88em; background: var(--code-bg);
+    padding: 0.12em 0.4em; border-radius: 5px; border: 1px solid var(--border); }
+  pre { background: var(--code-bg); border: 1px solid var(--border); border-radius: var(--radius);
+    padding: 16px 18px; overflow-x: auto; font-family: var(--mono); font-size: 13px; line-height: 1.55; }
+  pre code { background: none; border: none; padding: 0; font-size: inherit; }
+  .layout { display: grid; grid-template-columns: 290px 1fr; min-height: 100vh; }
+  /* Sidebar */
+  nav.toc {
+    position: sticky; top: 0; align-self: start; height: 100vh; overflow-y: auto;
+    background: var(--panel); border-right: 1px solid var(--border); padding: 26px 20px 60px;
+  }
+  nav.toc .brand { font-family: var(--mono); font-weight: 700; font-size: 20px; color: #fff;
+    letter-spacing: 0.5px; margin-bottom: 2px; }
+  nav.toc .brand span { color: var(--accent); }
+  nav.toc .tag { color: var(--ink-faint); font-size: 12px; margin-bottom: 14px; }
+  nav.toc .lang { display: flex; gap: 6px; margin-bottom: 22px; font-family: var(--mono); font-size: 12px; }
+  nav.toc .lang a { padding: 3px 10px; border: 1px solid var(--border); border-radius: 20px; color: var(--ink-soft); }
+  nav.toc .lang a.active { background: var(--accent); border-color: var(--accent); color: #0f1115; font-weight: 700; }
+  nav.toc .lang a:hover { text-decoration: none; color: var(--ink); }
+  nav.toc .lang a.active:hover { color: #0f1115; }
+  nav.toc ol { list-style: none; margin: 0; padding: 0; counter-reset: sec; }
+  nav.toc > ol > li { margin: 2px 0; }
+  nav.toc > ol > li > a { display: block; padding: 5px 8px; border-radius: 6px; color: var(--ink-soft);
+    font-weight: 600; font-size: 13.5px; }
+  nav.toc > ol > li > a:hover { background: var(--panel-2); color: var(--ink); text-decoration: none; }
+  nav.toc ol ol { margin: 2px 0 8px 6px; padding-left: 10px; border-left: 1px solid var(--border); }
+  nav.toc ol ol a { display: block; padding: 3px 8px; border-radius: 6px; color: var(--ink-faint);
+    font-size: 12.5px; }
+  nav.toc ol ol a:hover { color: var(--ink); text-decoration: none; }
+  /* Content */
+  main { padding: 0 0 120px; max-width: 920px; }
+  .wrap { padding: 40px 56px 0; }
+  header.hero { padding: 56px 56px 30px; border-bottom: 1px solid var(--border);
+    background: linear-gradient(180deg, #14171d, var(--bg)); }
+  header.hero h1 { margin: 0 0 8px; font-size: 34px; letter-spacing: -0.5px; color: #fff; }
+  header.hero h1 .mono { font-family: var(--mono); color: var(--accent); }
+  header.hero p.lead { margin: 0; font-size: 17px; color: var(--ink-soft); max-width: 760px; }
+  header.hero .meta { margin-top: 18px; font-size: 12.5px; color: var(--ink-faint); font-family: var(--mono); }
+  section { padding-top: 38px; }
+  h2 { font-size: 24px; color: #fff; margin: 8px 0 6px; padding-bottom: 8px;
+    border-bottom: 1px solid var(--border); letter-spacing: -0.3px; }
+  h3 { font-size: 18px; color: #eef2f7; margin: 30px 0 6px; }
+  h4 { font-size: 15px; color: var(--accent-2); margin: 22px 0 4px; font-family: var(--mono); }
+  p { margin: 10px 0; }
+  ul, ol.body { margin: 10px 0; padding-left: 22px; }
+  li { margin: 4px 0; }
+  .lead-sub { color: var(--ink-soft); font-size: 15px; }
+  table { border-collapse: collapse; width: 100%; margin: 14px 0; font-size: 13.5px; }
+  th, td { border: 1px solid var(--border); padding: 8px 11px; text-align: left; vertical-align: top; }
+  th { background: var(--panel-2); color: #fff; font-weight: 600; }
+  td code { white-space: nowrap; }
+  .callout { border: 1px solid var(--border); border-left: 3px solid var(--accent);
+    background: var(--panel); border-radius: 8px; padding: 12px 16px; margin: 16px 0; font-size: 14px; }
+  .callout.warn { border-left-color: var(--warn); }
+  .callout.principle { border-left-color: var(--accent-2); }
+  .callout .k { font-weight: 700; color: #fff; }
+  .pill { display: inline-block; font-family: var(--mono); font-size: 11px; padding: 1px 7px;
+    border-radius: 20px; border: 1px solid var(--border); color: var(--ink-soft); background: var(--panel-2); }
+  .pill.ok { color: var(--accent-2); border-color: #2c4434; }
+  .pill.soon { color: var(--warn); border-color: #4a3c25; }
+  .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+  .card { background: var(--panel); border: 1px solid var(--border); border-radius: var(--radius); padding: 14px 16px; }
+  .card h4 { margin-top: 0; }
+  .muted { color: var(--ink-faint); }
+  hr.soft { border: none; border-top: 1px solid var(--border); margin: 30px 0; }
+  .anchor { scroll-margin-top: 16px; }
+  @media (max-width: 880px) {
+    .layout { grid-template-columns: 1fr; }
+    nav.toc { position: static; height: auto; border-right: none; border-bottom: 1px solid var(--border); }
+    .wrap, header.hero { padding-left: 22px; padding-right: 22px; }
+    .grid2 { grid-template-columns: 1fr; }
+  }
+</style>
+</head>
+<body>
+<div class="layout">
+
+<nav class="toc">
+  <div class="brand"><span>ah</span>sir</div>
+  <div class="tag">local-first multi-agent control plane</div>
+  <div class="lang"><a href="index.html" class="active">EN</a><a href="index.zh.html">中文</a></div>
+  <ol>
+    <li><a href="#overview">1 · Overview</a>
+      <ol>
+        <li><a href="#what">What ahsir is</a></li>
+        <li><a href="#what-not">What it is not</a></li>
+        <li><a href="#mental-model">Mental model</a></li>
+      </ol>
+    </li>
+    <li><a href="#principles">2 · Design principles</a></li>
+    <li><a href="#architecture">3 · Architecture</a>
+      <ol>
+        <li><a href="#components">Components</a></li>
+        <li><a href="#flow">Request flow</a></li>
+        <li><a href="#process-model">Process &amp; trust model</a></li>
+      </ol>
+    </li>
+    <li><a href="#concepts">4 · Core concepts</a></li>
+    <li><a href="#features">5 · Features</a>
+      <ol>
+        <li><a href="#f-lifecycle">Scheduling &amp; lifecycle</a></li>
+        <li><a href="#f-sessions">Sessions &amp; recovery</a></li>
+        <li><a href="#f-shared">Shared-context collaboration</a></li>
+        <li><a href="#f-roundtable">Roundtable (group chat)</a></li>
+        <li><a href="#f-console">Web console</a></li>
+        <li><a href="#f-mcp">MCP isolation</a></li>
+        <li><a href="#f-providers">Model providers</a></li>
+        <li><a href="#f-obs">Observability</a></li>
+        <li><a href="#f-auth">Authentication</a></li>
+      </ol>
+    </li>
+    <li><a href="#cli">6 · CLI reference</a></li>
+    <li><a href="#config">7 · Configuration</a>
+      <ol>
+        <li><a href="#cfg-scheduler">ahsir.yaml</a></li>
+        <li><a href="#cfg-agent">agent-card.yaml</a></li>
+      </ol>
+    </li>
+    <li><a href="#api">8 · HTTP API surface</a></li>
+    <li><a href="#security">9 · Security model</a></li>
+    <li><a href="#roadmap">10 · Roadmap</a></li>
+  </ol>
+</nav>
+
+<main>
+<header class="hero">
+  <h1><span class="mono">ahsir</span> — A Multi-Agent Scheduler over A2A</h1>
+  <p class="lead">A small Go control plane that runs LLM-backed agents as local processes, lets them
+  talk over the A2A protocol, and lets Claude Code or Codex drive the fleet through a CLI and a
+  bundled skill — local-first, recoverable, and auditable.</p>
+  <div class="meta">Official documentation · generated 2026-06-08</div>
+</header>
+
+<div class="wrap">
+
+<!-- ===================== 1 OVERVIEW ===================== -->
+<section id="overview" class="anchor">
+  <h2>1 · Overview</h2>
+
+  <h3 id="what" class="anchor">What ahsir is</h3>
+  <p><code>ahsir</code> turns the <strong>Claude</strong> and <strong>Codex</strong> CLIs into
+  <strong>A2A-compatible runtimes</strong> and schedules a fleet of them on one machine. Each agent
+  is a persistent persona — a fixed system prompt, a provider backend, its own filesystem
+  permissions, and durable per-conversation memory — addressable over the
+  <a href="https://google.github.io/A2A/">A2A protocol</a>. A central scheduler owns agent
+  lifecycle, a discovery registry, and an HTTP gateway that mediates every call so traffic is
+  visible, recoverable, and auditable.</p>
+  <p>You drive it two ways, both backed by the same CLI:</p>
+  <ul>
+    <li><strong>Directly</strong> — <code>ahsir list / chat / status / trace / history / doctor</code>.</li>
+    <li><strong>Through an agentic host</strong> — Claude Code or Codex load the bundled
+      <code>orchestrator</code> skill, which teaches the host when to delegate to a specialist agent
+      and how to call the CLI.</li>
+  </ul>
+
+  <h3 id="what-not" class="anchor">What it is not</h3>
+  <ul>
+    <li><span class="k">Not an MCP replacement.</span> The control surface is the CLI plus a skill.
+      An MCP server mode was considered and deliberately deferred (see <a href="#roadmap">Roadmap</a>).</li>
+    <li><span class="k">Not a cloud agent platform.</span> The differentiator is being local-first,
+      CLI-native, recoverable, and auditable — not a hosted multi-tenant service.</li>
+    <li><span class="k">Not (yet) a multi-machine system.</span> The scheduler binds loopback; the
+      trust boundary is a single OS user on one host.</li>
+  </ul>
+
+  <h3 id="mental-model" class="anchor">Mental model</h3>
+  <p>Think of ahsir as a <em>process supervisor + message router for personas</em>. A persona
+  (agent) is configured once in an <code>agent-card.yaml</code>; the scheduler spawns it, keeps it
+  alive, registers it for discovery, and routes A2A messages to it. Conversations are keyed by an
+  A2A <code>contextId</code>; the agent holds memory for that context inside a long-running provider
+  subprocess, and the scheduler can resume it after a crash.</p>
+</section>
+
+<!-- ===================== 2 PRINCIPLES ===================== -->
+<section id="principles" class="anchor">
+  <h2>2 · Design principles</h2>
+  <p class="lead-sub">Every feature below is an expression of these five commitments. When two
+  goals conflict, this is the priority order used to decide.</p>
+
+  <div class="callout principle"><span class="k">1 · Local-first, zero-config by default.</span>
+    The common path — one OS user on one machine — must work with no setup. Secrets auto-generate,
+    the CLI auto-discovers them, ports auto-allocate. Friction is only introduced where a real
+    threat justifies it.</div>
+
+  <div class="callout principle"><span class="k">2 · CLI-native, not protocol-first.</span>
+    The control surface is text-in/text-out commands an agent (or a human, or a shell pipe) can
+    drive. Structured protocols (A2A on the wire, a future MCP mode) serve the CLI, not the reverse.</div>
+
+  <div class="callout principle"><span class="k">3 · Recoverable.</span>
+    A crashed agent, a killed <code>claude</code>, a restarted scheduler — none should lose a
+    conversation. State that matters (context→session mappings, the invocation ledger, transcripts)
+    is persisted so work resumes instead of restarting.</div>
+
+  <div class="callout principle"><span class="k">4 · Auditable.</span>
+    Every mediated call is recorded. <code>ahsir trace</code> reconstructs the agent-call graph;
+    <code>ahsir history</code> replays a conversation. The scheduler sits in the path precisely so
+    nothing is invisible.</div>
+
+  <div class="callout principle"><span class="k">5 · Honest boundaries.</span>
+    Where a guarantee isn't real yet, it is named as deferred rather than implied. Hardening
+    precedes expansion: the system is explicit about what is a foundation versus what is potential.</div>
+</section>
+
+<!-- ===================== 3 ARCHITECTURE ===================== -->
+<section id="architecture" class="anchor">
+  <h2>3 · Architecture</h2>
+
+  <h3 id="components" class="anchor">Components</h3>
+  <table>
+    <tr><th>Component</th><th>Package</th><th>Responsibility</th></tr>
+    <tr><td><code>ahsir</code> (scheduler + CLI)</td><td><code>cmd/ahsir</code></td>
+      <td>Boots the scheduler; provides user commands (list/chat/status/trace/history/doctor/agent).</td></tr>
+    <tr><td><code>ahsir-agent</code></td><td><code>cmd/ahsir-agent</code></td>
+      <td>One per persona. Hosts the A2A endpoint, loads the agent card, drives the provider CLI.</td></tr>
+    <tr><td>Scheduler</td><td><code>internal/scheduler</code></td>
+      <td>Agent lifecycle &amp; supervision, HTTP gateway, config, invocation ledger, admin token.</td></tr>
+    <tr><td>Registry</td><td><code>internal/registry</code></td>
+      <td>Agent registration, heartbeat liveness, name→card lookup. A pure in-memory store.</td></tr>
+    <tr><td>Wrapper</td><td><code>internal/wrapper</code></td>
+      <td>A2A server/client, executor (the agent loop), <code>SessionPool</code>, provider sessions,
+      transcript store, persistence.</td></tr>
+    <tr><td>Scheduler client</td><td><code>internal/schedulerclient</code></td>
+      <td>Thin HTTP client the CLI uses to talk to a running scheduler.</td></tr>
+  </table>
+
+  <h3 id="flow" class="anchor">Request flow</h3>
+  <p>Two entry points converge on the same agent-side path. The scheduler stays in the loop for
+  discovery, mediation, and auditing.</p>
+<pre>
+  Claude Code / Codex ──(orchestrator skill)──┐
+                                              ▼
+  human / shell ──────────► ahsir CLI ──► scheduler gateway  :9800
+                                              │   POST /agents/{name}/chat        (buffered)
+                                              │   POST /a2a/{name}                (native A2A proxy)
+                                              │   GET  /agents/{name}/tasks/{id}  (task status)
+                                              │   GET  /agents/{name}/history/{ctx}
+                                              │   GET  /agents, /invocations, /config/timeouts
+                                              │   POST/DELETE /admin/agents       (gated)
+                                              ▼
+                              registry (discovery)  +  invocation ledger (audit)
+                                              │
+                            A2A JSON-RPC message/send | message/stream
+                                              ▼
+                    ahsir-agent  :loopback        ahsir-agent  :loopback
+                    ├ A2A server (token-gated)    ├ A2A server
+                    ├ executor (agent loop)       ├ executor
+                    └ SessionPool by contextId    └ SessionPool by contextId
+                              │                              │
+                    claude --resume / codex exec resume &lt;thread&gt;
+</pre>
+  <p>A turn proceeds: gateway records an invocation in the ledger → forwards to the agent over A2A →
+  the executor opens (or resumes) the <code>Session</code> for that <code>contextId</code> → the
+  provider produces the reply → the executor records a transcript turn → the gateway settles the
+  ledger entry and returns.</p>
+
+  <h3 id="process-model" class="anchor">Process &amp; trust model</h3>
+  <ul>
+    <li>The scheduler binds <code>127.0.0.1</code> only. A non-loopback <code>network.bind</code> is
+      explicitly rejected.</li>
+    <li>Agents run as child processes of the scheduler, each on an auto-allocated loopback port.</li>
+    <li>Scheduler→agent A2A calls carry a per-agent <strong>internal token</strong> the wrapper
+      verifies; the scheduler only sends it to the loopback address it recorded at spawn time.</li>
+    <li>The control plane (agent lifecycle, registry write) is gated by an <strong>admin token</strong>.
+      The trust boundary is the OS user who can read that token's <code>0600</code> file.</li>
+  </ul>
+</section>
+
+<!-- ===================== 4 CONCEPTS ===================== -->
+<section id="concepts" class="anchor">
+  <h2>4 · Core concepts</h2>
+  <table>
+    <tr><th>Term</th><th>Meaning</th></tr>
+    <tr><td><strong>Agent / persona</strong></td>
+      <td>A configured specialist: fixed system prompt, provider, filesystem permissions, skills.
+      One <code>ahsir-agent</code> process, defined by an <code>agent-card.yaml</code>.</td></tr>
+    <tr><td><strong>contextId</strong></td>
+      <td>The A2A conversation key. All messages sharing a <code>contextId</code> hit the same
+      provider session and accumulate memory. Omit it for one-shot isolated turns.</td></tr>
+    <tr><td><strong>Session</strong></td>
+      <td>A provider-backed conversation runtime. <code>ClaudeSession</code> is one long-running
+      <code>claude</code> subprocess; <code>CodexSession</code> forks <code>codex exec</code> per
+      turn and resumes by thread id. Both implement one <code>Session</code> interface.</td></tr>
+    <tr><td><strong>SessionPool</strong></td>
+      <td>Maps <code>contextId</code> → <code>Session</code>, with idle eviction (sessionID retained
+      for resume), a concurrency cap, and the per-context FIFO turn gate.</td></tr>
+    <tr><td><strong>Registry</strong></td>
+      <td>Discovery: agents register a card and heartbeat; lookups resolve name→card. Liveness is
+      derived on read.</td></tr>
+    <tr><td><strong>Gateway</strong></td>
+      <td>The scheduler's single HTTP port. Mediates chat/task/history, proxies native A2A, exposes
+      read views, and gates the control plane.</td></tr>
+    <tr><td><strong>Invocation ledger</strong></td>
+      <td>Append-only JSONL of every mediated call (<code>started → queued → completed/failed</code>),
+      with a bounded user-text preview. Replayed on startup; backs <code>ahsir trace</code> and
+      crash recovery.</td></tr>
+    <tr><td><strong>Transcript</strong></td>
+      <td>Per-context full conversation record (speaker, full text, full reply) the wrapper writes;
+      backs <code>ahsir history</code> and the takeover workflow.</td></tr>
+  </table>
+</section>
+
+<!-- ===================== 5 FEATURES ===================== -->
+<section id="features" class="anchor">
+  <h2>5 · Features</h2>
+
+  <h3 id="f-lifecycle" class="anchor">Scheduling &amp; lifecycle</h3>
+  <ul>
+    <li><strong>Scheduler-owned A2A entrypoint.</strong> Public native A2A traffic goes through
+      <code>POST /a2a/{agent}</code>, so user calls and agent-to-agent calls are both visible to the
+      scheduler and recorded.</li>
+    <li><strong>Dynamic agent lifecycle — no scheduler restart.</strong> <code>ahsir agent new</code>
+      scaffolds a card, registers it in <code>ahsir.yaml</code>, and starts it on the <em>running</em>
+      scheduler via <code>POST /admin/agents</code> — the new agent hot-registers and is usable in
+      <code>list</code> / <code>chat</code> right away; <code>ahsir agent delete</code> stops it (files
+      preserved). A restart is only needed for <code>--skip-start</code>, a scheduler that was down, or a
+      hand-edited <code>ahsir.yaml</code>. (Editing an existing card restarts <em>that agent</em>, not the
+      scheduler.)</li>
+    <li><strong>Supervision &amp; restart.</strong> If an agent process exits unexpectedly, or its
+      <code>/healthz</code> fails repeatedly, the scheduler restarts it on the same port with
+      exponential backoff. Intentional stops are terminal (no restart).</li>
+    <li><strong>Deterministic startup.</strong> Listeners bind synchronously so port conflicts
+      surface as start errors; auto-allocated ports probe for bindability and skip foreign
+      listeners; a failed <code>Start</code> unwinds everything already started.</li>
+    <li><strong>Process-tree cleanup.</strong> Agents (and their provider subprocesses) run in
+      process groups so shutdown reaps the whole tree.</li>
+  </ul>
+
+  <h3 id="f-sessions" class="anchor">Sessions &amp; recovery</h3>
+  <ul>
+    <li><strong>Multi-provider sessions.</strong> Anthropic (Claude), Zhipu and DeepSeek
+      (Anthropic-compatible endpoints), and Codex. Provider, base URL, API key, and model are set
+      per agent card; the wrapper translates them into the right env for the CLI.</li>
+    <li><strong>Resumable conversations.</strong> Claude agents resume with
+      <code>claude --resume=&lt;session_id&gt;</code>; Codex agents with
+      <code>codex exec resume &lt;thread_id&gt;</code>.</li>
+    <li><strong>Persistent session mapping.</strong> Each agent writes
+      <code>&lt;workspace&gt;/.a2a/sessions.json</code> (contextId→sessionID), bounded by
+      <code>pool.evicted_ttl</code> / <code>pool.max_evicted</code>, so a restart resumes prior
+      conversations instead of starting fresh.</li>
+    <li><strong>Per-turn timeout parity.</strong> Both providers enforce <code>runtime.timeout</code>
+      as a real per-turn deadline; on expiry the turn fails cleanly and the session evicts with its
+      sessionID preserved for resume.</li>
+    <li><strong>Restart continuation.</strong> After a supervised restart, the scheduler uses the
+      ledger to send a continuation prompt for interrupted work that has a <code>contextId</code>.</li>
+    <li><strong>Pool capacity controls.</strong> <code>pool.max_active</code> caps concurrent live
+      provider processes per agent; <code>overload_policy</code> is <code>reject</code> or
+      <code>evict-lru</code>.</li>
+    <li><strong>Conversation-record retention &amp; deletion.</strong> There is no manual delete; records
+      are pruned by time, automatically, at process startup (compaction). The invocation ledger (which
+      drives the console's conversation list and trace) keeps completed records <strong>7 days</strong> and
+      incomplete ones <strong>30 days</strong> (compacted on scheduler start). Each agent's transcript (the
+      per-context message history) is deleted once its most recent turn is older than <strong>30 days</strong>,
+      along with its <code>index.json</code> entry (on agent start). Roundtable logs follow the same
+      <strong>30-day</strong> rule (on scheduler start). Separately, <code>pool.evicted_ttl</code> governs how
+      long the session mapping is remembered, i.e. whether an old conversation can still <code>--resume</code>.</li>
+  </ul>
+
+  <h3 id="f-shared" class="anchor">Shared-context collaboration <span class="pill ok">2026-06-08</span></h3>
+  <p>Several clients can work inside one <code>contextId</code> on the same machine.</p>
+  <ul>
+    <li><strong>Speaker attribution.</strong> <code>ahsir chat --as &lt;name&gt;</code> (default: OS
+      username) tags each turn; the executor prefixes the user text with <code>[speaker: X]</code>
+      and adds a multi-speaker instruction to the system prompt so the model attributes statements
+      to the right person. The speaker shows up in <code>ahsir trace</code>. Absent attribution, the
+      prompt is byte-identical to before.</li>
+    <li><strong>Per-context FIFO queue.</strong> A second turn arriving while one is in flight on the
+      same context <em>waits in arrival order</em> instead of failing. Bounded by
+      <code>pool.queue_depth</code> (default 4); a full queue degrades to the busy/<code>409</code>
+      signal, and <code>queue_depth: 0</code> restores the prior fail-fast contract. Distinct
+      contexts stay fully parallel.</li>
+    <li><strong>Task-based async.</strong> <code>ahsir chat --async</code> submits the turn and
+      returns a task id immediately (A2A <code>configuration.blocking=false</code>); poll it with
+      <code>ahsir status</code>. The default mode submits then polls internally — same synchronous
+      UX, no long-held connection.</li>
+    <li><strong>Transcript replay.</strong> <code>ahsir history &lt;agent&gt; &lt;contextId&gt;</code>
+      replays who said what and what the agent answered — the takeover path for someone joining a
+      conversation mid-stream.</li>
+  </ul>
+  <div class="callout"><span class="k">Privacy note.</span> The transcript stores <em>full</em>
+  conversation content (unlike the ledger's bounded preview) because replay is its purpose. It is
+  written owner-only (<code>0700</code> dir / <code>0600</code> files); the contextId is hashed into
+  the filename so a caller-supplied id never reaches the filesystem raw. The sanctioned read path is
+  the token-gated <code>/history</code> endpoint.</div>
+
+  <h3 id="f-roundtable" class="anchor">Rooms: multi-agent collaboration + roundtable <span class="pill ok">2026-06-11</span></h3>
+  <p>A <strong>room</strong> hosts several agents in one shared conversation — they see each other's
+  turns. The room id <em>is</em> the shared <code>contextId</code>, so it reuses the session + speaker
+  machinery with no wrapper changes. A room has one of two <strong>floor-control modes</strong>
+  (<code>mode</code> on <code>POST /rooms</code>, default <code>relay</code>):</p>
+  <p><strong>① 多 Agent 协同 / multi-agent collaboration (<code>mode: relay</code>)</strong>: hub-and-spoke,
+  <code>@</code>-mention driven — for delegation-flavored collaboration.</p>
+  <ul>
+    <li><strong>@-mention turn-taking</strong>, usable by the operator <em>and</em> the agents. The
+      first <code>@&lt;participant&gt;</code> in a message becomes the next speaker, so an agent can hand
+      a question to a peer. Mentions inside code spans are quoted tokens, not directives.</li>
+    <li><strong>Organizer fallback.</strong> A message addressing no one returns control to the room's
+      organizer — <code>operator</code> (parks for your next message) or a designated <strong>moderator
+      agent</strong> (it takes the floor and picks who continues).</li>
+    <li><strong>Incremental relay.</strong> Each agent's turn is fed only the transcript it hasn't seen
+      since it last spoke (a first-timer gets the full history). Bounded cost, no broadcast storm, no
+      context loss — its own session retains everything up to its last turn and the delta fills the gap.</li>
+    <li><strong>Runaway guard.</strong> An autonomous agent↔agent chain is bounded by
+      <code>maxChain</code> turns between operator messages (default 8); each operator message resets it.</li>
+  </ul>
+  <p><strong>② 圆桌 / roundtable (<code>mode: roundtable</code>)</strong>: the real round-table —
+  <strong>consensus rounds</strong> (Texas Hold'em), flat, no chair — for a hard, ambiguous decision
+  (e.g. an OKR review).</p>
+  <ul>
+    <li><strong>A round = one full pass</strong> over the participants in a fresh random order; each is
+      asked in turn (a later speaker sees earlier same-round turns). Each contributes or, with no
+      objection, replies <code>同意</code>. The convention is injected per-turn — <strong>no agent
+      system-prompt change needed</strong>.</li>
+    <li><strong>Rolling consolidation.</strong> A dedicated <strong>moderator agent</strong> (not a
+      participant, under its own <code>&lt;roomId&gt;#mod</code> contextId — no pollution of the shared
+      transcript or participant sessions, and <strong>no</strong> say in who speaks) produces a visible
+      小结 each round that <strong>anchors the next round</strong>, in three columns:
+      <strong>【已达成】</strong> (locked, carried forward, not relitigated unless an assumption breaks),
+      <strong>【待议】</strong> (open, shrinking), and <strong>【纠偏】</strong> (steering — names
+      <code>@&lt;agent&gt;</code> whose reasoning drifted off the proposition and tells them to reconverge).
+      When 待议 empties, that's consensus and its 已达成 is the decision.</li>
+    <li><strong>Budget</strong> (default 12 rounds) without consensus → parks for the operator; a new
+      operator message re-opens a fresh cycle. Create with
+      <code>{"mode":"roundtable","participants":[...],"moderator":"&lt;agent&gt;","budget":12,"message":"&lt;question&gt;"}</code>.
+      Design: <code>specs/2026-06-10-roundtable-mode.md</code>.</li>
+  </ul>
+  <p class="muted">HTTP: <code>POST /rooms</code>, <code>GET /rooms</code>, <code>GET /rooms/{id}</code>,
+  <code>POST /rooms/{id}/say</code>, <code>POST /rooms/{id}/stop</code>. Roundtable turns are recorded
+  in the ledger (<code>source=roundtable</code>) so they show in <code>trace</code>. Rooms are
+  <strong>persisted</strong> (one <code>&lt;roomId&gt;.jsonl</code> per room) and reconstructed on scheduler
+  restart; a recovered room returns in the <strong>waiting</strong> state (transient active/waiting status
+  is not persisted, <code>stopped</code> is). Logs older than 30 days are compacted at startup. Runnable
+  walkthrough: <code>example/roundtable/</code>.</p>
+
+  <h3 id="f-console" class="anchor">Web console <span class="pill ok">2026-06-09</span></h3>
+  <p>An optional, <strong>separate process</strong> (<code>ahsir ui</code>) that serves a single-page
+  browser console and proxies the gateway. It holds no LLM and does no orchestration — a thin proxy +
+  static SPA.</p>
+  <ul>
+    <li><strong>Chat 1:1</strong> with any agent; replies render as <strong>Markdown</strong> (headings,
+      bold/italic, code blocks, lists, blockquotes, links, GFM tables), each bubble showing the speaker
+      and a timestamp.</li>
+    <li><strong>Conversation list</strong> on the left, derived from the invocation ledger and keyed on
+      <code>contextId</code>; a right rail with the agent's card details and the trace timeline.</li>
+    <li><strong>Roundtable mode</strong> drives the <code>/rooms</code> API: create a room, watch the
+      merged thread, send operator messages (with <code>@</code>), and stop.</li>
+    <li><strong>Per-message actions</strong> (revealed on hover): <strong>复制</strong> copies the raw
+      message text; <strong>直接回复</strong> (roundtable agent bubbles only) drops <code>@&lt;speaker&gt;</code>
+      at the start of the composer. The right-rail participant rows and the agent-card header are also
+      <strong>draggable onto the composer</strong>, inserting <code>@&lt;agent&gt;</code> at the caret.</li>
+    <li><strong>Drop or paste a file onto the composer</strong> to attach its local path (paste a clipboard
+      image with <code>⌘V</code> too). Browsers hide a dragged/pasted file's real path, so the console
+      uploads the bytes to <code>POST /api/upload</code>, copies them into a local <strong>upload dir</strong>,
+      and inserts that absolute path at the caret (claude reads the file itself, e.g. <code>看下
+      /tmp/.../shot.png 报的什么错</code>). Any file type, multiple at once.</li>
+    <li><strong>Rooms + alerts.</strong> Both <strong>多 Agent 协同 (relay)</strong> and <strong>圆桌
+      (roundtable)</strong> create flows (see above); a roundtable thread is split by 「第 X 轮」 dividers
+      with the moderator's consolidation as a 小结 card, and the trace is split per round too.
+      <code>@&lt;participant&gt;</code> renders blue, <code>@operator</code> (you) as a deep-blue pill; a new
+      agent <code>@operator</code> always shows an in-page toast, and when the tab is <strong>not active</strong>
+      also fires a <strong>sound + browser popup + flashing tab</strong> that stops the moment you return to
+      (or are already on) the page. Click a trace node to jump to its bubble; a jump-to-bottom button appears
+      when scrolled up.</li>
+  </ul>
+  <p class="muted">Upload dir defaults to <code>$TMPDIR/ahsir-uploads</code> (override with <code>ahsir ui
+  --upload-dir</code>, or set <code>AHSIR_UPLOAD_DIR</code> to align the console and the agents in one
+  place). An agent must run with <code>filesystem.enabled: true</code> to read a dropped file; such agents
+  <strong>auto-allow-list the upload dir</strong> (<code>--add-dir</code>) at startup, so it works with zero
+  per-agent config. Local-only by design. Markdown is XSS-safe (escape first, then tokenize to a fixed tag
+  set; links limited to http(s)/mailto). Start it with <code>ahsir ui --addr 127.0.0.1:9801 --scheduler
+  http://127.0.0.1:9800</code>.</p>
+
+  <h3 id="f-mcp" class="anchor">MCP isolation <span class="pill ok">2026-06-09</span></h3>
+  <p>Agents run their <code>claude</code> with <strong><code>--strict-mcp-config</code></strong>, so an
+  agent <strong>never inherits</strong> the operator's global (<code>~/.claude.json</code>) or project
+  (<code>.mcp.json</code>) MCP servers. The default — no <code>mcp:</code> block — means <strong>zero MCP
+  servers</strong>: the isolated, fast, cheap baseline (inherited servers ballooned a trivial turn's
+  input tokens and added per-call init, and are a privilege-bleed risk).</p>
+  <ul>
+    <li><strong>Opt in per agent</strong> via the card's <code>mcp.servers</code> (claude
+      <code>mcpServers</code> shape, passed through verbatim) or <code>ahsir agent new --mcp-config &lt;file&gt;</code>.</li>
+    <li><strong>Codex</strong> configures MCP through its own <code>CODEX_HOME</code> config.toml, so
+      <code>mcp.servers</code> on a codex agent is an error rather than a silent no-op.</li>
+  </ul>
+
+  <h3 id="f-providers" class="anchor">Model providers <span class="pill ok">2026-06-10</span></h3>
+  <p>Each agent picks its model backend in the <code>runtime</code> block of its <code>agent-card.yaml</code>:
+  <code>claude</code> (Anthropic plus Anthropic-compatible endpoints like DeepSeek/Zhipu) or <code>codex</code>.
+  The high-level fields <code>provider</code> / <code>baseURL</code> / <code>apiKey</code> / <code>model</code> are
+  translated into the env the CLI understands (see <code>internal/wrapper/runtime.go</code>).</p>
+  <p><strong>Key rule:</strong> the wrapper only injects the vars you actually set. With <code>baseURL</code>
+  <strong>and</strong> <code>apiKey</code> both empty, <strong>no <code>ANTHROPIC_*</code> env is exported</strong>
+  and <code>claude</code> falls back to <strong>its own stored login</strong>. <code>${VAR}</code> is expanded
+  strictly (a missing var fails at agent startup); a non-empty <code>baseURL</code> with an empty
+  <code>apiKey</code> is rejected (it would 401 silently).</p>
+  <p><strong>A. Claude Code local login (no API key).</strong> Reuse the subscription/OAuth login already
+  stored by <code>claude</code> (run <code>claude</code>, then <code>/login</code>).</p>
+  <pre><code>runtime:
+  command: claude
+  provider: anthropic
+  baseURL: ""        # empty → no ANTHROPIC_BASE_URL
+  apiKey: ""         # empty → no token → claude uses its own login
+  model: ""          # empty → Claude Code default; or e.g. claude-opus-4-8
+  timeout: 600s</code></pre>
+  <p class="muted">Requirements: the scheduler runs as the same user / <code>$HOME</code> that holds the
+  <code>~/.claude</code> login, and <strong>no <code>ANTHROPIC_API_KEY</code> / <code>ANTHROPIC_AUTH_TOKEN</code>
+  / <code>ANTHROPIC_BASE_URL</code> is exported</strong> in the env that launches <code>ahsir start</code>
+  (those would override the login and bill the API instead).</p>
+  <ul>
+    <li><strong>B. Anthropic API key:</strong> <code>provider: anthropic</code> + <code>apiKey: ${ANTHROPIC_API_KEY}</code>, <code>model</code> optional.</li>
+    <li><strong>C. DeepSeek / Zhipu (Anthropic-compatible):</strong> <code>provider: deepseek</code> (or <code>zhipu</code>) + <code>apiKey: ${MODEL_API_KEY}</code> + <code>model: deepseek-v4-pro</code>; <code>baseURL</code> defaults per provider, so you can omit it.</li>
+    <li><strong>D. Codex:</strong> <code>command: codex</code> + <code>provider: codex</code>, using an isolated per-agent <code>CODEX_HOME</code> and Codex's own login; <code>baseURL</code> is not supported here.</li>
+  </ul>
+  <p class="muted"><code>ahsir agent new</code> scaffolds Anthropic defaults — recipe B (<code>provider: anthropic</code>,
+  no <code>baseURL</code> → official <code>api.anthropic.com</code>, <code>apiKey: ${ANTHROPIC_AUTH_TOKEN}</code>,
+  <code>model: claude-opus-4-8</code>). For recipe A (local login) pass <code>--api-key-env ""</code>; for C/D
+  pass <code>--provider deepseek|zhipu|codex</code>. After editing a card, <strong>restart that agent</strong>
+  (console「重启生效」or <code>POST /admin/agents/{name}/restart</code>) to apply.</p>
+
+  <h3 id="f-obs" class="anchor">Observability</h3>
+  <ul>
+    <li><strong><code>ahsir trace [contextId]</code></strong> — the invocation ledger as an
+      agent-call timeline: id, source (with speaker), agent, method, status, duration, preview.</li>
+    <li><strong><code>ahsir history &lt;agent&gt; &lt;contextId&gt;</code></strong> — full transcript
+      replay for one conversation.</li>
+    <li><strong><code>ahsir doctor</code></strong> — health checklist: config file, provider CLIs on
+      PATH, scheduler reachability, per-agent online status, and whether the CLI can find an admin
+      token.</li>
+    <li><strong>Structured logs.</strong> The scheduler tees agent stdout, so inter-agent
+      <code>A2A_CALL</code> dispatches, turn timings, and token/cost stats are greppable in one
+      place.</li>
+  </ul>
+
+  <h3 id="f-auth" class="anchor">Authentication <span class="pill ok">2026-06-08</span></h3>
+  <p>The <strong>control plane</strong> — agent lifecycle and registry write — is gated by a single
+  admin token; the <strong>data plane</strong> (chat, history, tasks, trace, list) stays open in
+  this baseline.</p>
+  <ul>
+    <li><strong>Auto-generated token.</strong> <code>ahsir start</code> writes a <code>0600</code>
+      <code>admin-token</code> file beside <code>ahsir.yaml</code> on first run and reuses it after.
+      <code>AHSIR_ADMIN_TOKEN</code> overrides the file (CI / containers) and touches no disk.</li>
+    <li><strong>Zero-friction for the same user.</strong> The CLI reads the same file, so
+      <code>agent new/delete</code> just work; a different OS user — unable to read the file — is
+      locked out of the control plane.</li>
+    <li><strong>Overwrite protection.</strong> An unauthenticated same-name registration is rejected
+      (<code>401</code>), closing the silent registry-overwrite hole. Scheduler-spawned agents
+      authenticate their heartbeat with the token via <code>--admin-token</code>.</li>
+    <li><strong>Internal-token leak fix.</strong> The scheduler sends a per-agent internal token only
+      to the loopback address it recorded at spawn time — never to a registry card URL, which a write
+      could otherwise repoint at an attacker. Card-only agents receive no internal token.</li>
+  </ul>
+</section>
+
+<!-- ===================== 6 CLI ===================== -->
+<section id="cli" class="anchor">
+  <h2>6 · CLI reference</h2>
+  <p class="lead-sub">Every command except <code>start</code> talks to a running scheduler over its
+  gateway (default <code>--scheduler http://127.0.0.1:9800</code>).</p>
+  <table>
+    <tr><th>Command</th><th>Purpose</th></tr>
+    <tr><td><code>ahsir start [config]</code></td><td>Start the long-running scheduler (default config: <code>ahsir.yaml</code>). Generates the admin token on first run.</td></tr>
+    <tr><td><code>ahsir list [--json]</code></td><td>List registered agents (<code>name · url · skills</code>).</td></tr>
+    <tr><td><code>ahsir chat &lt;agent&gt; "&lt;msg&gt;" [--context ID] [--as NAME] [--async] [--stream]</code></td>
+      <td>Send a message, print the reply. <code>--context</code> for memory across calls;
+      <code>--as</code> for shared-context attribution; <code>--async</code> returns a task id;
+      <code>--stream</code> for token-by-token output.</td></tr>
+    <tr><td><code>ahsir status &lt;agent&gt; &lt;task-id&gt;</code></td><td>Print a task's status JSON (poll an async turn).</td></tr>
+    <tr><td><code>ahsir trace [contextId] [--json]</code></td><td>Invocation-ledger timeline, optionally filtered by context.</td></tr>
+    <tr><td><code>ahsir history &lt;agent&gt; &lt;contextId&gt; [--json]</code></td><td>Replay a context's transcript (speaker, question, reply).</td></tr>
+    <tr><td><code>ahsir doctor [--config path]</code></td><td>Health checklist incl. auth token discoverability.</td></tr>
+    <tr><td><code>ahsir ping</code></td><td>Reachability probe; exit 0 if up, 2 if down.</td></tr>
+    <tr><td><code>ahsir ui [--addr host:port] [--scheduler URL]</code></td><td>Start the web console (default <code>127.0.0.1:9801</code>) — a separate process proxying the gateway.</td></tr>
+    <tr><td><code>ahsir agent new &lt;name&gt; [flags]</code></td><td>Scaffold an agent card, register it, and start it. Flags: <code>--prompt --provider --model --base-url --api-key-env --skill --allow-fs --mcp-config --pool-max-active --pool-overload-policy</code>.</td></tr>
+    <tr><td><code>ahsir agent delete &lt;name&gt;</code></td><td>Stop a running agent (workspace files preserved).</td></tr>
+    <tr><td><code>ahsir agent list-configs</code></td><td>Show agents declared in <code>ahsir.yaml</code> regardless of run state.</td></tr>
+  </table>
+</section>
+
+<!-- ===================== 7 CONFIG ===================== -->
+<section id="config" class="anchor">
+  <h2>7 · Configuration</h2>
+
+  <h3 id="cfg-scheduler" class="anchor">ahsir.yaml — the scheduler config</h3>
+<pre><code>agents:
+  - name: backend
+    workspace: /home/user/.ahsir/agents/backend  # private .a2a state (unique per agent)
+    workdir: /home/user/projects/backend          # optional cwd; default = workspace. Share across agents.
+    port: 0            # 0 = auto-allocate from port_range
+
+registry:
+  host: "127.0.0.1"    # loopback only
+  port: 9800
+  heartbeat_interval: 10s
+  heartbeat_timeout: 30s
+
+timeouts:
+  chat: 10m            # gateway forward deadline; >= max agent runtime.timeout
+  task_status: 30s
+
+port_range:
+  start: 9802
+  end: 9900</code></pre>
+  <p class="muted">Runtime state lives beside this file: <code>.ahsir/ledger.jsonl</code> (invocation
+  ledger) and <code>admin-token</code> (0600). Both are git-ignored.</p>
+
+  <h3 id="cfg-agent" class="anchor">agent-card.yaml — one persona</h3>
+<pre><code>name: teacher
+description: A teacher agent that answers questions.
+version: "1.0.0"
+skills:
+  - name: teaching
+    description: Explain concepts and answer questions
+claude:
+  systemPrompt: |
+    You are a helpful, knowledgeable teacher...
+  maxAgentCalls: 0          # max sub-agent delegation rounds (0 = no delegation)
+runtime:
+  command: claude           # or codex
+  provider: anthropic       # anthropic | zhipu | deepseek | codex
+  baseURL: ""               # provider default if empty (anthropic → api.anthropic.com)
+  apiKey: "${ANTHROPIC_AUTH_TOKEN}" # literal or ${ENV}; omit for local claude login
+  model: claude-opus-4-8
+  timeout: 300s             # per-turn deadline
+  args: []                  # extra CLI flags (sandbox/permission flags are stripped)
+filesystem:
+  enabled: false            # true + allowed_paths to grant file tools
+  allowed_paths: []
+network:
+  bind: "127.0.0.1"         # non-loopback is rejected
+pool:
+  max_active: 0             # cap on concurrent live provider processes (0 = unlimited)
+  overload_policy: reject   # reject | evict-lru
+  queue_depth: 4            # per-context FIFO turn queue (0 = fail-fast busy)
+  idle_ttl: 30m
+  evicted_ttl: 720h
+  max_evicted: 1000
+streaming:
+  partial_messages: false   # true to emit token deltas over SSE
+mcp:                        # omit for ZERO MCP servers (the isolated default)
+  servers:                  # claude mcpServers shape, passed through verbatim
+    docs:
+      command: npx
+      args: ["-y", "@modelcontextprotocol/server-docs"]</code></pre>
+  <p class="muted">Agents always run <code>claude --strict-mcp-config</code>, so they never inherit the
+  host's global/project MCP servers — only what <code>mcp.servers</code> declares (nothing, by default).</p>
+</section>
+
+<!-- ===================== 8 API ===================== -->
+<section id="api" class="anchor">
+  <h2>8 · HTTP API surface</h2>
+
+  <h4>Scheduler gateway (:9800)</h4>
+  <table>
+    <tr><th>Method / Path</th><th>Plane</th><th>Purpose</th></tr>
+    <tr><td><code>GET /agents</code></td><td>data</td><td>List agent cards (scheduler-rewritten URLs).</td></tr>
+    <tr><td><code>GET /agents/{name}</code></td><td>data</td><td>One agent card.</td></tr>
+    <tr><td><code>POST /agents/{name}/chat</code></td><td>data</td><td>Buffered chat forward; supports <code>speaker</code> and <code>async</code>.</td></tr>
+    <tr><td><code>GET /agents/{name}/tasks/{id}</code></td><td>data</td><td>Task status (poll async turns).</td></tr>
+    <tr><td><code>GET /agents/{name}/history/{ctx}</code></td><td>data</td><td>Transcript replay (proxied with internal token).</td></tr>
+    <tr><td><code>POST /a2a/{name}</code></td><td>data</td><td>Native A2A JSON-RPC proxy (message/send, message/stream, tasks/*).</td></tr>
+    <tr><td><code>GET /invocations</code></td><td>data</td><td>Ledger view (backs <code>trace</code>).</td></tr>
+    <tr><td><code>POST /rooms</code>, <code>GET /rooms[/{id}]</code></td><td>data</td><td>Rooms: create / list / read. <code>mode</code> = <code>relay</code> (多 Agent 协同) or <code>roundtable</code> (consensus).</td></tr>
+    <tr><td><code>POST /rooms/{id}/say</code>, <code>POST /rooms/{id}/stop</code></td><td>data</td><td>Rooms: operator message / halt.</td></tr>
+    <tr><td><code>GET /config/timeouts</code></td><td>data</td><td>Scheduler timeouts (CLI aligns its own).</td></tr>
+    <tr><td><code>POST /agents</code>, <code>DELETE /agents/{name}</code></td><td><b>control</b></td><td>Registry write — <code>X-Ahsir-Admin-Token</code> required.</td></tr>
+    <tr><td><code>POST/DELETE /admin/agents[/{name}]</code></td><td><b>control</b></td><td>Agent start/stop — <code>X-Ahsir-Admin-Token</code> required.</td></tr>
+  </table>
+
+  <h4>Agent wrapper (loopback, per agent)</h4>
+  <table>
+    <tr><th>Method / Path</th><th>Purpose</th></tr>
+    <tr><td><code>GET /healthz</code></td><td>Liveness (process + HTTP up).</td></tr>
+    <tr><td><code>GET /readyz</code></td><td>Readiness (card loaded, executor wired).</td></tr>
+    <tr><td><code>GET /.well-known/agent-card.json</code></td><td>A2A card discovery.</td></tr>
+    <tr><td><code>POST /</code> (A2A JSON-RPC)</td><td>message/send, message/stream, tasks/* — <code>X-Ahsir-Internal-Token</code> required.</td></tr>
+    <tr><td><code>GET /history?contextId=</code></td><td>Transcript — internal-token gated.</td></tr>
+  </table>
+</section>
+
+<!-- ===================== 9 SECURITY ===================== -->
+<section id="security" class="anchor">
+  <h2>9 · Security model</h2>
+  <p class="lead-sub">The baseline establishes one real trust boundary and closes the highest-risk
+  holes from the 2026-06-07 adversarial review. It is explicit about what it does <em>not</em> yet
+  cover.</p>
+
+  <h4>Two tokens, two purposes</h4>
+  <table>
+    <tr><th>Token</th><th>Protects</th><th>Lifecycle</th></tr>
+    <tr><td><code>X-Ahsir-Admin-Token</code></td><td>Control plane: agent start/stop, registry write.</td>
+      <td>Auto-generated 0600 file beside <code>ahsir.yaml</code>, or <code>AHSIR_ADMIN_TOKEN</code>. Shared by scheduler, CLI, and spawned agents.</td></tr>
+    <tr><td><code>X-Ahsir-Internal-Token</code></td><td>Scheduler→agent A2A calls (per agent).</td>
+      <td>Generated per spawn; sent only to the agent's recorded loopback address.</td></tr>
+  </table>
+
+  <h4>Trust boundary</h4>
+  <p>The OS user who can read the admin-token file. On a shared machine, another user — blocked by
+  <code>0600</code> — cannot start, stop, or hijack agents. The data plane (chat/read) is open at
+  this level because the threat model is multi-user control-plane abuse, not eavesdropping on
+  loopback.</p>
+
+  <h4>Hardening already in place</h4>
+  <ul>
+    <li>Race-free registry and session pool; <code>go test -race</code> is the trusted gate.</li>
+    <li>Provider arg sanitizer strips sandbox/permission-bypass flags from <code>runtime.args</code>.</li>
+    <li><code>MaxBytesReader</code> on all gateway bodies; ledger preview bounded to 512 bytes;
+      ledger, agent-card, and transcript files written <code>0600</code>.</li>
+    <li>Non-loopback <code>network.bind</code> rejected; A2A proxy settles the ledger only after the
+      response body relays (interrupted streams record as failed).</li>
+  </ul>
+
+  <div class="callout warn"><span class="k">Deferred (named, not implied).</span> Non-loopback /
+    cross-machine access; multiple principals &amp; RBAC; data-plane authentication; token rotation
+    as a command (today: delete the file + restart). The code is structured so data-plane gating can
+    be added when a non-loopback bind is introduced.</div>
+</section>
+
+<!-- ===================== 10 ROADMAP ===================== -->
+<section id="roadmap" class="anchor">
+  <h2>10 · Roadmap</h2>
+  <p class="lead-sub">Direction set by the 2026-06-07 adversarial review and confirmed product
+  decisions: <em>CLI + skill + hardened scheduler + observability</em>, expansion gated on real
+  signals.</p>
+
+  <h4>Done</h4>
+  <ul>
+    <li><span class="pill ok">shipped</span> Hardening batch (concurrency, lifecycle, runtime policy, ingress hygiene).</li>
+    <li><span class="pill ok">shipped</span> CLI-first observability: <code>ahsir trace</code>, <code>ahsir doctor</code>.</li>
+    <li><span class="pill ok">shipped</span> Shared-context collaboration: speaker, transcript, FIFO queue, async.</li>
+    <li><span class="pill ok">shipped</span> Auth baseline: control-plane token, internal-token leak fix.</li>
+  </ul>
+
+  <h4>Deferred — trigger-based</h4>
+  <table>
+    <tr><th>Item</th><th>Triggers when…</th></tr>
+    <tr><td>Persistent TaskStore + <code>tasks/resubscribe</code></td><td>an external A2A client or long-task survival across restart is actually needed.</td></tr>
+    <tr><td>Typed capability selection</td><td>fleet size / mis-delegation outgrows prompt + skill-list routing.</td></tr>
+    <tr><td>Agent template marketplace</td><td>after a policy schema lands (arg sanitizer + card perms already done).</td></tr>
+    <tr><td>Multi-scheduler federation</td><td>after full auth / trust / bind semantics — the <code>Remote</code> field is a placeholder today.</td></tr>
+    <tr><td>Data-plane auth</td><td>a non-loopback bind is introduced.</td></tr>
+    <tr><td>MCP server mode <span class="pill soon">backlog</span></td><td>≥2 MCP-only clients need it, or the CLI text protocol becomes a failure source. Removed from the committed roadmap.</td></tr>
+  </table>
+</section>
+
+<hr class="soft">
+<p class="muted" style="font-size:13px">
+  Source of truth is the code and the specs under <code>docs/superpowers/</code>. This page is a
+  synthesized overview; when they disagree, the code wins. Generated 2026-06-08.
+</p>
+
+</div><!-- /wrap -->
+</main>
+</div><!-- /layout -->
+</body>
+</html>

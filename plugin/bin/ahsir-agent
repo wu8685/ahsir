@@ -1,0 +1,34 @@
+#!/bin/sh
+# Wrapper that resolves the right ahsir binary for this machine and execs it.
+#
+# The plugin no longer bundles pre-compiled per-platform binaries. Instead the
+# Go source + vendored deps live in plugin/src/, and the binaries are compiled
+# on first use (Go is a prerequisite — see the README). The compiled pair is
+# cached under ~/.cache/ahsir/<version>/bin/<os>-<arch>/ so this is a one-time
+# cost; later invocations resolve straight to the cache.
+#
+# The same wrapper template ships as both `ahsir` and `ahsir-agent`, picking the
+# binary that matches its own basename. A SessionStart hook warms the cache so
+# the first real call isn't the one that pays the build, but this wrapper also
+# builds on demand so it works from a plain terminal / PATH too.
+set -e
+
+# Resolve symlinks so a user-created `ln -s .../plugin/bin/ahsir /usr/local/bin/ahsir`
+# still finds the plugin tree.
+target=$0
+while [ -L "$target" ]; do
+  link=$(readlink "$target")
+  case "$link" in
+    /*) target=$link ;;
+    *)  target=$(dirname "$target")/$link ;;
+  esac
+done
+bin_self_dir=$(cd "$(dirname "$target")" && pwd)
+plugin_root=$(cd "$bin_self_dir/.." && pwd)
+
+# Ensure the binaries exist (no-op if already cached); capture the cache dir.
+cache_bin_dir=$("$plugin_root/build-binaries.sh") || exit $?
+
+# Pick the binary matching this script's basename (ahsir vs ahsir-agent).
+binary_name=$(basename "$0")
+exec "$cache_bin_dir/$binary_name" "$@"
