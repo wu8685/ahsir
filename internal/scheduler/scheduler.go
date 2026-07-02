@@ -14,6 +14,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -1064,7 +1065,11 @@ func (s *Scheduler) settleAsyncInvocation(invID, agentName string, taskID string
 func (s *Scheduler) AgentHistory(agentName, contextID string) ([]wrapper.TranscriptTurn, error) {
 	card, internalToken, ok := s.agentDialTarget(agentName)
 	if !ok {
-		return nil, fmt.Errorf("agent %s not found", agentName)
+		// The live process is gone, but a deleted/offline agent's transcripts
+		// are preserved in its workspace (issue #1). Serve them read-only from
+		// disk instead of failing — the same replay the live agent would have
+		// returned via its /history endpoint.
+		return s.archivedAgentHistory(agentName, contextID)
 	}
 
 	endpoint := strings.TrimSuffix(card.URL, "/") + "/history?contextId=" + url.QueryEscape(contextID)
@@ -1090,6 +1095,143 @@ func (s *Scheduler) AgentHistory(agentName, contextID string) ([]wrapper.Transcr
 		return nil, fmt.Errorf("decode history from %s: %w", agentName, err)
 	}
 	return turns, nil
+}
+
+// ArchivedAgent is an offline agent discovered on disk: its scheduler
+// registration is gone (deleted / stopped / GC'd) but its workspace — and the
+// per-context transcripts under it — survive, so its history is still viewable.
+type ArchivedAgent struct {
+	Name      string            `json:"name"`
+	Workspace string            `json:"workspace"`
+	Contexts  []ArchivedContext `json:"contexts"`
+}
+
+// ArchivedContext summarises one preserved conversation of an archived agent,
+// enough for the console to list it and open its transcript.
+type ArchivedContext struct {
+	ContextID    string `json:"contextId"`
+	Title        string `json:"title"`
+	Turns        int    `json:"turns"`
+	LastActivity string `json:"lastActivity"` // RFC3339
+}
+
+// ArchivedAgents enumerates managed agent workspaces (<configdir>/.ahsir/agents/*)
+// whose agent is no longer live, returning each with its still-viewable
+// transcripts. Contexts older than the transcript retention window are omitted
+// — mirroring what CompactForRetention would prune — and an agent with no
+// surviving contexts is skipped entirely. Purely read-only: no process is
+// spawned and nothing on disk is mutated.
+func (s *Scheduler) ArchivedAgents() ([]ArchivedAgent, error) {
+	dir := s.cfg.ManagedAgentsDir()
+	if dir == "" {
+		return nil, nil
+	}
+	entries, err := os.ReadDir(dir)
+	if os.IsNotExist(err) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("read managed agents dir: %w", err)
+	}
+
+	cutoff := time.Now().Add(-wrapper.RetentionWindow())
+	var out []ArchivedAgent
+	for _, e := range entries {
+		if !e.IsDir() {
+			continue
+		}
+		name := e.Name()
+		if s.isAgentLive(name) {
+			// A live agent already appears in the normal /agents listing.
+			continue
+		}
+		ws := filepath.Join(dir, name)
+		ctxs := archivedContexts(ws, cutoff)
+		if len(ctxs) == 0 {
+			continue
+		}
+		out = append(out, ArchivedAgent{Name: name, Workspace: ws, Contexts: ctxs})
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
+	return out, nil
+}
+
+// archivedContexts reads a workspace's transcript index and returns a summary
+// for every context whose most recent turn is within the retention window,
+// newest first. Unreadable or empty transcripts are silently skipped.
+func archivedContexts(workspace string, cutoff time.Time) []ArchivedContext {
+	store := wrapper.NewTranscriptStore(workspace)
+	index, err := store.Contexts()
+	if err != nil || len(index) == 0 {
+		return nil
+	}
+	out := make([]ArchivedContext, 0, len(index))
+	for ctxID := range index {
+		turns, err := store.Read(ctxID)
+		if err != nil || len(turns) == 0 {
+			continue
+		}
+		last := turns[len(turns)-1].TS
+		if last.Before(cutoff) {
+			continue // respect the 30-day transcript retention window
+		}
+		out = append(out, ArchivedContext{
+			ContextID:    ctxID,
+			Title:        turns[0].UserText,
+			Turns:        len(turns),
+			LastActivity: last.Format(time.RFC3339),
+		})
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].LastActivity > out[j].LastActivity })
+	return out
+}
+
+// isAgentLive reports whether an agent is currently registered or running under
+// the scheduler (and therefore reachable via the normal live paths).
+func (s *Scheduler) isAgentLive(name string) bool {
+	if _, ok := s.registry.Get(name); ok {
+		return true
+	}
+	s.mu.Lock()
+	_, running := s.agents[name]
+	s.mu.Unlock()
+	return running
+}
+
+// archivedAgentHistory serves a deleted/offline agent's transcript straight
+// from its workspace. Returns "not found" when no workspace with that name
+// exists on disk, so a genuinely unknown agent still surfaces as 404.
+func (s *Scheduler) archivedAgentHistory(agentName, contextID string) ([]wrapper.TranscriptTurn, error) {
+	ws := s.archivedWorkspace(agentName)
+	if ws == "" {
+		return nil, fmt.Errorf("agent %s not found", agentName)
+	}
+	turns, err := wrapper.NewTranscriptStore(ws).Read(contextID)
+	if err != nil {
+		return nil, fmt.Errorf("read archived history for %s: %w", agentName, err)
+	}
+	return turns, nil
+}
+
+// archivedWorkspace resolves the on-disk workspace of an offline agent: an
+// explicit workspace from ahsir.yaml if the agent is still configured (merely
+// stopped), else the managed workspace derived from the config dir (the
+// cma-service style). Returns "" when neither directory exists.
+func (s *Scheduler) archivedWorkspace(name string) string {
+	for _, a := range s.cfg.Agents {
+		if a.Name == name && a.Workspace != "" && isDir(a.Workspace) {
+			return a.Workspace
+		}
+	}
+	if ws := s.cfg.ManagedAgentWorkspace(name); ws != "" && isDir(ws) {
+		return ws
+	}
+	return ""
+}
+
+func isDir(path string) bool {
+	info, err := os.Stat(path)
+	return err == nil && info.IsDir()
 }
 
 // GetTaskStatus gets a task's status.

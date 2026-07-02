@@ -33,6 +33,12 @@ import (
 // CompactForRetention) — mirroring the scheduler ledger's retention policy.
 const transcriptRetention = 30 * 24 * time.Hour
 
+// RetentionWindow reports how long an inactive context's transcript is kept
+// before CompactForRetention prunes it. Exported so read-only consumers (the
+// scheduler's archived-agent listing) can apply the same cutoff when deciding
+// which offline transcripts to surface, without mutating the workspace.
+func RetentionWindow() time.Duration { return transcriptRetention }
+
 // TranscriptTurn is one completed (or failed) turn in a context's transcript.
 type TranscriptTurn struct {
 	TS         time.Time `json:"ts"`

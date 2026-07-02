@@ -157,6 +157,18 @@ func (c *Config) RoomsDir() string {
 	return filepath.Join(filepath.Dir(c.path), ".ahsir", "rooms")
 }
 
+// ManagedAgentsDir returns the parent directory holding every managed agent's
+// workspace (<configdir>/.ahsir/agents). Scanning it discovers agents whose
+// on-disk workspace (and preserved transcripts) outlive their scheduler
+// registration — the source for the console's "archived" listing. Empty when
+// the config is in-memory (no file path).
+func (c *Config) ManagedAgentsDir() string {
+	if c == nil || c.path == "" {
+		return ""
+	}
+	return filepath.Join(filepath.Dir(c.path), ".ahsir", "agents")
+}
+
 // ManagedAgentWorkspace returns the workspace directory allocated for a
 // dynamically registered agent that supplied an inline card but no workspace
 // of its own (the cma-service style: one ahsir agent per CMA agent version).

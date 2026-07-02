@@ -157,7 +157,14 @@ because replay for whoever joins a shared context is its entire purpose. Both
 are written with owner-only permissions (`0700` dirs / `0600` files); the
 sanctioned read path for transcripts is the internal-token-protected agent
 `/history` endpoint, proxied as `GET /agents/{name}/history/{contextId}` and
-rendered by `ahsir history`. Task handles from `--async` live in memory only:
+rendered by `ahsir history`. Because the transcript lives in the workspace, not
+the (in-memory) registry, it **outlives the agent**: after `ahsir agent delete`
+or a session GC the process is gone but its transcripts remain. The scheduler
+exposes those still-reachable conversations at `GET /archived`, and
+`GET /agents/{name}/history/{contextId}` falls back to reading them straight
+from disk — so the web console lists deleted agents under **已归档 (Archived)**
+and replays their prior turns read-only (no re-spawn), honoring the same 30-day
+retention window as live transcripts. Task handles from `--async` live in memory only:
 after an agent restart a taskId answers 404 — the conversation itself survives
 (sessions.json resume + transcript); check `ahsir history` to see whether the
 turn ran before resending.

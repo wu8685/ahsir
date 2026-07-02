@@ -135,6 +135,15 @@ func (g *gatewayHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// /archived: offline agents whose workspace (and transcripts) outlived their
+	// scheduler registration. Read-only, backs the console's "已归档" rail so a
+	// deleted agent's prior turns stay viewable. Distinct top-level path so it
+	// can't be mistaken for a single agent named "archived" under /agents/{name}.
+	if r.URL.Path == "/archived" && r.Method == http.MethodGet {
+		g.handleArchived(w, r)
+		return
+	}
+
 	// /invocations: read-only view over the scheduler's invocation ledger.
 	// Backs `ahsir trace <contextId>` (and `ahsir trace` for a recent
 	// overview). UserText in these records is already bounded at write time
@@ -277,6 +286,18 @@ func (g *gatewayHandler) handlePublicAgents(w http.ResponseWriter, r *http.Reque
 		}
 	}
 	writeJSON(w, http.StatusOK, result)
+}
+
+func (g *gatewayHandler) handleArchived(w http.ResponseWriter, r *http.Request) {
+	agents, err := g.sch.ArchivedAgents()
+	if err != nil {
+		writeJSONError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if agents == nil {
+		agents = []ArchivedAgent{}
+	}
+	writeJSON(w, http.StatusOK, agents)
 }
 
 func (g *gatewayHandler) handlePublicAgent(w http.ResponseWriter, r *http.Request, name string) {

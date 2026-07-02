@@ -29,6 +29,7 @@
     roomRendered: null,// last room id rendered (to force scroll-to-bottom on open)
     roomSig: null,     // last rendered room fingerprint (skip redundant repaints)
     cfgCache: {},      // agent name -> {path, yaml} read-only config detail
+    archived: [],      // [{name, workspace, contexts:[...]}] offline agents
   };
 
   // ---- tiny helpers -------------------------------------------------------
@@ -279,7 +280,19 @@
     const a = agentByName(state.agent);
     $("#detailName").textContent = state.agent || "-";
     const card = $("#detailCard");
-    if (!a) { card.innerHTML = '<div class="muted-line">选择一个 agent 查看详情</div>'; return; }
+    if (!a) {
+      const arch = (state.archived || []).find((x) => x.name === state.agent);
+      if (arch) {
+        card.innerHTML = `
+          <div class="ch"><span class="av" style="background:${avatarColor(arch.name)}">${esc(arch.name.slice(0, 2))}</span>
+            <div class="t">${esc(arch.name)}<small class="mono">已归档 · 离线</small></div></div>
+          <dl class="kv"><dt>status</dt><dd>archived</dd><dt>workspace</dt><dd>${esc(arch.workspace || "")}</dd></dl>
+          <div class="da-note">该 agent 已下线/删除，进程不在运行，但工作区里的历史转录仍保留、可只读查看。用 <code class="md-code">ahsir agent new</code> 重新创建同名 agent 即可恢复对话。</div>`;
+        return;
+      }
+      card.innerHTML = '<div class="muted-line">选择一个 agent 查看详情</div>';
+      return;
+    }
     const skills = (a.skills || []).map((s) => `<span>${esc(s.name)}</span>`).join("");
     card.innerHTML = `
       <div class="ch"><span class="av" style="background:${avatarColor(a.name)}">${esc(a.name.slice(0, 2))}</span>
@@ -500,6 +513,66 @@
     });
   }
 
+  // ---- archived (offline) agents -----------------------------------------
+
+  // Offline agents whose scheduler registration is gone but whose workspace
+  // transcripts survive. Rendered under the live conversation list; opening a
+  // row replays its transcript read-only via the same /history route.
+  async function loadArchived() {
+    let agents;
+    try {
+      agents = await getJSON("/archived");
+    } catch (e) {
+      return; // best-effort rail; never disrupt the live views on failure
+    }
+    state.archived = agents || [];
+    const box = $("#archived");
+    box.innerHTML = "";
+    if (!state.archived.length) return;
+    const total = state.archived.reduce((n, a) => n + ((a.contexts || []).length), 0);
+    box.appendChild(el("div", "grp", `已归档<span class="c">${total}</span>`));
+    state.archived.forEach((a) => {
+      const head = el("div", "arch-agent");
+      head.innerHTML =
+        `<span class="av" style="background:${avatarColor(a.name)}">${esc(a.name.slice(0, 2))}</span>` +
+        `<span class="t">${esc(a.name)}</span><span class="meta">离线</span>`;
+      head.title = a.workspace || a.name;
+      box.appendChild(head);
+      (a.contexts || []).forEach((c) => {
+        const active = a.name === state.agent && c.contextId === state.contextId;
+        const row = el("div", "sess arch" + (active ? " on" : ""));
+        row.innerHTML =
+          `<span class="dot s-off"></span>` +
+          `<span class="t">${esc(c.title || c.contextId)}</span>` +
+          `<span class="meta">${esc(timeAgo(c.lastActivity))}</span>`;
+        row.title = `${a.name} · ${c.contextId}`;
+        row.addEventListener("click", () => openArchivedContext(a.name, c));
+        box.appendChild(row);
+      });
+    });
+  }
+
+  async function openArchivedContext(name, c) {
+    enterChatMode();
+    state.agent = name;
+    state.contextId = c.contextId;
+    $("#ctxTitle").textContent = c.title || c.contextId;
+    $("#ctxId").textContent = "ctx · " + short(c.contextId) + " · 已归档";
+    const sel = $("#agentSel");
+    if (sel && [...sel.options].some((o) => o.value === name)) sel.value = name;
+    renderDetail();
+    try {
+      const turns = await getJSON(`/agents/${encodeURIComponent(name)}/history/${encodeURIComponent(c.contextId)}`);
+      renderThread(turns);
+    } catch (e) {
+      renderThread([]);
+    }
+    loadTrace();
+    // The composer is meaningless for an offline agent — reflect read-only.
+    document.querySelectorAll("#contexts .sess, #rooms .sess").forEach((s) => s.classList.remove("on"));
+    loadArchived();
+  }
+
   // ---- thread (center) ----------------------------------------------------
 
   function renderThread(turns) {
@@ -583,6 +656,7 @@
     document.querySelectorAll("#contexts .sess").forEach((s) => s.classList.remove("on"));
     // re-render is cheap; just reload to repaint the active marker
     loadContexts();
+    loadArchived(); // drop any stale archived highlight when a live ctx opens
   }
 
   function newConversation() {
@@ -592,7 +666,7 @@
     $("#ctxId").textContent = "ctx · " + short(state.contextId);
     renderThread([]);
     $("#trace").innerHTML = '<div class="muted-line">-</div>';
-    document.querySelectorAll("#contexts .sess").forEach((s) => s.classList.remove("on"));
+    document.querySelectorAll("#contexts .sess, #archived .sess").forEach((s) => s.classList.remove("on"));
     $("#ta").focus();
   }
 
@@ -1553,10 +1627,11 @@
       });
     });
 
-    loadAgents().then(() => { loadContexts(); loadRooms(); });
+    loadAgents().then(() => { loadContexts(); loadRooms(); loadArchived(); });
     // Light polling so external CLI activity shows up in the rails.
     setInterval(() => {
       loadRooms();
+      loadArchived();
       if (state.mode === "chat") { loadContexts(); if (state.contextId) loadTrace(); }
     }, 8000);
   }
