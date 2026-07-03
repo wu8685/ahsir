@@ -69,7 +69,10 @@ shutdown still stop the process without restart.
   run rooms, and read the trace. Per-bubble 复制 / 直接回复 actions, drag a
   participant to `@`-mention it, drop or paste a file onto the composer to attach
   its local path, click a trace node to jump to its bubble, and get a
-  sound + popup + flashing-tab alert when an agent `@`-mentions you. Holds no
+  sound + popup + flashing-tab alert when an agent `@`-mentions you. A **归档
+  (Archived)** rail lists offline agents — ones deleted or stopped whose managed
+  workspace under `.ahsir/agents/*` still holds transcripts — and replays their
+  past turns read-only (no re-spawn), respecting the 30-day retention. Holds no
   LLM — a thin proxy + SPA.
 - **Rooms (multi-agent group conversation)** — two floor-control modes
   (`mode` on `POST /rooms`):
@@ -157,7 +160,11 @@ because replay for whoever joins a shared context is its entire purpose. Both
 are written with owner-only permissions (`0700` dirs / `0600` files); the
 sanctioned read path for transcripts is the internal-token-protected agent
 `/history` endpoint, proxied as `GET /agents/{name}/history/{contextId}` and
-rendered by `ahsir history`. Task handles from `--async` live in memory only:
+rendered by `ahsir history`. When the agent is no longer running (deleted /
+stopped), that same proxied path falls back to reading the transcript straight
+off disk, and `GET /archived-agents` enumerates such offline workspaces — so a
+gone agent's history stays viewable in the console's 归档 rail without
+resurrecting the process. Task handles from `--async` live in memory only:
 after an agent restart a taskId answers 404 — the conversation itself survives
 (sessions.json resume + transcript); check `ahsir history` to see whether the
 turn ran before resending.

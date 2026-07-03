@@ -186,10 +186,22 @@ func (c *Config) RoomsDir() string {
 // config is in-memory (no file path), in which case the caller must require an
 // explicit workspace.
 func (c *Config) ManagedAgentWorkspace(name string) string {
+	dir := c.ManagedAgentsDir()
+	if dir == "" {
+		return ""
+	}
+	return filepath.Join(dir, name)
+}
+
+// ManagedAgentsDir is the root under which managed agent workspaces live —
+// .ahsir/agents/<name>. It is the discovery surface for archived/offline agents:
+// a workspace here whose agent is no longer registered still holds replayable
+// transcripts. Empty when the config is in-memory (no file path).
+func (c *Config) ManagedAgentsDir() string {
 	if c == nil || c.path == "" {
 		return ""
 	}
-	return filepath.Join(filepath.Dir(c.path), ".ahsir", "agents", name)
+	return filepath.Join(filepath.Dir(c.path), ".ahsir", "agents")
 }
 
 // AllocatePort allocates the next available port from the range.

@@ -174,6 +174,35 @@ agents: []
 	}
 }
 
+func TestManagedAgentsDir(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "ahsir.yaml")
+	if err := os.WriteFile(configPath, []byte("agents: []\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := LoadConfig(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	wantDir := filepath.Join(dir, ".ahsir", "agents")
+	if got := cfg.ManagedAgentsDir(); got != wantDir {
+		t.Fatalf("ManagedAgentsDir() = %q, want %q", got, wantDir)
+	}
+	// ManagedAgentWorkspace must be a direct child of the agents dir.
+	if got := cfg.ManagedAgentWorkspace("bob"); got != filepath.Join(wantDir, "bob") {
+		t.Fatalf("ManagedAgentWorkspace(bob) = %q", got)
+	}
+
+	// In-memory config (no path) has no managed dir.
+	if got := (&Config{}).ManagedAgentsDir(); got != "" {
+		t.Fatalf("in-memory ManagedAgentsDir() = %q, want empty", got)
+	}
+	if got := (&Config{}).ManagedAgentWorkspace("bob"); got != "" {
+		t.Fatalf("in-memory ManagedAgentWorkspace() = %q, want empty", got)
+	}
+}
+
 func TestConfigAllocatePort(t *testing.T) {
 	cfg := &Config{
 		PortRange: PortRange{Start: 9801, End: 9900},
