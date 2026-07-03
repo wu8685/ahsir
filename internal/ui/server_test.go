@@ -33,6 +33,12 @@ func newStubScheduler() *stubScheduler {
 		s.lastPath = r.URL.Path
 		io.WriteString(w, `[{"name":"teacher","url":"http://127.0.0.1:9801","status":"online"}]`)
 	})
+	mux.HandleFunc("/archived-agents", func(w http.ResponseWriter, r *http.Request) {
+		s.lastPath = r.URL.Path
+		s.lastAdminTok = r.Header.Get(scheduler.AdminTokenHeader)
+		w.Header().Set("Content-Type", "application/json")
+		io.WriteString(w, `[{"name":"ghost","contexts":[{"contextId":"ctx-1","title":"hi","turns":2,"lastActivity":"2026-07-01T00:00:00Z","lastStatus":"completed"}]}]`)
+	})
 	mux.HandleFunc("/admin/agents", func(w http.ResponseWriter, r *http.Request) {
 		s.lastPath = r.URL.Path
 		s.lastMethod = r.Method
@@ -127,6 +133,30 @@ func TestProxyAgents(t *testing.T) {
 		t.Errorf("scheduler saw path %q, want /agents (prefix stripped)", stub.lastPath)
 	}
 	if !strings.Contains(rec.Body.String(), "teacher") {
+		t.Errorf("body not relayed: %s", rec.Body.String())
+	}
+}
+
+// TestProxyArchivedAgents confirms the console reaches the scheduler's
+// read-only offline-agent endpoint through the generic /api proxy (no admin
+// token needed), so the "归档" rail can list deleted agents.
+func TestProxyArchivedAgents(t *testing.T) {
+	stub := newStubScheduler()
+	defer stub.srv.Close()
+	h := newTestServer(t, stub.srv.URL, "admin-secret")
+
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/archived-agents", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d", rec.Code)
+	}
+	if stub.lastPath != "/archived-agents" {
+		t.Errorf("scheduler saw path %q, want /archived-agents (prefix stripped)", stub.lastPath)
+	}
+	if stub.lastAdminTok != "" {
+		t.Errorf("read route must not carry admin token, got %q", stub.lastAdminTok)
+	}
+	if !strings.Contains(rec.Body.String(), "ghost") {
 		t.Errorf("body not relayed: %s", rec.Body.String())
 	}
 }

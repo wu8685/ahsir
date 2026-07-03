@@ -145,6 +145,15 @@ func (g *gatewayHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// /archived-agents: read-only view of offline agents (deleted/stopped) whose
+	// managed workspaces still hold transcripts under .ahsir/agents/*. Backs the
+	// console's "归档" section. No admin token — it exposes no more than the
+	// transcript files themselves, same posture as /invocations and /history.
+	if r.URL.Path == "/archived-agents" && r.Method == http.MethodGet {
+		g.handleArchivedAgents(w, r)
+		return
+	}
+
 	// /rooms: roundtable (multi-agent group chat) engine. Read/dispatch routes,
 	// not control plane — no admin token (same posture as chat). The console
 	// reaches these through its /api/* reverse proxy.
@@ -514,18 +523,41 @@ func (g *gatewayHandler) handleAgentConfig(w http.ResponseWriter, r *http.Reques
 	writeJSON(w, http.StatusOK, map[string]string{"path": path, "yaml": string(data)})
 }
 
+func (g *gatewayHandler) handleArchivedAgents(w http.ResponseWriter, r *http.Request) {
+	agents, err := g.sch.ArchivedAgents()
+	if err != nil {
+		writeJSONError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if agents == nil {
+		agents = []ArchivedAgent{}
+	}
+	writeJSON(w, http.StatusOK, agents)
+}
+
 func (g *gatewayHandler) handleHistory(w http.ResponseWriter, r *http.Request, name, rawContextID string) {
 	contextID, err := url.PathUnescape(rawContextID)
 	if err != nil || contextID == "" {
 		writeJSONError(w, http.StatusBadRequest, "invalid contextId")
 		return
 	}
-	turns, err := g.sch.AgentHistory(name, contextID)
-	if err != nil {
-		if _, ok := g.sch.registry.Get(name); !ok {
+	// An agent that isn't registered can't be proxied — but if it's an
+	// archived/offline agent its transcripts persist on disk, so serve those
+	// read-only. This is what keeps a deleted agent's history viewable.
+	if _, ok := g.sch.registry.Get(name); !ok {
+		turns, err := g.sch.ArchivedAgentHistory(name, contextID)
+		if err != nil {
 			writeJSONError(w, http.StatusNotFound, err.Error())
 			return
 		}
+		if turns == nil {
+			turns = []wrapper.TranscriptTurn{}
+		}
+		writeJSON(w, http.StatusOK, turns)
+		return
+	}
+	turns, err := g.sch.AgentHistory(name, contextID)
+	if err != nil {
 		writeJSONError(w, http.StatusBadGateway, err.Error())
 		return
 	}
