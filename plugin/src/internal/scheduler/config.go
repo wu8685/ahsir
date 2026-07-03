@@ -104,6 +104,24 @@ type PortRange struct {
 	End   int `yaml:"end"`
 }
 
+// validate rejects a nonsensical port_range at config-load time so a
+// misconfiguration surfaces up front with an actionable message, rather than
+// much later at runtime as an opaque "no available ports in range" error from
+// AllocatePort. A port must be a positive TCP port number, and the range must
+// be non-empty (start <= end).
+func (p PortRange) validate() error {
+	if p.Start <= 0 {
+		return fmt.Errorf("invalid port_range: start %d must be a positive port number", p.Start)
+	}
+	if p.End > 65535 {
+		return fmt.Errorf("invalid port_range: end %d exceeds the maximum port number 65535", p.End)
+	}
+	if p.Start > p.End {
+		return fmt.Errorf("invalid port_range: start %d is greater than end %d", p.Start, p.End)
+	}
+	return nil
+}
+
 // LoadConfig reads and parses ahsir.yaml.
 func LoadConfig(path string) (*Config, error) {
 	data, err := os.ReadFile(path)
@@ -126,6 +144,10 @@ func LoadConfig(path string) (*Config, error) {
 
 	if err := yaml.Unmarshal(data, cfg); err != nil {
 		return nil, fmt.Errorf("parse config: %w", err)
+	}
+
+	if err := cfg.PortRange.validate(); err != nil {
+		return nil, err
 	}
 
 	cfg.nextPort = cfg.PortRange.Start
