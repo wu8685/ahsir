@@ -179,12 +179,24 @@ type RuntimeConfig struct {
 	Args     []string          `yaml:"args" json:"args"`
 	Env      map[string]string `yaml:"env" json:"env"`
 	Timeout  string            `yaml:"timeout" json:"timeout"`
+	// IdleTimeout is the scale-to-zero idle-reap window (issue #6): after all
+	// turns end and no new turn starts for this long, the agent process exits
+	// on its own and the scheduler marks it idle-stopped, waking it again on
+	// the next access. Orthogonal to Timeout, which is the per-turn LLM
+	// deadline and continues to exist independently (a per-turn deadline is
+	// what guarantees a wedged turn eventually ends → eventually goes idle).
+	//
+	// Form: time.ParseDuration (e.g. "15m", "2h"). Empty uses the global
+	// default (DefaultIdleTimeout, 10m). An explicit "0" pins the agent
+	// resident — byte-for-byte the historical always-on behaviour. Parsed via
+	// ParseIdleTimeout.
+	IdleTimeout string `yaml:"idle_timeout" json:"idle_timeout"`
 }
 
 // FilesystemConfig holds filesystem tool configuration from agent-card.yaml.
 type FilesystemConfig struct {
-	Enabled      bool     `yaml:"enabled" json:"enabled"`
-	WriteAccess  bool     `yaml:"write_access" json:"write_access"`
+	Enabled     bool `yaml:"enabled" json:"enabled"`
+	WriteAccess bool `yaml:"write_access" json:"write_access"`
 	// ShellAccess is the explicit opt-in that adds the Bash tool to the
 	// claude allowedTools whitelist. It is deliberately separate from
 	// WriteAccess: granting file edits must not implicitly grant arbitrary

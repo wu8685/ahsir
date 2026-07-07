@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 func TestResolveUploadDir(t *testing.T) {
@@ -160,6 +161,53 @@ runtime:
 	}
 	if cfg.Runtime.Timeout != "30s" {
 		t.Errorf("expected timeout 30s, got %q", cfg.Runtime.Timeout)
+	}
+}
+
+// TestLoadAgentCardIdleTimeout verifies the scale-to-zero runtime.idle_timeout
+// field parses from YAML and that an unset value stays empty (so the agent
+// applies the global DefaultIdleTimeout, not a literal zero that would pin it
+// resident).
+func TestLoadAgentCardIdleTimeout(t *testing.T) {
+	dir := t.TempDir()
+	yamlContent := `
+name: A
+version: "1.0.0"
+skills: []
+runtime:
+  command: claude
+  idle_timeout: 15m
+`
+	a2aDir := filepath.Join(dir, ".a2a")
+	os.MkdirAll(a2aDir, 0755)
+	os.WriteFile(filepath.Join(a2aDir, "agent-card.yaml"), []byte(yamlContent), 0644)
+
+	cfg, err := NewAgentCardBuilder(dir).Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Runtime.IdleTimeout != "15m" {
+		t.Errorf("expected idle_timeout '15m', got %q", cfg.Runtime.IdleTimeout)
+	}
+	d, enabled, err := ParseIdleTimeout(cfg.Runtime.IdleTimeout)
+	if err != nil || !enabled || d != 15*time.Minute {
+		t.Errorf("ParseIdleTimeout(%q) = (%v,%v,%v)", cfg.Runtime.IdleTimeout, d, enabled, err)
+	}
+
+	// Unset case: field stays empty, so the default applies.
+	dir2 := t.TempDir()
+	a2aDir2 := filepath.Join(dir2, ".a2a")
+	os.MkdirAll(a2aDir2, 0755)
+	os.WriteFile(filepath.Join(a2aDir2, "agent-card.yaml"), []byte("name: B\nversion: \"1.0.0\"\nskills: []\n"), 0644)
+	cfg2, err := NewAgentCardBuilder(dir2).Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg2.Runtime.IdleTimeout != "" {
+		t.Errorf("expected unset idle_timeout to stay empty, got %q", cfg2.Runtime.IdleTimeout)
+	}
+	if d, enabled, _ := ParseIdleTimeout(cfg2.Runtime.IdleTimeout); !enabled || d != DefaultIdleTimeout {
+		t.Errorf("unset idle_timeout should resolve to DefaultIdleTimeout, got (%v,%v)", d, enabled)
 	}
 }
 
