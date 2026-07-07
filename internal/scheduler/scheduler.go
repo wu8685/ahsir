@@ -14,6 +14,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -60,6 +61,17 @@ type Scheduler struct {
 	// rooms hosts multi-agent group chats (roundtable mode). Lazily wired in
 	// New so the turnFunc can close over the constructed Scheduler.
 	rooms *RoomManager
+
+	// idleStopped holds agents that scaled themselves to zero after going idle
+	// (issue #6). They remain in `desired` (unlike an explicit StopAgent) so the
+	// activator can wake them on next access — the config is stashed here to
+	// respawn from. Guarded by s.mu.
+	idleStopped map[string]AgentConfig
+
+	// waking single-flights concurrent wake attempts for one idle-stopped agent
+	// (R2): the first request creates the channel and spawns the process; others
+	// wait on it. Guarded by s.mu.
+	waking map[string]chan struct{}
 }
 
 type agentProcess struct {
@@ -126,6 +138,8 @@ func New(cfg *Config) *Scheduler {
 		agentCommand:         defaultAgentCommand,
 		findLocalListener:    defaultFindLocalListener,
 		killLocalProcessTree: defaultKillLocalProcessTree,
+		idleStopped:          make(map[string]AgentConfig),
+		waking:               make(map[string]chan struct{}),
 	}
 	// Roundtable turns reuse the normal per-agent chat path (shared contextId,
 	// speaker attribution, ledger) — the room id is the contextId.
@@ -336,10 +350,15 @@ func (s *Scheduler) StopAgent(name string) error {
 	proc, ok := s.agents[name]
 	if !ok {
 		delete(s.desired, name)
+		// An explicitly stopped agent must not be resurrected by the activator,
+		// even if it had scaled to zero (spec §4.5: idle-stopped wakes; stopped
+		// / archived does not).
+		delete(s.idleStopped, name)
 		s.mu.Unlock()
 		return nil
 	}
 	delete(s.desired, name)
+	delete(s.idleStopped, name)
 	proc.stopping = true
 	// Kill the process group before canceling the CommandContext. If
 	// CommandContext kills only the direct child first, we may lose the parent
@@ -631,6 +650,7 @@ func (s *Scheduler) monitorAgent(proc *agentProcess) {
 	} else {
 		log.Printf("Agent %s exited", proc.cfg.Name)
 	}
+	idle := isIdleStopExit(err)
 
 	s.mu.Lock()
 	current, ok := s.agents[proc.cfg.Name]
@@ -647,6 +667,20 @@ func (s *Scheduler) monitorAgent(proc *agentProcess) {
 	cfg, desired := s.desired[proc.cfg.Name]
 	if !desired {
 		s.mu.Unlock()
+		return
+	}
+
+	// Scale-to-zero: a controlled idle self-exit is NOT a crash. Mark the agent
+	// idle-stopped (kept in `desired` so the activator can wake it) and skip the
+	// supervisor restart entirely — restarting would defeat the whole point of
+	// reaping an idle agent (spec §4.3, R3). Cancel the process context to stop
+	// its health watcher; a lingering watcher would otherwise "fail" against the
+	// dead port and could try to restart it.
+	if idle {
+		s.idleStopped[proc.cfg.Name] = cfg
+		proc.cancel()
+		s.mu.Unlock()
+		log.Printf("Agent %s idle-stopped (scaled to zero); will wake on next access", proc.cfg.Name)
 		return
 	}
 	attempt := proc.restartAttempts + 1
@@ -871,6 +905,8 @@ func (s *Scheduler) Stop() {
 	}
 	s.agents = make(map[string]*agentProcess)
 	s.desired = make(map[string]AgentConfig)
+	s.idleStopped = make(map[string]AgentConfig)
+	s.waking = make(map[string]chan struct{})
 	s.running = false
 }
 
@@ -941,6 +977,129 @@ func (s *Scheduler) RestartAgent(name string) (int, error) {
 	return s.StartAgent(cfg)
 }
 
+// isIdleStopExit reports whether a finished agent process exited via the
+// scale-to-zero self-exit path (wrapper.IdleStopExitCode) rather than crashing.
+// Only a clean exit status carrying exactly that code counts — a signal kill or
+// any other non-zero code is treated as a crash.
+func isIdleStopExit(err error) bool {
+	if err == nil {
+		return false
+	}
+	var exitErr *exec.ExitError
+	if errors.As(err, &exitErr) {
+		return exitErr.ExitCode() == wrapper.IdleStopExitCode
+	}
+	return false
+}
+
+// IdleStoppedAgents lists agents currently scaled to zero (idle-stopped) and
+// awaitable via the activator. Sorted for stable output.
+func (s *Scheduler) IdleStoppedAgents() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := make([]string, 0, len(s.idleStopped))
+	for name := range s.idleStopped {
+		out = append(out, name)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// ensureAwake wakes an idle-stopped agent before a request is forwarded to it
+// (the activator, spec §4.4). No-op when the agent is already running or is not
+// idle-stopped: an unknown, explicitly-stopped, or archived agent is left alone
+// so it does NOT spring back to life on a single access (spec §4.5). Concurrent
+// callers single-flight through s.waking (R2) — only the first spawns a
+// process; the rest wait for it to come up.
+func (s *Scheduler) ensureAwake(name string) error {
+	s.mu.Lock()
+	if !s.running {
+		s.mu.Unlock()
+		return nil
+	}
+	if _, up := s.agents[name]; up {
+		s.mu.Unlock()
+		return nil
+	}
+	if ch, waking := s.waking[name]; waking {
+		// Another goroutine is already bringing it up — wait for that attempt.
+		s.mu.Unlock()
+		<-ch
+		return nil
+	}
+	cfg, idle := s.idleStopped[name]
+	if !idle {
+		// Not idle-stopped: nothing to wake. The caller's normal dial decides
+		// whether this is a live registry agent or a genuine not-found.
+		s.mu.Unlock()
+		return nil
+	}
+	ch := make(chan struct{})
+	s.waking[name] = ch
+	// Re-allocate the port: the reaped process's port may linger in TIME_WAIT.
+	cfg.Port = 0
+	startErr := s.startAgentLocked(s.ctx, cfg, 0)
+	var proc *agentProcess
+	if startErr == nil {
+		delete(s.idleStopped, name)
+		proc = s.agents[name]
+	}
+	s.mu.Unlock()
+
+	// Always release the single-flight latch, success or failure, so a failed
+	// wake doesn't wedge every later request behind a never-closed channel.
+	defer func() {
+		s.mu.Lock()
+		delete(s.waking, name)
+		s.mu.Unlock()
+		close(ch)
+	}()
+
+	if startErr != nil {
+		return fmt.Errorf("wake idle-stopped agent %s: %w", name, startErr)
+	}
+	log.Printf("Agent %s waking from idle-stopped", name)
+	if err := s.waitAgentHealthy(proc); err != nil {
+		return fmt.Errorf("wake idle-stopped agent %s: %w", name, err)
+	}
+	log.Printf("Agent %s awake and healthy", name)
+	return nil
+}
+
+// waitAgentHealthy polls the agent's /healthz until it responds OK or a wake
+// budget elapses. The budget mirrors the supervisor's startup grace plus a few
+// health intervals — enough for a cold start + `--resume` to rebind the port.
+// The invariant timeouts.chat >= cold_start + runtime.timeout (spec §4.6) is
+// what keeps this wait inside the caller's overall chat deadline.
+func (s *Scheduler) waitAgentHealthy(proc *agentProcess) error {
+	grace := s.supervisor.HealthStartupGrace
+	if grace < 0 {
+		grace = 0
+	}
+	interval := s.supervisor.HealthInterval
+	if interval <= 0 {
+		interval = 5 * time.Second
+	}
+	budget := grace + 6*interval
+	if budget < 5*time.Second {
+		budget = 5 * time.Second
+	}
+	deadline := time.Now().Add(budget)
+	for {
+		if ok, _, _ := s.checkAgentHealth(s.ctx, proc.cfg); ok {
+			return nil
+		}
+		if time.Now().After(deadline) {
+			return fmt.Errorf("agent %s did not become healthy within %s of wake", proc.cfg.Name, budget)
+		}
+		select {
+		case <-s.ctx.Done():
+			return s.ctx.Err()
+		case <-time.After(interval):
+		}
+	}
+}
+
 // ChatWithAgent sends a message to an agent.
 //
 // The forwarding timeout comes from cfg.Timeouts.Chat (default 10m). It MUST
@@ -958,6 +1117,11 @@ func (s *Scheduler) ChatWithAgent(agentName, contextID, message string) (string,
 // turn with who said it (shared-context collaboration). Empty speaker is
 // byte-identical to ChatWithAgent.
 func (s *Scheduler) ChatWithAgentAs(agentName, contextID, speaker, message string) (string, error) {
+	// Activator: transparently wake an idle-stopped agent before dialing so the
+	// caller never sees a scale-to-zero'd agent as "connection refused".
+	if err := s.ensureAwake(agentName); err != nil {
+		return "", err
+	}
 	card, internalToken, ok := s.agentDialTarget(agentName)
 	if !ok {
 		return "", fmt.Errorf("agent %s not found", agentName)
@@ -989,6 +1153,9 @@ func (s *Scheduler) ChatWithAgentAs(agentName, contextID, speaker, message strin
 // answers with a submitted task immediately (configuration.blocking=false).
 // Callers poll the task via GetTaskStatus / `ahsir status`.
 func (s *Scheduler) ChatWithAgentAsync(agentName, contextID, speaker, message string) (*a2a.Task, error) {
+	if err := s.ensureAwake(agentName); err != nil {
+		return nil, err
+	}
 	card, internalToken, ok := s.agentDialTarget(agentName)
 	if !ok {
 		return nil, fmt.Errorf("agent %s not found", agentName)
