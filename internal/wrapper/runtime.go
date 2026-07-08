@@ -13,6 +13,9 @@ const (
 	ProviderZhipu     = "zhipu"
 	ProviderDeepSeek  = "deepseek"
 	ProviderCodex     = "codex"
+	// ProviderEcho is a deterministic in-memory provider (tests + CMA-facade
+	// e2e). It runs no CLI and needs no LLM env.
+	ProviderEcho = "echo"
 )
 
 // zhipuDefaultBaseURL is the Anthropic-compatible endpoint published by
@@ -97,6 +100,10 @@ func ResolveProviderEnv(rt RuntimeConfig) (map[string]string, error) {
 		if apiKey != "" {
 			out["CODEX_API_KEY"] = apiKey
 		}
+	case ProviderEcho:
+		// Deterministic in-memory echo provider (tests + CMA-facade e2e). Runs
+		// no CLI, so baseURL/apiKey/model are irrelevant and intentionally
+		// ignored — leave out empty and skip the anthropic auth check below.
 	default:
 		// Unknown provider — refuse silently translating high-level fields,
 		// but tolerate the case where the user only set Env explicitly.

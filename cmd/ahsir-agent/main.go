@@ -127,6 +127,9 @@ func main() {
 		// Claude uses one long-running stream-json subprocess; Codex forks
 		// `codex exec --json` per turn and resumes by thread_id.
 		factory := func(ctx context.Context, contextID, resumeID string) (wrapper.Session, error) {
+			if sessionCfg.Provider == wrapper.ProviderEcho {
+				return wrapper.NewEchoSession(ctx, sessionCfg, resumeID)
+			}
 			if sessionCfg.Provider == wrapper.ProviderCodex {
 				return wrapper.NewCodexSession(ctx, sessionCfg, resumeID)
 			}
