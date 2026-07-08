@@ -110,7 +110,8 @@ type PoolConfig struct {
 	// SessionIdleTTL controls when an ACTIVE session (one contextId → one
 	// live LLM subprocess) is closed and moved to EVICTED. This is the
 	// SESSION-level idle knob — the agent process itself keeps running.
-	// Empty means the ahsir-agent default.
+	// Empty means the ahsir-agent default. Distinct from
+	// runtime.agent_idle_timeout, which reaps the whole agent PROCESS.
 	SessionIdleTTL string `yaml:"session_idle_ttl" json:"session_idle_ttl"`
 
 	// EvictedTTL controls time-based deletion of inactive mappings. Empty
@@ -181,6 +182,20 @@ type RuntimeConfig struct {
 	Args     []string          `yaml:"args" json:"args"`
 	Env      map[string]string `yaml:"env" json:"env"`
 	Timeout  string            `yaml:"timeout" json:"timeout"`
+	// AgentIdleTimeout is the scale-to-zero idle-reap window (issue #6): after
+	// all turns end and no new turn starts for this long, the agent PROCESS
+	// exits on its own and the scheduler marks it idle-stopped, waking it again
+	// on the next access. This is the PROCESS-level idle knob — distinct from
+	// pool.session_idle_ttl, which only recycles a single session. Orthogonal
+	// to Timeout, which is the per-turn LLM deadline and continues to exist
+	// independently (a per-turn deadline is what guarantees a wedged turn
+	// eventually ends → eventually goes idle).
+	//
+	// Form: time.ParseDuration (e.g. "15m", "2h"). Empty uses the global
+	// default (DefaultAgentIdleTimeout, 10m). An explicit "0" pins the agent
+	// resident — byte-for-byte the historical always-on behaviour. Parsed via
+	// ParseAgentIdleTimeout.
+	AgentIdleTimeout string `yaml:"agent_idle_timeout" json:"agent_idle_timeout"`
 }
 
 // FilesystemConfig holds filesystem tool configuration from agent-card.yaml.
