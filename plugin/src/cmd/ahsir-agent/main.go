@@ -151,7 +151,7 @@ func main() {
 		}
 
 		w.SetupExecutor(pool.LookupOrCreate, listAgents, callAgent, maxCalls, basePrompt)
-		log.Printf("Executor wired: %s SessionPool (%s %v, timeout=%s, persist=%s, idle_ttl=%s, evicted_ttl=%s, max_evicted=%d)", sessionCfg.Provider, sessionCfg.Command, sessionCfg.Args, sessionCfg.Timeout, persistPath, retention.idleTTL, retention.evictedTTL, retention.maxEvicted)
+		log.Printf("Executor wired: %s SessionPool (%s %v, timeout=%s, persist=%s, session_idle_ttl=%s, evicted_ttl=%s, max_evicted=%d)", sessionCfg.Provider, sessionCfg.Command, sessionCfg.Args, sessionCfg.Timeout, persistPath, retention.idleTTL, retention.evictedTTL, retention.maxEvicted)
 	}
 
 	// Wait for signal
@@ -249,10 +249,10 @@ func poolRetentionConfig(cfg wrapper.PoolConfig) (poolRetention, error) {
 		evictedTTL: 30 * 24 * time.Hour,
 		maxEvicted: 1000,
 	}
-	if cfg.IdleTTL != "" {
-		d, err := parsePoolDuration(cfg.IdleTTL)
+	if cfg.SessionIdleTTL != "" {
+		d, err := parsePoolDuration(cfg.SessionIdleTTL)
 		if err != nil {
-			return poolRetention{}, fmt.Errorf("pool.idle_ttl %q: %w", cfg.IdleTTL, err)
+			return poolRetention{}, fmt.Errorf("pool.session_idle_ttl %q: %w", cfg.SessionIdleTTL, err)
 		}
 		ret.idleTTL = d
 	}

@@ -662,7 +662,7 @@ pool:
   max_active: 0             # cap on concurrent live provider processes (0 = unlimited)
   overload_policy: reject   # reject | evict-lru
   queue_depth: 4            # per-context FIFO turn queue (0 = fail-fast busy)
-  idle_ttl: 30m
+  session_idle_ttl: 30m
   evicted_ttl: 720h
   max_evicted: 1000
 streaming:

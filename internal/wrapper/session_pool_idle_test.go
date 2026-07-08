@@ -163,7 +163,7 @@ func TestGatedSessionRejectsTurnsAfterReap(t *testing.T) {
 }
 
 // TestPoolIdleReaperDisabledIsResident: EnableIdleReaper(0) is a no-op — the
-// pool stays resident, matching the explicit `idle_timeout: 0` escape hatch.
+// pool stays resident, matching the explicit `agent_idle_timeout: 0` escape hatch.
 func TestPoolIdleReaperDisabledIsResident(t *testing.T) {
 	probe := newGateProbeSession()
 	pool := newGatedTestPool(t, probe)

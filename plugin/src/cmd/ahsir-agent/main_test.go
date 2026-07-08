@@ -310,9 +310,9 @@ func TestPoolRetentionConfigDefaultsAndOverrides(t *testing.T) {
 	}
 
 	got, err := poolRetentionConfig(wrapper.PoolConfig{
-		IdleTTL:    "45m",
-		EvictedTTL: "7d",
-		MaxEvicted: 25,
+		SessionIdleTTL: "45m",
+		EvictedTTL:     "7d",
+		MaxEvicted:     25,
 	})
 	if err != nil {
 		t.Fatal(err)

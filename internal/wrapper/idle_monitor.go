@@ -23,9 +23,10 @@ import (
 )
 
 const (
-	// DefaultIdleTimeout is the global default idle-reap window applied when an
-	// agent card leaves runtime.idle_timeout unset (decision B in the spec).
-	DefaultIdleTimeout = 10 * time.Minute
+	// DefaultAgentIdleTimeout is the global default idle-reap window applied
+	// when an agent card leaves runtime.agent_idle_timeout unset (decision B in
+	// the spec).
+	DefaultAgentIdleTimeout = 10 * time.Minute
 
 	// IdleStopExitCode is the process exit status an ahsir-agent uses when it
 	// voluntarily shuts down after going idle. The scheduler keys on it to tell
@@ -44,9 +45,9 @@ const (
 // only commits when no turn is in flight (see idleMonitor.fire).
 var ErrAgentIdleStopping = errors.New("agent idle-stopping")
 
-// ParseIdleTimeout interprets a card's runtime.idle_timeout value.
+// ParseAgentIdleTimeout interprets a card's runtime.agent_idle_timeout value.
 //
-//   - ""          -> (DefaultIdleTimeout, true, nil): unset uses the global default
+//   - ""          -> (DefaultAgentIdleTimeout, true, nil): unset uses the global default
 //   - "0" / "0s"  -> (0, false, nil): explicit zero disables reaping (resident agent)
 //   - "15m" etc   -> (d, true, nil)
 //   - invalid     -> (0, false, err)
@@ -54,9 +55,9 @@ var ErrAgentIdleStopping = errors.New("agent idle-stopping")
 // enabled reports whether idle reaping should run at all. A per-agent explicit
 // zero is the documented "pin this agent resident" escape hatch, byte-for-byte
 // the historical always-on behaviour.
-func ParseIdleTimeout(s string) (timeout time.Duration, enabled bool, err error) {
+func ParseAgentIdleTimeout(s string) (timeout time.Duration, enabled bool, err error) {
 	if strings.TrimSpace(s) == "" {
-		return DefaultIdleTimeout, true, nil
+		return DefaultAgentIdleTimeout, true, nil
 	}
 	d, err := time.ParseDuration(s)
 	if err != nil {

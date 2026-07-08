@@ -29,13 +29,13 @@ The teacher card uses:
 runtime:
   timeout: 0s
 pool:
-  idle_ttl: 10s
+  session_idle_ttl: 10s
   evicted_ttl: 30d
   max_evicted: 2
 ```
 
 `timeout: 0s` avoids killing the provider turn by deadline during the demo.
-`idle_ttl: 10s` and `max_evicted: 2` make retention behavior easy to observe.
+`session_idle_ttl: 10s` and `max_evicted: 2` make retention behavior easy to observe.
 
 ## Prerequisites
 
@@ -60,7 +60,7 @@ Watch for:
 
 ```
 Agent teacher started on port 9802 (pid: ...)
-Executor wired: anthropic SessionPool (... idle_ttl=10s, evicted_ttl=720h0m0s, max_evicted=2)
+Executor wired: anthropic SessionPool (... session_idle_ttl=10s, evicted_ttl=720h0m0s, max_evicted=2)
 ```
 
 ## Trigger An Interrupted Request
@@ -154,7 +154,7 @@ This example keeps at most two inactive mappings:
 
 ```yaml
 pool:
-  idle_ttl: 10s
+  session_idle_ttl: 10s
   max_evicted: 2
 ```
 

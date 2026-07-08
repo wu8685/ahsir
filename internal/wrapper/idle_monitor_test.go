@@ -7,16 +7,16 @@ import (
 	"time"
 )
 
-func TestParseIdleTimeout(t *testing.T) {
+func TestParseAgentIdleTimeout(t *testing.T) {
 	cases := []struct {
 		in          string
 		wantTimeout time.Duration
 		wantEnabled bool
 		wantErr     bool
 	}{
-		{"", DefaultIdleTimeout, true, false},
-		{"   ", DefaultIdleTimeout, true, false}, // whitespace == unset
-		{"0", 0, false, false},                   // explicit resident
+		{"", DefaultAgentIdleTimeout, true, false},
+		{"   ", DefaultAgentIdleTimeout, true, false}, // whitespace == unset
+		{"0", 0, false, false},                        // explicit resident
 		{"0s", 0, false, false},
 		{"-5m", 0, false, false}, // non-positive disables
 		{"15m", 15 * time.Minute, true, false},
@@ -24,19 +24,19 @@ func TestParseIdleTimeout(t *testing.T) {
 		{"bogus", 0, false, true},
 	}
 	for _, c := range cases {
-		got, enabled, err := ParseIdleTimeout(c.in)
+		got, enabled, err := ParseAgentIdleTimeout(c.in)
 		if c.wantErr {
 			if err == nil {
-				t.Errorf("ParseIdleTimeout(%q): expected error, got none", c.in)
+				t.Errorf("ParseAgentIdleTimeout(%q): expected error, got none", c.in)
 			}
 			continue
 		}
 		if err != nil {
-			t.Errorf("ParseIdleTimeout(%q): unexpected error %v", c.in, err)
+			t.Errorf("ParseAgentIdleTimeout(%q): unexpected error %v", c.in, err)
 			continue
 		}
 		if got != c.wantTimeout || enabled != c.wantEnabled {
-			t.Errorf("ParseIdleTimeout(%q) = (%v, %v), want (%v, %v)", c.in, got, enabled, c.wantTimeout, c.wantEnabled)
+			t.Errorf("ParseAgentIdleTimeout(%q) = (%v, %v), want (%v, %v)", c.in, got, enabled, c.wantTimeout, c.wantEnabled)
 		}
 	}
 }

@@ -92,7 +92,7 @@ type StreamingConfig struct {
 //	pool:
 //	  max_active: 50
 //	  max_evicted: 1000
-//	  idle_ttl: 30m
+//	  session_idle_ttl: 30m
 //	  evicted_ttl: 30d
 //	  overload_policy: reject  # or "evict-lru"
 type PoolConfig struct {
@@ -107,9 +107,11 @@ type PoolConfig struct {
 	// fall back to the default.
 	OverloadPolicy string `yaml:"overload_policy" json:"overload_policy"`
 
-	// IdleTTL controls when an ACTIVE session is closed and moved to
-	// EVICTED. Empty means the ahsir-agent default.
-	IdleTTL string `yaml:"idle_ttl" json:"idle_ttl"`
+	// SessionIdleTTL controls when an ACTIVE session (one contextId → one
+	// live LLM subprocess) is closed and moved to EVICTED. This is the
+	// SESSION-level idle knob — the agent process itself keeps running.
+	// Empty means the ahsir-agent default.
+	SessionIdleTTL string `yaml:"session_idle_ttl" json:"session_idle_ttl"`
 
 	// EvictedTTL controls time-based deletion of inactive mappings. Empty
 	// means the ahsir-agent default.
@@ -252,11 +254,57 @@ func WriteCard(workspaceDir string, cfg *AgentCardConfig) error {
 	return nil
 }
 
+// renamedCardKey pairs a removed YAML key (old, still-in-the-wild) with the
+// section it lived under and its replacement, for fail-loud detection.
+type renamedCardKey struct {
+	section string // top-level block, e.g. "pool" or "runtime"
+	old     string // removed key name
+	new     string // replacement key name
+}
+
+// renamedCardKeys is the authoritative list of breaking key renames the loader
+// must reject rather than silently ignore. See issue #11.
+var renamedCardKeys = []renamedCardKey{
+	{section: "pool", old: "idle_ttl", new: "session_idle_ttl"},
+	{section: "runtime", old: "idle_timeout", new: "agent_idle_timeout"},
+}
+
+// checkRenamedCardKeys scans the raw agent-card YAML for keys that were renamed
+// in a breaking change and returns an error naming the replacement. Without
+// this, yaml.Unmarshal would drop the stale key silently and the field would
+// take its default.
+func checkRenamedCardKeys(data []byte) error {
+	var raw map[string]any
+	if err := yaml.Unmarshal(data, &raw); err != nil {
+		return nil
+	}
+	for _, rk := range renamedCardKeys {
+		section, ok := raw[rk.section].(map[string]any)
+		if !ok {
+			continue
+		}
+		if _, present := section[rk.old]; present {
+			return fmt.Errorf(
+				"%s.%s has been renamed to %s.%s (breaking change); please update your agent-card.yaml",
+				rk.section, rk.old, rk.section, rk.new,
+			)
+		}
+	}
+	return nil
+}
+
 // Load reads and parses the agent-card.yaml from the workspace.
 func (b *AgentCardBuilder) Load() (*AgentCardConfig, error) {
 	data, err := os.ReadFile(b.cardFile())
 	if err != nil {
 		return nil, fmt.Errorf("read agent-card.yaml: %w", err)
+	}
+
+	// Fail loud on renamed keys — Go's yaml silently drops unknown fields, so a
+	// stale idle_ttl / idle_timeout would be discarded and the new field left
+	// at its default. Reject with the new name instead. See issue #11.
+	if err := checkRenamedCardKeys(data); err != nil {
+		return nil, err
 	}
 
 	var cfg AgentCardConfig

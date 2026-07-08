@@ -195,8 +195,11 @@ There are three deadlines in the chain; the invariant is **outer ≥ inner**:
 | CLI `http.Client.Timeout` | `chat + 1m`, or no timeout when `chat: 0s` | fetched from scheduler at startup |
 | Gateway forwarding (`POST /agents/{n}/chat`) | 10m, or no deadline when `chat: 0s` | `timeouts.chat` in `ahsir.yaml` |
 | Per-agent provider deadline | 300s, or no provider deadline with `runtime.timeout: 0s` | `runtime.timeout` in each `agent-card.yaml` |
+| Scale-to-zero idle reap (whole agent process) | 10m, or resident with `runtime.agent_idle_timeout: 0` | `runtime.agent_idle_timeout` in each `agent-card.yaml` |
 
 Bump `timeouts.chat` if any agent's `runtime.timeout` is increased — the CLI picks up the new value when it talks to the scheduler. For intentionally long-running work, set both `timeouts.chat: 0s` and the relevant agent's `runtime.timeout: 0s`.
+
+`runtime.agent_idle_timeout` is orthogonal to the deadlines above: instead of bounding a single turn, it reaps the **whole agent process** after it has been idle that long (scale-to-zero), waking it again on the next request. The default is `10m`; set `0` to pin the agent resident. Not to be confused with `pool.session_idle_ttl`, which recycles a single session's live subprocess while the agent keeps running. See [docs/features.md](../../docs/features.md) for the full lifecycle.
 
 ### 7. Reading the logs
 
