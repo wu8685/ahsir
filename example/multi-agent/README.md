@@ -195,8 +195,11 @@ There are three deadlines in the chain; the invariant is **outer ≥ inner**:
 | CLI `http.Client.Timeout` | `chat + 1m`, or no timeout when `chat: 0s` | fetched from scheduler at startup |
 | Gateway forwarding (`POST /agents/{n}/chat`) | 10m, or no deadline when `chat: 0s` | `timeouts.chat` in `ahsir.yaml` |
 | Per-agent provider deadline | 300s, or no provider deadline with `runtime.timeout: 0s` | `runtime.timeout` in each `agent-card.yaml` |
+| Per-agent scale-to-zero idle window | 10m, or resident with `runtime.idle_timeout: "0"` | `runtime.idle_timeout` in each `agent-card.yaml` |
 
 Bump `timeouts.chat` if any agent's `runtime.timeout` is increased — the CLI picks up the new value when it talks to the scheduler. For intentionally long-running work, set both `timeouts.chat: 0s` and the relevant agent's `runtime.timeout: 0s`.
+
+`runtime.idle_timeout` is the **scale-to-zero** reaper (issue #6): once all of an agent's turns end and it stays idle this long, the process self-exits and the scheduler marks it *idle-stopped*, waking it again on the next request. Leaving it unset uses the 10m default; `"0"` pins the agent resident. This is a different knob from `pool.idle_ttl` (which only closes an idle *session* inside a still-running agent) — see [docs/features.md §8a](../../docs/features.md) for the full comparison. Because a wake adds cold-start + context-resume latency to that first request, keep `timeouts.chat` comfortably above the agent's `runtime.timeout`.
 
 ### 7. Reading the logs
 

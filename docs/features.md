@@ -301,6 +301,60 @@ no-op.
 See the [recovery-continuation example](../example/recovery-continuation/) for
 the mechanics.
 
+### 8a. Scale-to-zero (`runtime.idle_timeout`)
+
+A registered agent is idle most of the time, yet a resident process still pins
+RAM, a port, and a live LLM CLI subprocess. Scale-to-zero lets an idle agent
+release those resources and get woken again on demand, so you can keep a large
+roster of agents registered without paying for all of them at once.
+
+**Lifecycle — `running ⇄ idle-stopped`:**
+
+1. **Idle detection (agent side).** Every turn — whatever ingress it arrived
+   through — funnels through the agent's session pool, which keeps a refcount
+   of in-flight turns. When the last turn ends and no new turn starts for
+   `runtime.idle_timeout`, the agent **exits on its own** with a dedicated
+   idle exit code.
+2. **`idle-stopped` (scheduler side).** The scheduler recognises that exit code
+   as a controlled scale-to-zero, not a crash: it marks the agent
+   **idle-stopped** and, crucially, does **not** run the supervisor restart
+   (restarting would defeat the purpose). The agent stays in the scheduler's
+   desired set.
+3. **Wake on access (the activator).** The next request routed to that agent
+   triggers the **activator**: before forwarding the call, the scheduler
+   restarts the process, `--resume`s its context, and waits for `/healthz` to
+   go green. The caller sees one slower first turn; the conversation context is
+   preserved.
+
+**Defaults & pinning.** Leaving `runtime.idle_timeout` unset uses the global
+`DefaultIdleTimeout` of **10m**. An explicit `idle_timeout: "0"` disables
+reaping entirely — the agent is pinned resident (byte-for-byte the historical
+always-on behaviour). The per-turn `runtime.timeout` is the backstop that makes
+scale-to-zero terminate: it guarantees a wedged turn eventually ends, so the
+agent eventually reaches the idle state that arms the reaper.
+
+**Wake cold start.** Because a wake spans *process restart + context resume + one
+full turn*, the first request after an agent scaled to zero must still fit inside
+`timeouts.chat` (and the agent's `runtime.timeout`). If turns already run close
+to the `chat` deadline, raise `timeouts.chat` so the wake overhead has room.
+
+**`idle-stopped` is not `archived` / `deleted`.** Only idle-stopped agents are
+auto-woken by the activator. An agent that was **explicitly stopped**
+(`ahsir agent delete`, scheduler shutdown) or **archived** is removed from the
+desired set and is **not** resurrected on access — it stays down until you
+start it again. Scale-to-zero is a resource optimisation, not a deregistration.
+
+**Don't confuse `pool.idle_ttl` with `runtime.idle_timeout`.** Two similarly
+named knobs operate at different scopes:
+
+| Field | Scope | What fires after the idle window | Defined in |
+|---|---|---|---|
+| `pool.idle_ttl` (existing) | **one session** within a live agent | that session is closed and moved to **EVICTED** (its `contextId → sessionId` mapping is retained for resume); the **agent process keeps running** | `internal/wrapper/card.go` (`PoolConfig.IdleTTL`) |
+| `runtime.idle_timeout` (new, issue #6) | **the whole agent process** | the process **self-exits** → **idle-stopped**; the scheduler **wakes it on next access** | `internal/wrapper/card.go` (`RuntimeConfig.IdleTimeout`) |
+
+In short: `pool.idle_ttl` trims idle *sessions* inside a running agent;
+`runtime.idle_timeout` scales the *entire agent* down to zero and back up.
+
 ---
 
 ## 9. Authentication

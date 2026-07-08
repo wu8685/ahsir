@@ -494,6 +494,7 @@ runtime:
   command: claude
   args: []
   timeout: 300s          # provider turn deadline; set 0s for no provider deadline
+  idle_timeout: 10m      # scale-to-zero: self-exit after this much idle (default 10m); "0" pins the agent resident
   provider: anthropic
   apiKey: "${ANTHROPIC_AUTH_TOKEN}"  # official api.anthropic.com; omit to use local `claude` login
   model: claude-opus-4-8
@@ -511,6 +512,18 @@ pool:
 streaming:
   partial_messages: true  # ClaudeSession only; enables A2A SSE deltas
 ```
+
+**Scale-to-zero (`runtime.idle_timeout`).** Register once, keep dozens of
+agents, and pay only for the ones actually in use. A registered agent that no
+one is talking to still pins RAM, a port, and a live LLM subprocess; with
+scale-to-zero it instead exits on its own after `idle_timeout` of no activity
+and is transparently woken again on the next request — its conversation context
+resumes, so callers just see one slightly slower first turn. The default is
+**10m**; set `idle_timeout: "0"` to pin an agent resident (the historical
+always-on behaviour). Don't confuse it with `pool.idle_ttl`, which reaps a
+single idle *session* while the process stays up. Full lifecycle, wake
+semantics, and the `idle_ttl` vs `idle_timeout` comparison live in
+[docs/features.md](docs/features.md).
 
 Runtime provider choices:
 
@@ -585,6 +598,14 @@ response latency (a fast classifier vs. a deep researcher legitimately differ).
 For intentional long-running work, set both `timeouts.chat: 0s` and that
 agent's `runtime.timeout: 0s`; hung providers will then keep the request open
 until manually stopped or the scheduler/agent process exits.
+
+**Wake cold start.** The first request to an agent that has scaled to zero
+(see `runtime.idle_timeout` above) pays a one-time cold start: the scheduler
+restarts the process and `--resume`s its context before forwarding the call,
+so that first turn spans *wake + one full turn*. Both still have to fit inside
+`timeouts.chat` (and the agent's `runtime.timeout`). If an agent's turns
+already run close to the `chat` deadline, bump `timeouts.chat` so the wake
+overhead can't tip a first-after-idle request over the edge.
 
 ## Diagnostics: reading the logs
 
