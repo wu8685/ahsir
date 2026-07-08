@@ -21,6 +21,8 @@ import (
 	"time"
 
 	"github.com/a2aproject/a2a-go/a2a"
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/wu8685/ahsir/internal/obs"
 	ahprocess "github.com/wu8685/ahsir/internal/process"
 	"github.com/wu8685/ahsir/internal/registry"
 	"github.com/wu8685/ahsir/internal/wrapper"
@@ -34,8 +36,12 @@ type Scheduler struct {
 	desired  map[string]AgentConfig
 	ledger   *InvocationLedger
 	httpSrv  *http.Server
-	mu       sync.Mutex
-	running  bool
+	// obsReg is this process's single, explicitly-injected metric registerer
+	// (§4.3). Never prometheus.DefaultRegisterer. Served read-only at /metrics.
+	obsReg         *obs.Registry
+	gatewayMetrics *GatewayMetrics
+	mu             sync.Mutex
+	running        bool
 	// ctx is the scheduler-lifetime context derived inside Start. It is
 	// the parent of every agent's per-process context — needed so
 	// post-boot StartAgent calls (from the admin API) can spawn children
@@ -128,12 +134,20 @@ func New(cfg *Config) *Scheduler {
 			log.Printf("Invocation ledger persistence disabled path=%s err=%v", path, err)
 		}
 	}
+	// Single per-process metric registerer, injected into every collector
+	// (§4.3). The Gateway A-group derives entirely from the ledger's begin/
+	// finish sink, so we wire it straight onto the ledger here.
+	obsReg := obs.NewRegistry()
+	gatewayMetrics := NewGatewayMetrics(obsReg)
+	ledger.SetGatewayMetrics(gatewayMetrics)
 	s := &Scheduler{
 		cfg:                  cfg,
 		registry:             registry.NewRegistry(heartbeatTimeout),
 		agents:               make(map[string]*agentProcess),
 		desired:              make(map[string]AgentConfig),
 		ledger:               ledger,
+		obsReg:               obsReg,
+		gatewayMetrics:       gatewayMetrics,
 		supervisor:           defaultSupervisorConfig(),
 		agentCommand:         defaultAgentCommand,
 		findLocalListener:    defaultFindLocalListener,
@@ -213,6 +227,12 @@ func (s *Scheduler) Invocations() *InvocationLedger {
 	return s.ledger
 }
 
+// MetricsGatherer returns the scheduler's Prometheus gatherer, backing the
+// read-only /metrics endpoint. Explicitly injected — never the global default.
+func (s *Scheduler) MetricsGatherer() prometheus.Gatherer {
+	return s.obsReg.Gatherer()
+}
+
 // Start starts the scheduler and all local agents.
 func (s *Scheduler) Start(ctx context.Context) error {
 	s.mu.Lock()
@@ -257,6 +277,10 @@ func (s *Scheduler) Start(ctx context.Context) error {
 		return fmt.Errorf("scheduler listen on %s: %w", addr, err)
 	}
 	log.Printf("Registry listening on %s", addr)
+	// Surface the scrape endpoint so static Prometheus config never has to
+	// guess the port (§3 lock-in item 2). Agent /metrics ports are logged as
+	// each agent starts.
+	log.Printf("Metrics endpoint: http://%s/metrics", addr)
 	// Capture the server locally: the goroutine must not read s.httpSrv (the
 	// field is nil'd by abortStartLocked / Stop while the goroutine runs).
 	srv := s.httpSrv
