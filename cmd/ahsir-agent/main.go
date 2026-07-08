@@ -71,7 +71,7 @@ func main() {
 	}
 
 	// idleCh is closed by the session pool's idle reaper when the agent has had
-	// no turn in flight for its configured idle_timeout (scale-to-zero, issue
+	// no turn in flight for its configured agent_idle_timeout (scale-to-zero, issue
 	// #6). Closing it unblocks the main select below, which then exits with
 	// IdleStopExitCode so the scheduler can tell this controlled self-exit apart
 	// from a crash (and NOT restart it — it wakes on next access instead).
@@ -166,21 +166,21 @@ func main() {
 		}
 
 		w.SetupExecutor(pool.LookupOrCreate, listAgents, callAgent, maxCalls, basePrompt)
-		log.Printf("Executor wired: %s SessionPool (%s %v, timeout=%s, persist=%s, idle_ttl=%s, evicted_ttl=%s, max_evicted=%d)", sessionCfg.Provider, sessionCfg.Command, sessionCfg.Args, sessionCfg.Timeout, persistPath, retention.idleTTL, retention.evictedTTL, retention.maxEvicted)
+		log.Printf("Executor wired: %s SessionPool (%s %v, timeout=%s, persist=%s, session_idle_ttl=%s, evicted_ttl=%s, max_evicted=%d)", sessionCfg.Provider, sessionCfg.Command, sessionCfg.Args, sessionCfg.Timeout, persistPath, retention.idleTTL, retention.evictedTTL, retention.maxEvicted)
 
-		// Scale-to-zero: after idle_timeout with no turn in flight, reap the
-		// process. The reaper fires from a background timer goroutine; hand it a
-		// once-guarded close so a rearm race can't double-close idleCh.
-		idleTimeout, idleEnabled, err := wrapper.ParseIdleTimeout(cfg.Runtime.IdleTimeout)
+		// Scale-to-zero: after agent_idle_timeout with no turn in flight, reap
+		// the process. The reaper fires from a background timer goroutine; hand
+		// it a once-guarded close so a rearm race can't double-close idleCh.
+		idleTimeout, idleEnabled, err := wrapper.ParseAgentIdleTimeout(cfg.Runtime.AgentIdleTimeout)
 		if err != nil {
-			log.Fatalf("agent %q: runtime.idle_timeout %q: %v", cfg.Name, cfg.Runtime.IdleTimeout, err)
+			log.Fatalf("agent %q: runtime.agent_idle_timeout %q: %v", cfg.Name, cfg.Runtime.AgentIdleTimeout, err)
 		}
 		if idleEnabled {
 			var once sync.Once
 			pool.EnableIdleReaper(idleTimeout, func() { once.Do(func() { close(idleCh) }) })
-			log.Printf("Idle reaper enabled: idle_timeout=%s (agent self-exits when idle; scheduler wakes on access)", idleTimeout)
+			log.Printf("Idle reaper enabled: agent_idle_timeout=%s (agent self-exits when idle; scheduler wakes on access)", idleTimeout)
 		} else {
-			log.Printf("Idle reaper disabled: agent is resident (runtime.idle_timeout=%q)", cfg.Runtime.IdleTimeout)
+			log.Printf("Idle reaper disabled: agent is resident (runtime.agent_idle_timeout=%q)", cfg.Runtime.AgentIdleTimeout)
 		}
 	}
 
@@ -295,10 +295,10 @@ func poolRetentionConfig(cfg wrapper.PoolConfig) (poolRetention, error) {
 		evictedTTL: 30 * 24 * time.Hour,
 		maxEvicted: 1000,
 	}
-	if cfg.IdleTTL != "" {
-		d, err := parsePoolDuration(cfg.IdleTTL)
+	if cfg.SessionIdleTTL != "" {
+		d, err := parsePoolDuration(cfg.SessionIdleTTL)
 		if err != nil {
-			return poolRetention{}, fmt.Errorf("pool.idle_ttl %q: %w", cfg.IdleTTL, err)
+			return poolRetention{}, fmt.Errorf("pool.session_idle_ttl %q: %w", cfg.SessionIdleTTL, err)
 		}
 		ret.idleTTL = d
 	}

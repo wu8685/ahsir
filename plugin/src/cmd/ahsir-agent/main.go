@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -68,6 +69,19 @@ func main() {
 		InternalToken: *internalToken,
 		AdminToken:    *adminToken,
 	}
+
+	// idleCh is closed by the session pool's idle reaper when the agent has had
+	// no turn in flight for its configured agent_idle_timeout (scale-to-zero, issue
+	// #6). Closing it unblocks the main select below, which then exits with
+	// IdleStopExitCode so the scheduler can tell this controlled self-exit apart
+	// from a crash (and NOT restart it — it wakes on next access instead).
+	idleCh := make(chan struct{})
+	idleReaped := false
+	// stopPool releases the (idle) claude/codex subprocesses on shutdown. It is
+	// hoisted to main scope so the idle self-exit path can run it explicitly
+	// before os.Exit (which would otherwise skip the deferred pool.Stop and
+	// leak the subprocesses). nil when no executor/pool was wired.
+	var stopPool func()
 
 	w := wrapper.NewAgentWrapper(wrapperCfg)
 	// Per-context transcript (full turn content, 0600) lives in the workspace
@@ -128,6 +142,7 @@ func main() {
 		pool := wrapper.NewSessionPoolWithPersistence(factory, retention.idleTTL, retention.evictedTTL, persist)
 		pool.SetMaxEvicted(retention.maxEvicted)
 		defer pool.Stop()
+		stopPool = pool.Stop
 
 		// Apply pool capacity from agent-card.yaml's `pool:` block if set.
 		// Default (max_active=0) keeps the pool unbounded — historical
@@ -151,7 +166,22 @@ func main() {
 		}
 
 		w.SetupExecutor(pool.LookupOrCreate, listAgents, callAgent, maxCalls, basePrompt)
-		log.Printf("Executor wired: %s SessionPool (%s %v, timeout=%s, persist=%s, idle_ttl=%s, evicted_ttl=%s, max_evicted=%d)", sessionCfg.Provider, sessionCfg.Command, sessionCfg.Args, sessionCfg.Timeout, persistPath, retention.idleTTL, retention.evictedTTL, retention.maxEvicted)
+		log.Printf("Executor wired: %s SessionPool (%s %v, timeout=%s, persist=%s, session_idle_ttl=%s, evicted_ttl=%s, max_evicted=%d)", sessionCfg.Provider, sessionCfg.Command, sessionCfg.Args, sessionCfg.Timeout, persistPath, retention.idleTTL, retention.evictedTTL, retention.maxEvicted)
+
+		// Scale-to-zero: after agent_idle_timeout with no turn in flight, reap
+		// the process. The reaper fires from a background timer goroutine; hand
+		// it a once-guarded close so a rearm race can't double-close idleCh.
+		idleTimeout, idleEnabled, err := wrapper.ParseAgentIdleTimeout(cfg.Runtime.AgentIdleTimeout)
+		if err != nil {
+			log.Fatalf("agent %q: runtime.agent_idle_timeout %q: %v", cfg.Name, cfg.Runtime.AgentIdleTimeout, err)
+		}
+		if idleEnabled {
+			var once sync.Once
+			pool.EnableIdleReaper(idleTimeout, func() { once.Do(func() { close(idleCh) }) })
+			log.Printf("Idle reaper enabled: agent_idle_timeout=%s (agent self-exits when idle; scheduler wakes on access)", idleTimeout)
+		} else {
+			log.Printf("Idle reaper disabled: agent is resident (runtime.agent_idle_timeout=%q)", cfg.Runtime.AgentIdleTimeout)
+		}
 	}
 
 	// Wait for signal
@@ -160,10 +190,26 @@ func main() {
 	select {
 	case <-sigCh:
 	case <-ctx.Done():
+	case <-idleCh:
+		idleReaped = true
 	}
 
 	log.Println("Shutting down...")
 	w.Stop(ctx)
+
+	if idleReaped {
+		// Distinct exit status so the scheduler marks us idle-stopped (and wakes
+		// us on next access) rather than treating this as a crash to restart.
+		// os.Exit skips deferred cleanup, so release the pool subprocesses and
+		// cancel the context explicitly first (both are idempotent — the skipped
+		// defers would be no-ops).
+		log.Printf("Idle self-exit (exit code %d)", wrapper.IdleStopExitCode)
+		if stopPool != nil {
+			stopPool()
+		}
+		cancel()
+		os.Exit(wrapper.IdleStopExitCode)
+	}
 }
 
 type registryMonitorConfig struct {
@@ -249,10 +295,10 @@ func poolRetentionConfig(cfg wrapper.PoolConfig) (poolRetention, error) {
 		evictedTTL: 30 * 24 * time.Hour,
 		maxEvicted: 1000,
 	}
-	if cfg.IdleTTL != "" {
-		d, err := parsePoolDuration(cfg.IdleTTL)
+	if cfg.SessionIdleTTL != "" {
+		d, err := parsePoolDuration(cfg.SessionIdleTTL)
 		if err != nil {
-			return poolRetention{}, fmt.Errorf("pool.idle_ttl %q: %w", cfg.IdleTTL, err)
+			return poolRetention{}, fmt.Errorf("pool.session_idle_ttl %q: %w", cfg.SessionIdleTTL, err)
 		}
 		ret.idleTTL = d
 	}

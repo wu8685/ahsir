@@ -110,6 +110,12 @@ type SessionPool struct {
 	// queueDepth bounds the per-context FIFO turn queue (see turn_gate.go).
 	// Defaults to defaultTurnQueueDepth; 0 restores fail-fast busy.
 	queueDepth int
+
+	// monitor drives scale-to-zero idle detection (issue #6). nil (the default)
+	// means reaping is disabled — the historical resident behaviour. Set once
+	// via EnableIdleReaper before the agent serves traffic and thereafter
+	// treated as immutable, so gatedLocked reads it without a lock.
+	monitor *idleMonitor
 }
 
 // OverloadPolicy selects what SessionPool does when LookupOrCreate would
@@ -190,7 +196,7 @@ type pooledEntry struct {
 // Caller must hold e.mu.
 func (e *pooledEntry) gatedLocked(p *SessionPool) Session {
 	if e.gatedWrap == nil || e.gatedWrap.inner != e.session {
-		e.gatedWrap = &gatedSession{inner: e.session, gate: e.gate, depth: p.currentQueueDepth}
+		e.gatedWrap = &gatedSession{inner: e.session, gate: e.gate, depth: p.currentQueueDepth, monitor: p.monitor}
 	}
 	return e.gatedWrap
 }
@@ -321,6 +327,52 @@ func (p *SessionPool) currentQueueDepth() int {
 	return p.queueDepth
 }
 
+// EnableIdleReaper turns on scale-to-zero idle detection (issue #6). After all
+// turns end and no new turn starts for `timeout`, onReap is invoked exactly
+// once — the agent's cue to shut itself down gracefully. timeout<=0 is a no-op
+// (the agent stays resident, historical behaviour). Wire this BEFORE the agent
+// serves traffic: the monitor reference is thereafter read lock-free by gated
+// sessions.
+//
+// The reaper cross-checks its own refcount against AnyMidTurn (the pool's live
+// per-context gate state) before committing to a reap, so a refcount bug can
+// only ever cause a missed reap, never a killed-while-busy agent.
+//
+// The timer is armed immediately: an agent that boots and never receives a turn
+// must still reap.
+func (p *SessionPool) EnableIdleReaper(timeout time.Duration, onReap func()) {
+	if timeout <= 0 {
+		return
+	}
+	// confirmIdle must report whether the pool is IDLE — the inverse of
+	// AnyMidTurn (which reports whether any turn is in flight).
+	m := newIdleMonitor(timeout, onReap, func() bool { return !p.AnyMidTurn() })
+	p.mu.Lock()
+	p.monitor = m
+	p.mu.Unlock()
+	m.mu.Lock()
+	m.armLocked()
+	m.mu.Unlock()
+}
+
+// AnyMidTurn reports whether ANY pooled context currently has a turn in flight
+// (its gate held or waiters queued). It reads the real per-context gate state,
+// making it the single source of truth the idle reaper cross-checks against —
+// there is no parallel counter to drift out of sync.
+func (p *SessionPool) AnyMidTurn() bool {
+	p.mu.Lock()
+	entries := make([]*pooledEntry, 0, len(p.entries))
+	for _, e := range p.entries {
+		entries = append(entries, e)
+	}
+	p.mu.Unlock()
+	for _, e := range entries {
+		if e.gate != nil && e.gate.inFlight() {
+			return true
+		}
+	}
+	return false
+}
 
 // setClock injects a fake clock for tests. Production uses time.Now.
 func (p *SessionPool) setClock(fn func() time.Time) {

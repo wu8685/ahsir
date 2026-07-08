@@ -502,6 +502,7 @@ runtime:
   command: claude
   args: []
   timeout: 300s          # provider turn deadline; set 0s for no provider deadline
+  agent_idle_timeout: 10m # scale-to-zero: reap the whole agent process after this long idle (default 10m; 0 pins it resident)
   provider: anthropic
   apiKey: "${ANTHROPIC_AUTH_TOKEN}"  # official api.anthropic.com; omit to use local `claude` login
   model: claude-opus-4-8
@@ -513,12 +514,29 @@ filesystem:
 pool:
   max_active: 50          # optional; 0/unset = unlimited
   max_evicted: 1000       # inactive resume mappings retained; oldest evicted records are deleted first
-  idle_ttl: 30m           # active session idle time before closing the live process
+  session_idle_ttl: 30m   # per-session idle time before closing the live process (session-level, not the whole agent)
   evicted_ttl: 30d        # inactive mapping TTL; accepts Go durations plus day suffix such as 30d
   overload_policy: reject # or evict-lru
 streaming:
   partial_messages: true  # ClaudeSession only; enables A2A SSE deltas
 ```
+
+**Scale-to-zero — idle agents stop paying rent.** An agent that no one is
+talking to shouldn't keep a process, a port, and a live LLM subprocess pinned in
+memory. With `runtime.agent_idle_timeout` (default `10m`), an agent that has had
+no turn in flight for that long self-exits; the scheduler marks it *idle-stopped*
+and transparently wakes it on the next request. Set it to `0` to pin a hot agent
+resident. Two idle knobs sit at **different granularities** — don't confuse them:
+
+| Knob | Granularity | On idle |
+|---|---|---|
+| `pool.session_idle_ttl` | one **session** (a `contextId` → one live subprocess) | that session closes → EVICTED (the sessionId survives so it can `--resume`); the **agent keeps running** |
+| `runtime.agent_idle_timeout` | the whole **agent process** | the process self-exits → idle-stopped → woken on next access |
+
+Both default sensibly and are independent. See
+[docs/features.md](docs/features.md) for the full scale-to-zero lifecycle
+(`running ⇄ idle-stopped`, the activator wake path, and how it differs from
+archived/deleted agents).
 
 Runtime provider choices:
 
@@ -599,7 +617,7 @@ until manually stopped or the scheduler/agent process exits.
 Every agent has a `SessionPool` keyed by A2A `contextId`. The pool returns the
 same provider session for repeated turns in the same conversation and persists
 `contextId → runtime session id` under `<workspace>/.a2a/sessions.json`.
-Active sessions idle out after `pool.idle_ttl` and become inactive mappings;
+Active sessions idle out after `pool.session_idle_ttl` and become inactive mappings;
 inactive mappings are retained until `pool.evicted_ttl` or until
 `pool.max_evicted` is exceeded, in which case the oldest inactive mappings are
 deleted first. Active mappings are not deleted by `pool.max_evicted`.

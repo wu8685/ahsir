@@ -301,6 +301,53 @@ no-op.
 See the [recovery-continuation example](../example/recovery-continuation/) for
 the mechanics.
 
+### Scale-to-zero (idle-stopped agents)
+
+An agent that no one is talking to shouldn't keep a process, a port, and a live
+LLM subprocess pinned in RAM. Scale-to-zero (issue #6) reaps idle agents and
+transparently wakes them again on demand:
+
+- **`running ⇄ idle-stopped`.** When an agent has had **no turn in flight** for
+  `runtime.agent_idle_timeout` (default **10m**), it self-exits with a distinct
+  status code. The scheduler recognises this controlled exit and marks the agent
+  **idle-stopped** — it is *not* treated as a crash and *not* restarted eagerly.
+- **Activator wake.** The next request routed to an idle-stopped agent triggers
+  the scheduler's **activator**: it relaunches the process on the same port,
+  replays any recoverable in-flight work, and forwards the call. From the
+  caller's side this is just a slightly slower first turn (cold start), not an
+  error. A turn that arrives in the instant the reaper commits gets a retriable
+  `agent idle-stopping` signal, which the activator resolves by waking + retrying.
+- **Pinning resident.** Set `runtime.agent_idle_timeout: 0` to opt a hot agent
+  out of reaping entirely — byte-for-byte the historical always-on behaviour.
+  The default and any positive duration enable reaping.
+
+**Idle-stopped is not archived/deleted.** These are three different things:
+
+| State | What it means | Comes back by |
+| --- | --- | --- |
+| **idle-stopped** | live agent, temporarily not running to save resources | any request (activator wakes it automatically) |
+| **archived** | intentionally stopped; kept in the registry but off | an explicit start |
+| **deleted** | removed from the registry | re-registering / scaffolding it again |
+
+Only idle-stopped is automatic and self-healing; archived/deleted are deliberate
+operator actions.
+
+**Two idle knobs, two granularities.** `agent_idle_timeout` reaps the whole
+process; `session_idle_ttl` only recycles a single conversation's live
+subprocess. They are independent and both default sensibly:
+
+| Knob | Block | Granularity | On idle |
+| --- | --- | --- | --- |
+| `session_idle_ttl` | `pool` | one **session** (a `contextId` → one live subprocess) | that session closes → EVICTED (sessionId retained so it can `--resume`); the **agent process keeps running** |
+| `agent_idle_timeout` | `runtime` | the whole **agent process** | the process self-exits → idle-stopped → woken on next access |
+
+> **Renamed in a breaking change (issue #11).** These were formerly
+> `pool.idle_ttl` and `runtime.idle_timeout`. The near-synonym names were too
+> easy to confuse for two different granularities. A card still carrying an old
+> key is **rejected at load** with an error naming the replacement — it is never
+> silently ignored (a dropped `idle_timeout: 0` would have quietly turned a
+> resident agent into a 10m-reaped one).
+
 ---
 
 ## 9. Authentication

@@ -164,10 +164,16 @@ func TestInvocationLedgerReplaysJSONL(t *testing.T) {
 
 func TestInvocationLedgerReplayIgnoresBadJSONLLines(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "ledger.jsonl")
+	// Use recent, relative timestamps so the completed record survives
+	// retention compaction on replay — a hardcoded absolute date would age
+	// past completedInvocationRetention and be dropped, making this test a
+	// time bomb that fails once the clock moves past the retention window.
+	started := time.Now().UTC().Add(-time.Minute).Format(time.RFC3339)
+	completed := time.Now().UTC().Format(time.RFC3339)
 	content := strings.Join([]string{
-		`{"type":"started","id":"inv-1","source":"a2a_proxy","agentName":"teacher","contextId":"ctx-1","ts":"2026-06-07T00:00:00Z"}`,
+		`{"type":"started","id":"inv-1","source":"a2a_proxy","agentName":"teacher","contextId":"ctx-1","ts":"` + started + `"}`,
 		`{bad json`,
-		`{"type":"completed","id":"inv-1","ts":"2026-06-07T00:00:01Z"}`,
+		`{"type":"completed","id":"inv-1","ts":"` + completed + `"}`,
 	}, "\n")
 	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
 		t.Fatal(err)

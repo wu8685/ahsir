@@ -79,6 +79,17 @@ func (g *turnGate) acquire(ctx context.Context, depth int) error {
 	}
 }
 
+// inFlight reports whether this context currently has a turn running (the gate
+// is held) or waiting (queued behind the running one). Both count as "mid-turn"
+// for scale-to-zero idle detection: the pool must not reap an agent that still
+// has queued work. Reads the real gate state, so it cannot drift from a
+// separately-maintained counter.
+func (g *turnGate) inFlight() bool {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return g.busy || len(g.waiters) > 0
+}
+
 // release hands the gate to the oldest waiter, or opens it when none wait.
 func (g *turnGate) release() {
 	g.mu.Lock()
@@ -98,23 +109,42 @@ func (g *turnGate) release() {
 // after the event channel drains — the gate must cover the whole turn, not
 // just its start, because the provider stream is the serial resource.
 type gatedSession struct {
-	inner Session
-	gate  *turnGate
-	depth func() int // live read of the pool's configured queue depth
+	inner   Session
+	gate    *turnGate
+	depth   func() int   // live read of the pool's configured queue depth
+	monitor *idleMonitor // scale-to-zero refcount hook; nil when reaping disabled
 }
 
 func (g *gatedSession) Stream(ctx context.Context, userText string) (<-chan Event, error) {
 	if err := g.gate.acquire(ctx, g.depth()); err != nil {
 		return nil, err
 	}
+	// Bracket the turn for the idle reaper AFTER taking the gate: turnStarted
+	// disarms any pending reap. release() must fire only once the event channel
+	// fully drains (the turn is truly over), mirroring the gate's own lifetime.
+	var release func()
+	if g.monitor != nil {
+		r, ok := g.monitor.turnStarted()
+		if !ok {
+			g.gate.release()
+			return nil, ErrAgentIdleStopping
+		}
+		release = r
+	}
 	ch, err := g.inner.Stream(ctx, userText)
 	if err != nil {
+		if release != nil {
+			release()
+		}
 		g.gate.release()
 		return nil, err
 	}
 	out := make(chan Event)
 	go func() {
 		defer g.gate.release()
+		if release != nil {
+			defer release()
+		}
 		defer close(out)
 		for ev := range ch {
 			select {
@@ -136,6 +166,13 @@ func (g *gatedSession) Turn(ctx context.Context, userText string) (string, error
 		return "", err
 	}
 	defer g.gate.release()
+	if g.monitor != nil {
+		release, ok := g.monitor.turnStarted()
+		if !ok {
+			return "", ErrAgentIdleStopping
+		}
+		defer release()
+	}
 	return g.inner.Turn(ctx, userText)
 }
 

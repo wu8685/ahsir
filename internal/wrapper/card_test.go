@@ -3,6 +3,7 @@ package wrapper
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -164,11 +165,11 @@ runtime:
 	}
 }
 
-// TestLoadAgentCardIdleTimeout verifies the scale-to-zero runtime.idle_timeout
-// field parses from YAML and that an unset value stays empty (so the agent
-// applies the global DefaultIdleTimeout, not a literal zero that would pin it
-// resident).
-func TestLoadAgentCardIdleTimeout(t *testing.T) {
+// TestLoadAgentCardAgentIdleTimeout verifies the scale-to-zero
+// runtime.agent_idle_timeout field parses from YAML and that an unset value
+// stays empty (so the agent applies the global DefaultAgentIdleTimeout, not a
+// literal zero that would pin it resident).
+func TestLoadAgentCardAgentIdleTimeout(t *testing.T) {
 	dir := t.TempDir()
 	yamlContent := `
 name: A
@@ -176,7 +177,7 @@ version: "1.0.0"
 skills: []
 runtime:
   command: claude
-  idle_timeout: 15m
+  agent_idle_timeout: 15m
 `
 	a2aDir := filepath.Join(dir, ".a2a")
 	os.MkdirAll(a2aDir, 0755)
@@ -186,12 +187,12 @@ runtime:
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.Runtime.IdleTimeout != "15m" {
-		t.Errorf("expected idle_timeout '15m', got %q", cfg.Runtime.IdleTimeout)
+	if cfg.Runtime.AgentIdleTimeout != "15m" {
+		t.Errorf("expected agent_idle_timeout '15m', got %q", cfg.Runtime.AgentIdleTimeout)
 	}
-	d, enabled, err := ParseIdleTimeout(cfg.Runtime.IdleTimeout)
+	d, enabled, err := ParseAgentIdleTimeout(cfg.Runtime.AgentIdleTimeout)
 	if err != nil || !enabled || d != 15*time.Minute {
-		t.Errorf("ParseIdleTimeout(%q) = (%v,%v,%v)", cfg.Runtime.IdleTimeout, d, enabled, err)
+		t.Errorf("ParseAgentIdleTimeout(%q) = (%v,%v,%v)", cfg.Runtime.AgentIdleTimeout, d, enabled, err)
 	}
 
 	// Unset case: field stays empty, so the default applies.
@@ -203,11 +204,75 @@ runtime:
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg2.Runtime.IdleTimeout != "" {
-		t.Errorf("expected unset idle_timeout to stay empty, got %q", cfg2.Runtime.IdleTimeout)
+	if cfg2.Runtime.AgentIdleTimeout != "" {
+		t.Errorf("expected unset agent_idle_timeout to stay empty, got %q", cfg2.Runtime.AgentIdleTimeout)
 	}
-	if d, enabled, _ := ParseIdleTimeout(cfg2.Runtime.IdleTimeout); !enabled || d != DefaultIdleTimeout {
-		t.Errorf("unset idle_timeout should resolve to DefaultIdleTimeout, got (%v,%v)", d, enabled)
+	if d, enabled, _ := ParseAgentIdleTimeout(cfg2.Runtime.AgentIdleTimeout); !enabled || d != DefaultAgentIdleTimeout {
+		t.Errorf("unset agent_idle_timeout should resolve to DefaultAgentIdleTimeout, got (%v,%v)", d, enabled)
+	}
+}
+
+// TestLoadAgentCardSessionIdleTTL verifies the renamed pool.session_idle_ttl
+// key parses into the SessionIdleTTL field.
+func TestLoadAgentCardSessionIdleTTL(t *testing.T) {
+	dir := t.TempDir()
+	yamlContent := `
+name: A
+version: "1.0.0"
+skills: []
+pool:
+  session_idle_ttl: 45m
+`
+	a2aDir := filepath.Join(dir, ".a2a")
+	os.MkdirAll(a2aDir, 0755)
+	os.WriteFile(filepath.Join(a2aDir, "agent-card.yaml"), []byte(yamlContent), 0644)
+
+	cfg, err := NewAgentCardBuilder(dir).Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Pool.SessionIdleTTL != "45m" {
+		t.Errorf("expected session_idle_ttl '45m', got %q", cfg.Pool.SessionIdleTTL)
+	}
+}
+
+// TestLoadAgentCardRejectsRenamedKeys locks in the fail-loud contract from
+// issue #11: a card still carrying a pre-rename key must be rejected with an
+// error that names the replacement, never silently ignored (which would flip
+// behaviour — e.g. a lost idle_timeout: 0 turning a resident agent into a
+// 10m-reaped one).
+func TestLoadAgentCardRejectsRenamedKeys(t *testing.T) {
+	cases := []struct {
+		name    string
+		yaml    string
+		wantSub string // substring the error must mention
+	}{
+		{
+			name:    "runtime idle_timeout",
+			yaml:    "name: A\nversion: \"1.0.0\"\nskills: []\nruntime:\n  idle_timeout: 0\n",
+			wantSub: "runtime.agent_idle_timeout",
+		},
+		{
+			name:    "pool idle_ttl",
+			yaml:    "name: A\nversion: \"1.0.0\"\nskills: []\npool:\n  idle_ttl: 30m\n",
+			wantSub: "pool.session_idle_ttl",
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			dir := t.TempDir()
+			a2aDir := filepath.Join(dir, ".a2a")
+			os.MkdirAll(a2aDir, 0755)
+			os.WriteFile(filepath.Join(a2aDir, "agent-card.yaml"), []byte(c.yaml), 0644)
+
+			_, err := NewAgentCardBuilder(dir).Load()
+			if err == nil {
+				t.Fatalf("expected error for renamed key, got nil")
+			}
+			if !strings.Contains(err.Error(), c.wantSub) {
+				t.Errorf("error %q should mention new key %q", err.Error(), c.wantSub)
+			}
+		})
 	}
 }
 

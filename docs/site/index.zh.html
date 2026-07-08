@@ -547,7 +547,7 @@ pool:
   max_active: 0             # 单 agent 并发活跃 provider 进程上限（0 = 不限）
   overload_policy: reject   # reject | evict-lru
   queue_depth: 4            # per-context FIFO turn 队列（0 = fail-fast busy）
-  idle_ttl: 30m
+  session_idle_ttl: 30m
   evicted_ttl: 720h
   max_evicted: 1000
 streaming:

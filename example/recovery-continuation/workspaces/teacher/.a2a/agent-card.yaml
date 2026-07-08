@@ -23,7 +23,7 @@ runtime:
 filesystem:
   enabled: false
 pool:
-  idle_ttl: 10s
+  session_idle_ttl: 10s
   evicted_ttl: 30d
   max_evicted: 2
 network:
