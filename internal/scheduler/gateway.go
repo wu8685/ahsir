@@ -2,6 +2,7 @@ package scheduler
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -15,6 +16,8 @@ import (
 
 	"github.com/a2aproject/a2a-go/a2a"
 	"github.com/google/uuid"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
+	"github.com/wu8685/ahsir/internal/obs"
 	"github.com/wu8685/ahsir/internal/wrapper"
 )
 
@@ -113,6 +116,15 @@ type asyncChatResponse struct {
 }
 
 func (g *gatewayHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	// Read-only Prometheus scrape endpoint (§6.B lock-in item 2: each process
+	// exposes its own /metrics; the scheduler does not proxy-aggregate).
+	if r.URL.Path == "/metrics" && r.Method == http.MethodGet {
+		promhttp.HandlerFor(g.sch.MetricsGatherer(), promhttp.HandlerOpts{
+			EnableOpenMetrics: true, // required for exemplar exposition
+		}).ServeHTTP(w, r)
+		return
+	}
+
 	if strings.HasPrefix(r.URL.Path, a2aProxyPrefix) {
 		g.handleA2AProxy(w, r)
 		return
@@ -378,7 +390,9 @@ func (g *gatewayHandler) handleA2AProxy(w http.ResponseWriter, r *http.Request) 
 
 	upstreamReq, err := http.NewRequestWithContext(r.Context(), r.Method, target.String(), bytes.NewReader(body))
 	if err != nil {
-		g.sch.ledger.Fail(inv.ID, err)
+		// Constructing our own request failed — an internal fault, not the
+		// upstream's. Label at the site (§6 red line: never parse it back out).
+		g.sch.ledger.FailResult(inv.ID, obs.ResultInternalError, err)
 		writeJSONError(w, http.StatusBadGateway, "create upstream request: "+err.Error())
 		return
 	}
@@ -390,7 +404,9 @@ func (g *gatewayHandler) handleA2AProxy(w http.ResponseWriter, r *http.Request) 
 
 	upstreamResp, err := http.DefaultTransport.RoundTrip(upstreamReq)
 	if err != nil {
-		g.sch.ledger.Fail(inv.ID, err)
+		// Reaching the agent failed (connection refused / caller ctx gone).
+		// Cancellation is the caller giving up, not an upstream fault.
+		g.sch.ledger.FailResult(inv.ID, classifyProxyError(err), err)
 		writeJSONError(w, http.StatusBadGateway, "proxy "+decodedName+": "+err.Error())
 		return
 	}
@@ -407,11 +423,46 @@ func (g *gatewayHandler) handleA2AProxy(w http.ResponseWriter, r *http.Request) 
 	// as successes — recovery and `trace` views would then lie.
 	switch {
 	case upstreamResp.StatusCode >= 500:
-		g.sch.ledger.FailMessage(inv.ID, fmt.Sprintf("upstream status %d", upstreamResp.StatusCode))
+		g.sch.ledger.FailMessageResult(inv.ID, obs.ResultUpstreamError, fmt.Sprintf("upstream status %d", upstreamResp.StatusCode))
 	case copyErr != nil:
-		g.sch.ledger.FailMessage(inv.ID, fmt.Sprintf("response stream interrupted: %v", copyErr))
+		g.sch.ledger.FailMessageResult(inv.ID, obs.ResultUpstreamError, fmt.Sprintf("response stream interrupted: %v", copyErr))
 	default:
 		g.sch.ledger.Complete(inv.ID)
+	}
+}
+
+// classifyProxyError buckets a transport-level failure reaching an agent into
+// the §7 taxonomy at the site it occurs. Caller cancellation/timeout is the
+// caller's own doing (not an upstream fault); everything else is upstream.
+func classifyProxyError(err error) obs.Result {
+	switch {
+	case errors.Is(err, context.Canceled):
+		return obs.ResultCancel
+	case errors.Is(err, context.DeadlineExceeded):
+		return obs.ResultTimeout
+	default:
+		return obs.ResultUpstreamError
+	}
+}
+
+// classifyChatError buckets a chat-path error into the §7 taxonomy at the
+// gateway. Turn-level types (wrapper.ErrTurnInFlight) don't survive the A2A
+// process boundary, so the "agent busy:" wire marker — the same signal
+// writeChatError uses for its 409 — is how the gateway recognizes backpressure
+// here. This is NOT the forbidden "parse the ledger's free-text error" (§6):
+// it is the established cross-process wire contract, evaluated at the site.
+func classifyChatError(err error) obs.Result {
+	switch {
+	case err == nil:
+		return obs.ResultDone
+	case errors.Is(err, context.Canceled):
+		return obs.ResultCancel
+	case errors.Is(err, context.DeadlineExceeded):
+		return obs.ResultTimeout
+	case strings.Contains(err.Error(), "agent busy:"):
+		return obs.ResultBusy
+	default:
+		return obs.ResultUpstreamError
 	}
 }
 
@@ -458,7 +509,7 @@ func (g *gatewayHandler) handleChat(w http.ResponseWriter, r *http.Request, name
 	if req.Async {
 		task, err := g.sch.ChatWithAgentAsync(name, req.ContextID, req.Speaker, req.Message)
 		if err != nil {
-			g.sch.ledger.Fail(inv.ID, err)
+			g.sch.ledger.FailResult(inv.ID, classifyChatError(err), err)
 			g.writeChatError(w, name, req.ContextID, err)
 			return
 		}
@@ -473,7 +524,7 @@ func (g *gatewayHandler) handleChat(w http.ResponseWriter, r *http.Request, name
 
 	reply, err := g.sch.ChatWithAgentAs(name, req.ContextID, req.Speaker, req.Message)
 	if err != nil {
-		g.sch.ledger.Fail(inv.ID, err)
+		g.sch.ledger.FailResult(inv.ID, classifyChatError(err), err)
 		g.writeChatError(w, name, req.ContextID, err)
 		return
 	}

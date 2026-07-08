@@ -54,6 +54,14 @@ shutdown still stop the process without restart.
   mediated calls in `.ahsir/ledger.jsonl`, replays it on startup, compacts old
   records, and sends a continuation prompt after a supervised restart for
   recoverable work with a `contextId`.
+- **Prometheus metrics** (phase ①): the scheduler exposes a read-only
+  `GET /metrics` endpoint (logged at startup as `Metrics endpoint: …`). It
+  currently publishes the gateway request rate, latency histogram, and
+  in-flight gauge (`ahsir_gateway_*`), derived from the invocation ledger. The
+  `internal/obs` package owns the metric naming/label contract and forbids
+  high-cardinality ids (contextId, messageId, …) from ever becoming labels —
+  those ride histogram exemplars instead. Turn / session / provider metrics
+  land in later phases.
 - **Shared-context collaboration**: multiple clients can work in one
   `contextId` — `ahsir chat --as <name>` attributes each turn to a speaker
   (default: OS username), concurrent turns wait in a per-context FIFO queue
