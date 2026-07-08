@@ -38,18 +38,24 @@ func NewEchoSession(_ context.Context, _ SessionConfig, resumeID string) (*EchoS
 	return &EchoSession{sessionID: sid}, nil
 }
 
-// Stream emits one EventText (the echoed reply) followed by EventTurnDone, then
-// closes the channel — the same event contract ClaudeSession honours. The reply
-// contains userText verbatim so callers/tests can assert round-trip fidelity.
+// Stream emits the echoed reply as an EventTextDelta (the incremental,
+// partial-message path — the same one claude --include-partial-messages uses,
+// which the executor forwards as streamed A2A text parts) followed by the
+// canonical EventText and EventTurnDone, then closes the channel. Emitting the
+// delta matters: the A2A→CMA turn path accumulates streamed deltas, so a
+// delta-less runtime would surface an empty agent.message. The reply contains
+// userText verbatim so callers/tests can assert round-trip fidelity.
 func (s *EchoSession) Stream(ctx context.Context, userText string) (<-chan Event, error) {
-	ch := make(chan Event, 2)
+	ch := make(chan Event, 3)
 	go func() {
 		defer close(ch)
 		if err := ctx.Err(); err != nil {
 			ch <- EventTurnDone{Err: err}
 			return
 		}
-		ch <- EventText{Text: "echo: " + userText}
+		reply := "echo: " + userText
+		ch <- EventTextDelta{Text: reply}
+		ch <- EventText{Text: reply}
 		ch <- EventTurnDone{}
 	}()
 	return ch, nil
