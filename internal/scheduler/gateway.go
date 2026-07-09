@@ -360,6 +360,21 @@ func (g *gatewayHandler) handleA2AProxy(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
+	// Activator: transparently wake an idle-stopped agent BEFORE resolving its
+	// dial target, so an A2A dispatch after a scale-to-zero re-spawns the
+	// runtime on a fresh process/port instead of dialing the dead cached
+	// endpoint (issue #20). The CLI chat path already does this via
+	// ChatWithAgentAs; the public /a2a/{agent} proxy — the path Hetairoi's
+	// autonomous loop dispatches through — was the one entrypoint that skipped
+	// it, so the first dispatch after any idle period reliably hit
+	// "connection refused" and the session went terminal. ensureAwake is a
+	// no-op when the agent is already up or was explicitly stopped/never
+	// existed; the agentDialTarget lookup below still decides genuine not-found.
+	if err := g.sch.ensureAwake(decodedName); err != nil {
+		writeJSONError(w, http.StatusBadGateway, "wake "+decodedName+": "+err.Error())
+		return
+	}
+
 	// Resolve via agentDialTarget so a scheduler-managed agent is reached at
 	// its recorded local address (not the registry card URL, which an
 	// unauthenticated registration can overwrite) and only such agents
