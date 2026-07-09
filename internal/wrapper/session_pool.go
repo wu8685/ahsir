@@ -116,6 +116,14 @@ type SessionPool struct {
 	// via EnableIdleReaper before the agent serves traffic and thereafter
 	// treated as immutable, so gatedLocked reads it without a lock.
 	monitor *idleMonitor
+
+	// onForget, when set, is called with a contextID the pool has PERMANENTLY
+	// dropped — i.e. its resumable mapping is gone (evictedTTL expiry or
+	// maxEvicted overflow), not a plain eviction that can still resume. Used to
+	// reclaim per-session filesystem state (see SessionWorkspace). Set once via
+	// SetOnForget before serving traffic; treated as immutable thereafter. The
+	// callback runs without the pool lock held and must be cheap/non-blocking.
+	onForget func(contextID string)
 }
 
 // OverloadPolicy selects what SessionPool does when LookupOrCreate would
@@ -678,6 +686,30 @@ func (p *SessionPool) upsertPersist(contextID string, rec PersistedRecord) {
 	}
 }
 
+// SetOnForget registers a callback fired when a contextID is permanently
+// dropped from the pool (evictedTTL expiry or maxEvicted overflow) — the point
+// at which the conversation is no longer resumable. Wire it to
+// SessionWorkspace.Remove so a session's private worktree is reclaimed once its
+// mapping is gone. Must be called before the pool serves traffic.
+func (p *SessionPool) SetOnForget(fn func(contextID string)) {
+	p.mu.Lock()
+	p.onForget = fn
+	p.mu.Unlock()
+}
+
+// forget removes contextID's persisted mapping and notifies onForget (if set).
+// It is the single "this conversation is permanently gone" chokepoint so the
+// filesystem-reclaim hook can never drift out of sync with the persist GC.
+func (p *SessionPool) forget(contextID string) {
+	p.removePersist(contextID)
+	p.mu.Lock()
+	fn := p.onForget
+	p.mu.Unlock()
+	if fn != nil {
+		fn(contextID)
+	}
+}
+
 // removePersist forgets one contextID from the persistent map. Used on the
 // 24h evictedTTL GC path.
 func (p *SessionPool) removePersist(contextID string) {
@@ -783,7 +815,7 @@ func (p *SessionPool) reapOnce() {
 		}
 		p.mu.Unlock()
 		for _, k := range toDelete {
-			p.removePersist(k)
+			p.forget(k)
 		}
 	}
 
@@ -847,7 +879,7 @@ func (p *SessionPool) enforceMaxEvicted() {
 	}
 
 	for _, contextID := range deleted {
-		p.removePersist(contextID)
+		p.forget(contextID)
 	}
 }
 

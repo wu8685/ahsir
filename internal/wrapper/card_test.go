@@ -236,6 +236,34 @@ pool:
 	}
 }
 
+// TestLoadAgentCardSessionIsolation verifies the pool.session_isolation key
+// parses into the SessionIsolation field and through ParseIsolationMode.
+func TestLoadAgentCardSessionIsolation(t *testing.T) {
+	dir := t.TempDir()
+	yamlContent := `
+name: A
+version: "1.0.0"
+skills: []
+pool:
+  session_isolation: worktree
+`
+	a2aDir := filepath.Join(dir, ".a2a")
+	os.MkdirAll(a2aDir, 0755)
+	os.WriteFile(filepath.Join(a2aDir, "agent-card.yaml"), []byte(yamlContent), 0644)
+
+	cfg, err := NewAgentCardBuilder(dir).Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Pool.SessionIsolation != "worktree" {
+		t.Errorf("expected session_isolation 'worktree', got %q", cfg.Pool.SessionIsolation)
+	}
+	mode, err := ParseIsolationMode(cfg.Pool.SessionIsolation)
+	if err != nil || mode != IsolationWorktree {
+		t.Errorf("ParseIsolationMode(%q)=%v err=%v", cfg.Pool.SessionIsolation, mode, err)
+	}
+}
+
 // TestLoadAgentCardRejectsRenamedKeys locks in the fail-loud contract from
 // issue #11: a card still carrying a pre-rename key must be rejected with an
 // error that names the replacement, never silently ignored (which would flip

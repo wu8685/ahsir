@@ -128,6 +128,16 @@ type PoolConfig struct {
 	// zero value is distinguishable: unset → default (4), explicit 0 →
 	// no queueing, restore fail-fast busy.
 	QueueDepth *int `yaml:"queue_depth" json:"queue_depth"`
+
+	// SessionIsolation gives each A2A contextID (session) its own filesystem
+	// working directory so concurrent sessions in one agent process don't race
+	// on a shared working tree (issue #19). Values:
+	//   - "" / "off" (default): all sessions share the one agent workdir.
+	//   - "scratch": each session gets an empty private dir as its cwd.
+	//   - "worktree": each session gets a `git worktree` checkout of the
+	//     workdir (falls back to "scratch" when the workdir isn't a git repo).
+	// Parsed via ParseIsolationMode at startup so a typo fails loud.
+	SessionIsolation string `yaml:"session_isolation" json:"session_isolation"`
 }
 
 // ProviderConfig maps to a2a.AgentProvider.

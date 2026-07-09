@@ -553,6 +553,7 @@ pool:
   session_idle_ttl: 30m   # per-session idle time before closing the live process (session-level, not the whole agent)
   evicted_ttl: 30d        # inactive mapping TTL; accepts Go durations plus day suffix such as 30d
   overload_policy: reject # or evict-lru
+  session_isolation: off  # off | scratch | worktree — per-session filesystem isolation (see below)
 streaming:
   partial_messages: true  # ClaudeSession only; enables A2A SSE deltas
 ```
@@ -573,6 +574,24 @@ Both default sensibly and are independent. See
 [docs/features.md](docs/features.md) for the full scale-to-zero lifecycle
 (`running ⇄ idle-stopped`, the activator wake path, and how it differs from
 archived/deleted agents).
+
+**Per-session filesystem isolation (`pool.session_isolation`).** Within one agent
+process, each `contextId` (session) already gets its own provider subprocess, but
+by default they all share the one agent workdir — so a session that mutates the
+working tree (`git checkout`, a build, generated files) races its siblings. Set
+`session_isolation` to give each session its own directory instead:
+
+| Value | Each session's cwd | Use when |
+|---|---|---|
+| `off` (default) | the shared agent workdir | sessions don't write, or you accept sequential-only concurrency |
+| `scratch` | an empty private dir under `<workspace>/.a2a/sessions/<id>/` | the agent only *generates* files and doesn't need the repo tree |
+| `worktree` | a private `git worktree` checkout of the workdir (falls back to `scratch` if the workdir isn't a git repo) | concurrent sessions each need to build/checkout an isolated copy of the same repo |
+
+The session's cwd and an `--add-dir` entry both point at its private directory. The
+directory is stable and reused across eviction/resume (so uncommitted work
+survives an idle eviction), and reclaimed once the session's resume mapping is
+permanently forgotten (`evicted_ttl` / `max_evicted`). This is the lighter-weight,
+single-process complement to running multiple agent instances.
 
 Runtime provider choices:
 
