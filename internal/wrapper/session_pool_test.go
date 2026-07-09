@@ -1577,14 +1577,17 @@ func TestSessionPool_OnForget_MaxEvictedOverflow(t *testing.T) {
 	if _, err := p.LookupOrCreate(context.Background(), "old"); err != nil {
 		t.Fatal(err)
 	}
-	now = now.Add(1 * time.Minute)
-	p.reapOnce() // evict "old"
+	// Push "old" past the 30m idle TTL so it evicts NOW, giving it a strictly
+	// earlier evictedAt than "new" (evicted a tick later). Same-tick eviction
+	// would tie evictedAt and make the max_evicted victim non-deterministic.
+	now = now.Add(31 * time.Minute)
+	p.reapOnce() // evict "old" (evictedAt = t+31m)
 
 	if _, err := p.LookupOrCreate(context.Background(), "new"); err != nil {
 		t.Fatal(err)
 	}
 	now = now.Add(31 * time.Minute)
-	p.reapOnce() // evict "new"; enforceMaxEvicted drops "old"
+	p.reapOnce() // evict "new" (evictedAt = t+62m); enforceMaxEvicted drops older "old"
 
 	mu.Lock()
 	defer mu.Unlock()
