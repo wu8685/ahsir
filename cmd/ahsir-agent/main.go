@@ -123,17 +123,50 @@ func main() {
 			log.Fatalf("agent %q: %v", cfg.Name, err)
 		}
 
+		// Per-session filesystem isolation (issue #19): when enabled, each A2A
+		// contextID gets its own scratch dir / git worktree so concurrent
+		// sessions in this single process don't race on a shared working tree.
+		// Off by default — sessions share the one agent workdir as before.
+		isolation, err := wrapper.ParseIsolationMode(cfg.Pool.SessionIsolation)
+		if err != nil {
+			log.Fatalf("agent %q: pool.session_isolation: %v", cfg.Name, err)
+		}
+		var sessionWS *wrapper.SessionWorkspace
+		if isolation.Enabled() && sessionCfg.Provider != wrapper.ProviderEcho {
+			sessionsBase := filepath.Join(*workspace, ".a2a", "sessions")
+			sessionWS = wrapper.NewSessionWorkspace(effectiveWorkdir, sessionsBase, isolation)
+			log.Printf("Session isolation: mode=%s base=%s (requested=%s)", sessionWS.Mode(), sessionsBase, isolation)
+		}
+
+		// sessionConfigFor derives the per-session invocation config: with
+		// isolation enabled it points the CLI cwd + --add-dir at the session's
+		// private directory; otherwise it returns the shared config unchanged.
+		sessionConfigFor := func(contextID string) (wrapper.SessionConfig, error) {
+			if sessionWS == nil {
+				return sessionCfg, nil
+			}
+			dir, err := sessionWS.Provision(contextID)
+			if err != nil {
+				return wrapper.SessionConfig{}, err
+			}
+			return wrapper.WithSessionWorkspace(sessionCfg, dir), nil
+		}
+
 		// Session per A2A contextID, pooled with sliding idle TTL.
 		// Claude uses one long-running stream-json subprocess; Codex forks
 		// `codex exec --json` per turn and resumes by thread_id.
 		factory := func(ctx context.Context, contextID, resumeID string) (wrapper.Session, error) {
-			if sessionCfg.Provider == wrapper.ProviderEcho {
-				return wrapper.NewEchoSession(ctx, sessionCfg, resumeID)
+			cfg, err := sessionConfigFor(contextID)
+			if err != nil {
+				return nil, err
 			}
-			if sessionCfg.Provider == wrapper.ProviderCodex {
-				return wrapper.NewCodexSession(ctx, sessionCfg, resumeID)
+			if cfg.Provider == wrapper.ProviderEcho {
+				return wrapper.NewEchoSession(ctx, cfg, resumeID)
 			}
-			return wrapper.NewClaudeSession(ctx, sessionCfg, resumeID)
+			if cfg.Provider == wrapper.ProviderCodex {
+				return wrapper.NewCodexSession(ctx, cfg, resumeID)
+			}
+			return wrapper.NewClaudeSession(ctx, cfg, resumeID)
 		}
 		// Persist contextID → sessionID mappings so a restart of this agent
 		// process can `--resume` prior conversations instead of starting
@@ -146,6 +179,17 @@ func main() {
 		pool.SetMaxEvicted(retention.maxEvicted)
 		stopPool = pool.Stop
 		defer pool.Stop()
+
+		// Reclaim a session's private worktree once its mapping is permanently
+		// forgotten (evicted past evictedTTL / max_evicted), so isolated
+		// worktrees don't outlive the conversations they belonged to.
+		if sessionWS != nil {
+			pool.SetOnForget(func(contextID string) {
+				if err := sessionWS.Remove(contextID); err != nil {
+					log.Printf("session isolation: cleanup for contextID=%s failed: %v", contextID, err)
+				}
+			})
+		}
 
 		// Apply pool capacity from agent-card.yaml's `pool:` block if set.
 		// Default (max_active=0) keeps the pool unbounded — historical
