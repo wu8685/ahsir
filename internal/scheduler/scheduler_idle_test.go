@@ -1,9 +1,12 @@
 package scheduler
 
 import (
+	"bytes"
 	"context"
 	"fmt"
+	"io"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -15,6 +18,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/wu8685/ahsir/internal/registry"
 	"github.com/wu8685/ahsir/internal/wrapper"
 )
 
@@ -66,6 +70,14 @@ func TestSchedulerIdleAgentHelperProcess(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
+	})
+	// Root handler: the scheduler's A2A proxy forwards to the agent's base URL
+	// (http://127.0.0.1:<port>/). Answering it lets a proxy-path wake test
+	// (issue #20) assert the dispatch reached the *woken* runtime, not a dead
+	// cached port.
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"jsonrpc":"2.0","result":{"ok":true},"id":"t"}`))
 	})
 	srv := &http.Server{Addr: "127.0.0.1:" + port, Handler: mux}
 	go func() { _ = srv.ListenAndServe() }()
@@ -304,5 +316,64 @@ func TestSchedulerStoppedAgentNotWoken(t *testing.T) {
 	time.Sleep(150 * time.Millisecond)
 	if lines := readLines(t, logPath); len(lines) != 1 {
 		t.Fatalf("stopped agent was woken: got %d start lines, want 1 (%q)", len(lines), lines)
+	}
+}
+
+// TestSchedulerA2AProxyWakesIdleStopped is the regression for issue #20: a
+// dispatch through the public /a2a/{agent} proxy after an idle scale-to-zero
+// must transparently re-spawn the runtime and route to the fresh port, instead
+// of dialing the dead cached endpoint and returning 502/404. This is the path
+// Hetairoi's autonomous loop uses, so the very first dispatch after any quiet
+// period exercised exactly this bug.
+func TestSchedulerA2AProxyWakesIdleStopped(t *testing.T) {
+	dir := t.TempDir()
+	logPath := filepath.Join(dir, "starts.log")
+	marker := filepath.Join(dir, "marker")
+	sch := newIdleTestScheduler(t, dir, idleAgentCommand(logPath, marker, 80, wrapper.IdleStopExitCode))
+
+	ctx, cancel := context.WithTimeout(context.Background(), testLifecycleDeadline)
+	defer cancel()
+	if err := sch.Start(ctx); err != nil {
+		t.Fatal(err)
+	}
+	defer sch.Stop()
+
+	// Expose the scheduler gateway exactly as production does, so the POST below
+	// travels the real handleA2AProxy path (not an in-process shortcut).
+	regHandler := registry.NewHTTPHandler(sch.Registry())
+	gw := newGatewayHandler(sch, regHandler)
+	proxySrv := httptest.NewServer(gw)
+	defer proxySrv.Close()
+
+	_ = waitForLines(t, logPath, 1, testLifecycleDeadline)
+	waitForIdleStopped(t, sch, "worker", testLifecycleDeadline)
+
+	// Dispatch through the proxy while the agent is scaled to zero.
+	body := []byte(`{"jsonrpc":"2.0","method":"message/send","id":"t","params":{"message":{"role":"user","parts":[{"kind":"text","text":"wake"}]}}}`)
+	resp, err := http.Post(proxySrv.URL+"/a2a/worker", "application/json", bytes.NewReader(body))
+	if err != nil {
+		t.Fatalf("POST /a2a/worker: %v", err)
+	}
+	respBody, _ := io.ReadAll(resp.Body)
+	_ = resp.Body.Close()
+
+	// Before the fix the proxy dialed the dead cached port → 502 (or 404 when
+	// the stale card had already been evicted). After the fix the woken runtime
+	// answers 200.
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("proxy dispatch to idle-stopped agent failed to wake it: status=%d body=%s", resp.StatusCode, respBody)
+	}
+
+	// Proof of a genuine re-spawn: a 2nd start line, back in the running set,
+	// no longer idle-stopped.
+	_ = waitForLines(t, logPath, 2, testLifecycleDeadline)
+	if got := sch.IdleStoppedAgents(); len(got) != 0 {
+		t.Fatalf("agent still idle-stopped after proxy wake: %v", got)
+	}
+	sch.mu.Lock()
+	_, up := sch.agents["worker"]
+	sch.mu.Unlock()
+	if !up {
+		t.Fatal("woken agent not in the running set after proxy dispatch")
 	}
 }

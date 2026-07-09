@@ -50,6 +50,15 @@ shutdown still stop the process without restart.
   `--skip-start`, when the scheduler was down, or after hand-editing
   `ahsir.yaml`; editing an existing card restarts *that agent* (`POST
   /admin/agents/{name}/restart`), not the scheduler.
+- **Concurrent instances per card (worker pool)**: an agent card with
+  `instances: N` backs up to N concurrent runtime instances, each a separate
+  process with its own isolated `inst-<n>` workspace. The scheduler assigns each
+  session to a free instance (spawning on demand up to the cap, reaping when
+  idle) while pinning a `contextId` to one instance for `--resume`. Callers still
+  chat the base name; instance children are hidden from `list`. This makes safe
+  parallel dispatch possible for agents that mutate a working tree (a coder that
+  clones / checks out / builds) instead of serializing to one shared workspace.
+  Default (`instances: 0` or `1`) is the unchanged one-card-one-worker behavior.
 - **Invocation ledger and continuation prompt**: scheduler records
   mediated calls in `.ahsir/ledger.jsonl`, replays it on startup, compacts old
   records, and sends a continuation prompt after a supervised restart for
@@ -489,6 +498,33 @@ port_range:
   start: 9802
   end: 9900
 ```
+
+**Concurrent instances — one card, a worker pool.** By default one agent card is
+one runtime instance sharing one workspace, so several sessions dispatched to
+the same agent at once serialize onto a single working tree — fine for a
+question-answering agent, but a *coder* that clones / checks out branches /
+builds would have its concurrent sessions clobber each other. Set `instances`
+to let one card back **up to N concurrent instances**, each a separate process
+with its own isolated `inst-<n>` workspace, spawned on demand and reaped when
+idle:
+
+```yaml
+agents:
+  - name: cma-coder-v1
+    workspace: ~/.ahsir/agents/cma-coder-v1
+    instances: 3          # up to 3 isolated worker processes for this one card
+```
+
+- Callers still chat the **base name** (`cma-coder-v1`); the scheduler routes
+  each session to a free instance and spawns a new one (up to the cap) only when
+  every existing instance is busy. A single instance — the default `instances: 0`
+  or `1` — is byte-identical to before.
+- A `contextId` is **pinned** to its instance for its whole life, so `--resume`
+  always finds its history; distinct concurrent conversations fan out across the
+  pool.
+- Instance children are hidden from `ahsir list` / the console — a pooled card
+  presents as one agent. Dynamically-registered agents opt in via the admin
+  API's `instances` field.
 
 ### `<workspace>/.a2a/agent-card.yaml` — per-agent config
 

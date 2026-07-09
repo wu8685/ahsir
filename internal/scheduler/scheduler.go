@@ -76,8 +76,17 @@ type Scheduler struct {
 
 	// waking single-flights concurrent wake attempts for one idle-stopped agent
 	// (R2): the first request creates the channel and spawns the process; others
-	// wait on it. Guarded by s.mu.
+	// wait on it. Guarded by s.mu. The same map single-flights first-time spawns
+	// of a pooled instance child (issue #18) — the key space (agent names) is
+	// shared and the two intents never collide on one name.
 	waking map[string]chan struct{}
+
+	// pools holds the per-card instance pool for every agent whose card backs
+	// more than one concurrent runtime instance (issue #18). Lazily created in
+	// poolFor from the agent's desired InstanceCap; absent for single-instance
+	// agents, which keep the unchanged one-card-one-worker dispatch path. Guarded
+	// by s.mu.
+	pools map[string]*instancePool
 }
 
 type agentProcess struct {
@@ -154,6 +163,7 @@ func New(cfg *Config) *Scheduler {
 		killLocalProcessTree: defaultKillLocalProcessTree,
 		idleStopped:          make(map[string]AgentConfig),
 		waking:               make(map[string]chan struct{}),
+		pools:                make(map[string]*instancePool),
 	}
 	// Roundtable turns reuse the normal per-agent chat path (shared contextId,
 	// speaker attribution, ledger) — the room id is the contextId.
@@ -931,6 +941,7 @@ func (s *Scheduler) Stop() {
 	s.desired = make(map[string]AgentConfig)
 	s.idleStopped = make(map[string]AgentConfig)
 	s.waking = make(map[string]chan struct{})
+	s.pools = make(map[string]*instancePool)
 	s.running = false
 }
 
@@ -1124,6 +1135,156 @@ func (s *Scheduler) waitAgentHealthy(proc *agentProcess) error {
 	}
 }
 
+// poolFor returns the instance pool for a pooled agent (InstanceCap > 1),
+// creating it on first use, or nil for a single-instance agent (the common
+// case) so its dispatch path is left completely unchanged. Only base card names
+// are pooled — an instance child name (base#n) has no `desired` entry and falls
+// through to nil.
+func (s *Scheduler) poolFor(agentName string) *instancePool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if p, ok := s.pools[agentName]; ok {
+		return p
+	}
+	cfg, ok := s.desired[agentName]
+	if !ok || cfg.InstanceCap() <= 1 {
+		return nil
+	}
+	p := newInstancePool(cfg.InstanceCap())
+	s.pools[agentName] = p
+	return p
+}
+
+// resolveInstance maps a chat for agentName+contextID onto the concrete runtime
+// instance that should serve it (issue #18). For a single-instance agent it is a
+// no-op returning the base name and a no-op release. For a pooled agent it
+// acquires an instance from the pool (spreading concurrent sessions across
+// isolated workspaces while keeping a contextID pinned to one instance), spawns
+// or wakes that instance if it is not the always-present base, and returns the
+// instance name plus a release the caller MUST invoke once the turn is done.
+func (s *Scheduler) resolveInstance(agentName, contextID string) (target string, release func(), err error) {
+	pool := s.poolFor(agentName)
+	if pool == nil {
+		return agentName, func() {}, nil
+	}
+	idx := pool.acquire(contextID)
+	release = func() { pool.release(idx) }
+	if idx == 0 {
+		// Ordinal 0 is the base process, already spawned at Start — dial it as
+		// today; nothing extra to bring up.
+		return agentName, release, nil
+	}
+	if err := s.startOrWakeInstance(agentName, idx); err != nil {
+		release()
+		return "", nil, err
+	}
+	return instanceName(agentName, idx), release, nil
+}
+
+// startOrWakeInstance ensures instance idx (idx>0) of a pooled base agent is
+// running and healthy: it wakes an idle-stopped instance via the activator,
+// waits on an in-flight spawn by another goroutine, or scaffolds the isolated
+// instance workspace and spawns a fresh ahsir-agent process. Concurrent callers
+// for the same instance single-flight through s.waking, mirroring ensureAwake,
+// so exactly one process is started.
+func (s *Scheduler) startOrWakeInstance(base string, idx int) error {
+	instName := instanceName(base, idx)
+	for {
+		s.mu.Lock()
+		if !s.running {
+			s.mu.Unlock()
+			return fmt.Errorf("scheduler not running")
+		}
+		if _, up := s.agents[instName]; up {
+			s.mu.Unlock()
+			return nil
+		}
+		if ch, waking := s.waking[instName]; waking {
+			// Another goroutine is bringing this instance up — wait, then
+			// re-check (it may have failed and left nothing running).
+			s.mu.Unlock()
+			<-ch
+			continue
+		}
+		if _, idle := s.idleStopped[instName]; idle {
+			// A reaped instance: reuse the activator's own single-flight wake.
+			s.mu.Unlock()
+			return s.ensureAwake(instName)
+		}
+		baseCfg, ok := s.desired[base]
+		if !ok {
+			s.mu.Unlock()
+			return fmt.Errorf("agent %q not found", base)
+		}
+		instCfg := deriveInstanceConfig(baseCfg, idx)
+		if err := scaffoldInstanceWorkspace(baseCfg.Workspace, instCfg.Workspace); err != nil {
+			s.mu.Unlock()
+			return fmt.Errorf("scaffold instance %s: %w", instName, err)
+		}
+		ch := make(chan struct{})
+		s.waking[instName] = ch
+		startErr := s.startAgentLocked(s.ctx, instCfg, 0)
+		var proc *agentProcess
+		if startErr == nil {
+			proc = s.agents[instName]
+		}
+		delete(s.waking, instName)
+		s.mu.Unlock()
+		close(ch)
+
+		if startErr != nil {
+			return fmt.Errorf("start instance %s: %w", instName, startErr)
+		}
+		log.Printf("Agent %s instance #%d started on port %d (workspace=%s)", base, idx, proc.cfg.Port, instCfg.Workspace)
+		return s.waitAgentHealthy(proc)
+	}
+}
+
+// deriveInstanceConfig produces the AgentConfig for instance idx from its base
+// card. The instance gets a suffixed name, an isolated inst-<idx> workspace, a
+// freshly allocated port, and a fresh internal token. Workdir is deliberately
+// left as the base set it: when the base left Workdir empty (cwd defaults to the
+// workspace) the instance's cwd becomes its own inst-<idx> dir — the working-tree
+// isolation issue #18 is about. An explicitly shared Workdir is the operator's
+// deliberate choice and is preserved.
+func deriveInstanceConfig(base AgentConfig, idx int) AgentConfig {
+	inst := base
+	inst.Name = instanceName(base.Name, idx)
+	inst.Workspace = instanceWorkspace(base.Workspace, idx)
+	inst.Port = 0
+	inst.InternalToken = ""
+	return inst
+}
+
+// scaffoldInstanceWorkspace makes an isolated instance workspace bootable by
+// copying the base card into it. The agent subprocess reads its persona from
+// <workspace>/.a2a/agent-card.yaml at startup, so a fresh inst-<n> dir needs the
+// same card as its base. sessions.json / transcripts are deliberately NOT copied
+// — each instance keeps its own conversation state (that isolation is the point).
+// Idempotent: an already-scaffolded instance card is left untouched so an
+// operator edit to it survives a respawn.
+func scaffoldInstanceWorkspace(baseWorkspace, instWorkspace string) error {
+	if baseWorkspace == "" || instWorkspace == "" || sameCleanPath(baseWorkspace, instWorkspace) {
+		return nil
+	}
+	dst := filepath.Join(instWorkspace, ".a2a", "agent-card.yaml")
+	if _, err := os.Stat(dst); err == nil {
+		return nil // already scaffolded
+	}
+	src := filepath.Join(baseWorkspace, ".a2a", "agent-card.yaml")
+	data, err := os.ReadFile(src)
+	if err != nil {
+		return fmt.Errorf("read base card %s: %w", src, err)
+	}
+	if err := os.MkdirAll(filepath.Dir(dst), 0o700); err != nil {
+		return fmt.Errorf("create instance .a2a dir: %w", err)
+	}
+	if err := os.WriteFile(dst, data, 0o600); err != nil {
+		return fmt.Errorf("write instance card %s: %w", dst, err)
+	}
+	return nil
+}
+
 // ChatWithAgent sends a message to an agent.
 //
 // The forwarding timeout comes from cfg.Timeouts.Chat (default 10m). It MUST
@@ -1141,12 +1302,21 @@ func (s *Scheduler) ChatWithAgent(agentName, contextID, message string) (string,
 // turn with who said it (shared-context collaboration). Empty speaker is
 // byte-identical to ChatWithAgent.
 func (s *Scheduler) ChatWithAgentAs(agentName, contextID, speaker, message string) (string, error) {
-	// Activator: transparently wake an idle-stopped agent before dialing so the
-	// caller never sees a scale-to-zero'd agent as "connection refused".
-	if err := s.ensureAwake(agentName); err != nil {
+	// Instance pool: route this turn onto a concrete runtime instance (issue
+	// #18). No-op for single-instance agents (target == agentName). Release marks
+	// the turn done so the pool can spread the next concurrent session.
+	target, release, err := s.resolveInstance(agentName, contextID)
+	if err != nil {
 		return "", err
 	}
-	card, internalToken, ok := s.agentDialTarget(agentName)
+	defer release()
+
+	// Activator: transparently wake an idle-stopped agent before dialing so the
+	// caller never sees a scale-to-zero'd agent as "connection refused".
+	if err := s.ensureAwake(target); err != nil {
+		return "", err
+	}
+	card, internalToken, ok := s.agentDialTarget(target)
 	if !ok {
 		return "", fmt.Errorf("agent %s not found", agentName)
 	}
@@ -1176,13 +1346,27 @@ func (s *Scheduler) ChatWithAgentAs(agentName, contextID, speaker, message strin
 // ChatWithAgentAsync submits a turn without waiting for it: the agent
 // answers with a submitted task immediately (configuration.blocking=false).
 // Callers poll the task via GetTaskStatus / `ahsir status`.
-func (s *Scheduler) ChatWithAgentAsync(agentName, contextID, speaker, message string) (*a2a.Task, error) {
-	if err := s.ensureAwake(agentName); err != nil {
-		return nil, err
+//
+// Returns a release func the caller MUST invoke once the async turn has settled
+// (its background poller reaches a terminal state) so the instance pool keeps
+// counting the turn as in-flight until then — an async coder turn runs long, and
+// releasing at submission time would let a second concurrent session pile onto
+// the same instance. release is never nil.
+func (s *Scheduler) ChatWithAgentAsync(agentName, contextID, speaker, message string) (task *a2a.Task, release func(), err error) {
+	target, release, err := s.resolveInstance(agentName, contextID)
+	if err != nil {
+		return nil, func() {}, err
 	}
-	card, internalToken, ok := s.agentDialTarget(agentName)
+	// From here on, any early return must release — the caller only owns release
+	// once we hand back a live task.
+	if err := s.ensureAwake(target); err != nil {
+		release()
+		return nil, func() {}, err
+	}
+	card, internalToken, ok := s.agentDialTarget(target)
 	if !ok {
-		return nil, fmt.Errorf("agent %s not found", agentName)
+		release()
+		return nil, func() {}, fmt.Errorf("agent %s not found", agentName)
 	}
 
 	// Submission is a fast accept (no LLM round-trip) — task-status timeout
@@ -1191,16 +1375,25 @@ func (s *Scheduler) ChatWithAgentAsync(agentName, contextID, speaker, message st
 	defer cancel()
 	client, err := wrapper.NewAgentClientWithInternalToken(ctx, card, internalToken)
 	if err != nil {
-		return nil, fmt.Errorf("create client for %s: %w", agentName, err)
+		release()
+		return nil, func() {}, fmt.Errorf("create client for %s: %w", agentName, err)
 	}
-	return client.SendMessageNonBlocking(ctx, contextID, speaker, message)
+	t, err := client.SendMessageNonBlocking(ctx, contextID, speaker, message)
+	if err != nil {
+		release()
+		return nil, func() {}, err
+	}
+	return t, release, nil
 }
 
 // settleAsyncInvocation polls the agent's task until it reaches a terminal
 // state, then settles the ledger record — keeping `ahsir trace` truthful for
 // async turns. Budget: the chat timeout (0 = unbounded, mirroring the
 // synchronous path's "no scheduler deadline").
-func (s *Scheduler) settleAsyncInvocation(invID, agentName string, taskID string) {
+func (s *Scheduler) settleAsyncInvocation(invID, agentName string, taskID string, done func()) {
+	if done != nil {
+		defer done()
+	}
 	var deadline time.Time
 	if t := s.cfg.Timeouts.ChatTimeout(); t > 0 {
 		deadline = time.Now().Add(t)
