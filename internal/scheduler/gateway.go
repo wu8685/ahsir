@@ -290,12 +290,18 @@ func (g *gatewayHandler) handlePublicAgents(w http.ResponseWriter, r *http.Reque
 		*a2a.AgentCard
 		Status string `json:"status"`
 	}
-	result := make([]cardWithStatus, len(cards))
-	for i, card := range cards {
-		result[i] = cardWithStatus{
+	result := make([]cardWithStatus, 0, len(cards))
+	for _, card := range cards {
+		// Hide pooled instance children (base#n): a card that backs a worker pool
+		// still presents as a single agent to users and to peer-agent discovery
+		// (issue #18). Callers chat the base name; the scheduler fans out.
+		if isInstanceChild(card.Name) {
+			continue
+		}
+		result = append(result, cardWithStatus{
 			AgentCard: g.publicAgentCard(r, card),
 			Status:    g.sch.registry.GetStatus(card.Name),
-		}
+		})
 	}
 	writeJSON(w, http.StatusOK, result)
 }
@@ -507,14 +513,16 @@ func (g *gatewayHandler) handleChat(w http.ResponseWriter, r *http.Request, name
 	// Async: submit, mark queued, settle in the background, answer 202 with
 	// the task handle. The error mapping below is shared with the sync path.
 	if req.Async {
-		task, err := g.sch.ChatWithAgentAsync(name, req.ContextID, req.Speaker, req.Message)
+		task, release, err := g.sch.ChatWithAgentAsync(name, req.ContextID, req.Speaker, req.Message)
 		if err != nil {
 			g.sch.ledger.FailResult(inv.ID, classifyChatError(err), err)
 			g.writeChatError(w, name, req.ContextID, err)
 			return
 		}
 		g.sch.ledger.Queued(inv.ID)
-		go g.sch.settleAsyncInvocation(inv.ID, name, string(task.ID))
+		// release holds the instance pool's in-flight count until the async turn
+		// settles (issue #18) — hand it to the settler.
+		go g.sch.settleAsyncInvocation(inv.ID, name, string(task.ID), release)
 		writeJSON(w, http.StatusAccepted, asyncChatResponse{
 			TaskID:    string(task.ID),
 			ContextID: task.ContextID,
@@ -648,10 +656,14 @@ func (g *gatewayHandler) handleTask(w http.ResponseWriter, r *http.Request, name
 // CMA agent version) need not pre-stage anything on disk. When Card is set and
 // Workspace is empty, a managed workspace is allocated under .ahsir/agents/.
 type startAgentRequest struct {
-	Name      string                   `json:"name"`
-	Workspace string                   `json:"workspace"`
-	Workdir   string                   `json:"workdir,omitempty"`
-	Port      int                      `json:"port,omitempty"`
+	Name      string `json:"name"`
+	Workspace string `json:"workspace"`
+	Workdir   string `json:"workdir,omitempty"`
+	Port      int    `json:"port,omitempty"`
+	// Instances caps how many concurrent runtime instances this card may back
+	// (issue #18). Zero/1 = single instance (unchanged). >1 lets the scheduler
+	// pool isolated-workspace instances on demand for safe parallel dispatch.
+	Instances int                      `json:"instances,omitempty"`
 	Card      *wrapper.AgentCardConfig `json:"card,omitempty"`
 }
 
@@ -744,6 +756,7 @@ func (g *gatewayHandler) handleAdminStart(w http.ResponseWriter, r *http.Request
 		Workspace: workspace,
 		Workdir:   req.Workdir,
 		Port:      req.Port,
+		Instances: req.Instances,
 	})
 	if err != nil {
 		log.Printf("admin: start agent %q failed: %v", req.Name, err)
