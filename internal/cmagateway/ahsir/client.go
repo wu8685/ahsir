@@ -38,14 +38,19 @@ func New(baseURL, adminToken string) *Client {
 type registerRequest struct {
 	Name      string     `json:"name"`
 	Workspace string     `json:"workspace,omitempty"`
+	// Instances caps how many concurrent runtime instances the scheduler may
+	// pool for this card (issue #18). 0 (the default) means single-instance.
+	Instances int        `json:"instances,omitempty"`
 	Card      *AgentCard `json:"card,omitempty"`
 }
 
-// RegisterAgent hot-registers an ahsir agent from an inline card. Idempotent at
-// the caller level: a 409 "already running" means the (versioned) agent exists,
-// which we treat as success.
-func (c *Client) RegisterAgent(ctx context.Context, name string, card *AgentCard) error {
-	body, err := json.Marshal(registerRequest{Name: name, Card: card})
+// RegisterAgent hot-registers an ahsir agent from an inline card. instances
+// caps how many concurrent runtime instances the scheduler may pool for the
+// card (0 = single instance, unchanged). Idempotent at the caller level: a 409
+// "already running" means the (versioned) agent exists, which we treat as
+// success.
+func (c *Client) RegisterAgent(ctx context.Context, name string, card *AgentCard, instances int) error {
+	body, err := json.Marshal(registerRequest{Name: name, Instances: instances, Card: card})
 	if err != nil {
 		return err
 	}

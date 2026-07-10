@@ -763,7 +763,8 @@ func (s *Server) ensureRegistered(ctx context.Context, ahsirName string, agent *
 		return nil
 	}
 	card := translate.AgentToCard(ahsirName, agent, s.rt)
-	if err := s.ahsir.RegisterAgent(ctx, ahsirName, card); err != nil {
+	instances := translate.Instances(agent)
+	if err := s.ahsir.RegisterAgent(ctx, ahsirName, card, instances); err != nil {
 		return err
 	}
 	s.regMu.Lock()

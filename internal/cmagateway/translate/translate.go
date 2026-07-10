@@ -3,6 +3,7 @@ package translate
 
 import (
 	"fmt"
+	"strconv"
 	"strings"
 
 	"github.com/wu8685/ahsir/internal/cmagateway/ahsir"
@@ -35,6 +36,8 @@ func AhsirAgentName(agentID string, version int64) string {
 //   - mcp_servers  -> mcp.servers (claude remote-server shape; auth deferred)
 //   - filesystem    -> enabled + write_access so the prebuilt toolset
 //     (bash/read/write/edit) is available, the agent_toolset_20260401 analog
+//   - metadata["session_isolation"] -> pool.session_isolation so concurrent
+//     sessions of one facade agent get isolated working trees (issue #19)
 //   - streaming.partial_messages -> true so deltas flow once A2A is wired
 func AgentToCard(name string, a *cma.Agent, d RuntimeDefaults) *ahsir.AgentCard {
 	card := &ahsir.AgentCard{
@@ -64,6 +67,12 @@ func AgentToCard(name string, a *cma.Agent, d RuntimeDefaults) *ahsir.AgentCard 
 			AllowedPaths: []string{"."},
 		},
 		Streaming: ahsir.StreamingConfig{PartialMessages: true},
+		Pool: ahsir.PoolConfig{
+			// Opt a facade agent into per-session filesystem isolation
+			// ("off" | "scratch" | "worktree"). Empty -> ahsir default (off,
+			// shared workdir). Mirrors the shell_access / runtime_timeout knobs.
+			SessionIsolation: a.Metadata["session_isolation"],
+		},
 	}
 
 	for _, s := range a.Skills {
@@ -83,6 +92,20 @@ func AgentToCard(name string, a *cma.Agent, d RuntimeDefaults) *ahsir.AgentCard 
 	}
 
 	return card
+}
+
+// Instances reads the optional metadata["instances"] knob — the maximum number
+// of concurrent runtime instances the scheduler may pool for this agent so
+// parallel sessions run in isolated workspaces (issue #18). It is a scheduler
+// start-agent field (not part of the card), so callers pass the result to
+// RegisterAgent separately. Empty, non-numeric, or < 1 yields 0, which the
+// scheduler treats as single-instance (unchanged behaviour).
+func Instances(a *cma.Agent) int {
+	n, err := strconv.Atoi(strings.TrimSpace(a.Metadata["instances"]))
+	if err != nil || n < 1 {
+		return 0
+	}
+	return n
 }
 
 func skillDescription(s cma.SkillRef) string {
