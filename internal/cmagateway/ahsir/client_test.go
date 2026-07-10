@@ -83,6 +83,41 @@ func TestRegisterAgent_OmitsDefaults(t *testing.T) {
 	}
 }
 
+// The card must serialize RuntimeConfig.AgentIdleTimeout under the exact wire
+// key the scheduler reads (runtime.agent_idle_timeout), and omit it when unset
+// so ahsir falls back to its 10m default (issue #17).
+func TestCard_AgentIdleTimeoutWire(t *testing.T) {
+	// Pinned resident -> the key must be present with the given value.
+	card := &AgentCard{Name: "cma-coder-v1", Runtime: RuntimeConfig{AgentIdleTimeout: "0"}}
+	b, err := json.Marshal(card)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	var wire struct {
+		Runtime struct {
+			AgentIdleTimeout string `json:"agent_idle_timeout"`
+		} `json:"runtime"`
+	}
+	if err := json.Unmarshal(b, &wire); err != nil {
+		t.Fatalf("unmarshal: %v (json=%s)", err, b)
+	}
+	if wire.Runtime.AgentIdleTimeout != "0" {
+		t.Errorf("runtime.agent_idle_timeout = %q, want 0", wire.Runtime.AgentIdleTimeout)
+	}
+
+	// Unset -> the key must be omitted entirely.
+	b2, _ := json.Marshal(&AgentCard{Name: "cma-coder-v1"})
+	var raw struct {
+		Runtime map[string]json.RawMessage `json:"runtime"`
+	}
+	if err := json.Unmarshal(b2, &raw); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if _, ok := raw.Runtime["agent_idle_timeout"]; ok {
+		t.Errorf("agent_idle_timeout should be omitted when empty, got %s", raw.Runtime["agent_idle_timeout"])
+	}
+}
+
 // A 409 from the scheduler ("already running") is success for the versioned
 // name model — RegisterAgent must not surface it as an error.
 func TestRegisterAgent_ConflictIsSuccess(t *testing.T) {

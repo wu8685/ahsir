@@ -253,14 +253,45 @@ func (c *Client) ChatStream(ctx context.Context, agent, contextID, message strin
 	return buf.String(), nil
 }
 
+// openStream wake-retry window. A scaled-to-zero agent (idle reaper, issue #6)
+// is respawned on next access — respawn the wrapper + cold-start the runtime
+// (claude CLI + MCP config load) + bind the A2A port — which routinely takes
+// 30–90s. The retry loop must outlast that cold start, so the total window is
+// sized to ~100s: the first attempts stay fast (a port still binding after a
+// normal supervised restart comes back in well under a second) while the
+// per-attempt backoff is capped so the window stretches without the delay
+// between late attempts ballooning.
+//
+// Backoff before attempt N is min(N*openStreamBaseBackoff, openStreamMaxBackoff).
+// Total window over attempts 1..openStreamMaxAttempts-1 is ~103s (16.5s of fast
+// early backoff + 29 capped 3s waits). These are vars, not consts, only so tests
+// can shrink the window; production never mutates them.
+var (
+	openStreamMaxAttempts = 40
+	openStreamBaseBackoff = 300 * time.Millisecond
+	openStreamMaxBackoff  = 3 * time.Second
+)
+
+// openStreamBackoff is the wait before a given (1-based) retry attempt: linear
+// growth from openStreamBaseBackoff, capped at openStreamMaxBackoff.
+func openStreamBackoff(attempt int) time.Duration {
+	d := time.Duration(attempt) * openStreamBaseBackoff
+	if d > openStreamMaxBackoff {
+		return openStreamMaxBackoff
+	}
+	return d
+}
+
 // openStream POSTs the message/stream request and returns the live SSE
 // response, retrying transient pre-stream failures. Right after registration
 // the agent's A2A server may still be binding its port (the admin start returns
-// at spawn, not at listen), and a supervised restart briefly drops the port;
-// both surface as a dial refusal or a 502 from the gateway proxy. No turn has
-// started in those cases, so retrying is idempotent.
+// at spawn, not at listen), a supervised restart briefly drops the port, and a
+// scaled-to-zero agent must cold-start on access; all surface as a dial refusal
+// or a 502 from the gateway proxy. No turn has started in those cases, so
+// retrying is idempotent. The window (openStreamMaxAttempts) is sized to cover
+// a full cold start, not just a port rebind.
 func (c *Client) openStream(ctx context.Context, agent string, body []byte, onReschedule func()) (*http.Response, error) {
-	const maxAttempts = 10
+	maxAttempts := openStreamMaxAttempts
 	var lastErr error
 	for attempt := 0; attempt < maxAttempts; attempt++ {
 		if attempt > 0 {
@@ -272,7 +303,7 @@ func (c *Client) openStream(ctx context.Context, agent string, body []byte, onRe
 			select {
 			case <-ctx.Done():
 				return nil, ctx.Err()
-			case <-time.After(time.Duration(attempt) * 300 * time.Millisecond):
+			case <-time.After(openStreamBackoff(attempt)):
 			}
 		}
 		req, err := c.newRequest(ctx, http.MethodPost, "/a2a/"+url.PathEscape(agent), body)

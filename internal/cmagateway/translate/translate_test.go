@@ -58,6 +58,34 @@ func TestAgentToCard_ExistingMetadataStillMaps(t *testing.T) {
 	}
 }
 
+// agent_idle_timeout metadata must flow into card.Runtime.AgentIdleTimeout so a
+// facade-created agent can be pinned resident ("0") and never cold-started on
+// the next event (issue #17). Unset must stay empty so ahsir applies its 10m
+// default.
+func TestAgentToCard_AgentIdleTimeout(t *testing.T) {
+	cases := []struct {
+		name string
+		meta string
+		want string
+	}{
+		{"pin resident", "0", "0"},
+		{"explicit window", "30m", "30m"},
+		{"unset defaults empty", "", ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			a := baseAgent()
+			if tc.meta != "" {
+				a.Metadata["agent_idle_timeout"] = tc.meta
+			}
+			card := AgentToCard("cma-coder-v1", a, RuntimeDefaults{})
+			if card.Runtime.AgentIdleTimeout != tc.want {
+				t.Fatalf("Runtime.AgentIdleTimeout = %q, want %q", card.Runtime.AgentIdleTimeout, tc.want)
+			}
+		})
+	}
+}
+
 func TestInstances(t *testing.T) {
 	cases := []struct {
 		name string

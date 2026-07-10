@@ -38,6 +38,9 @@ func AhsirAgentName(agentID string, version int64) string {
 //     (bash/read/write/edit) is available, the agent_toolset_20260401 analog
 //   - metadata["session_isolation"] -> pool.session_isolation so concurrent
 //     sessions of one facade agent get isolated working trees (issue #19)
+//   - metadata["agent_idle_timeout"] -> runtime.agent_idle_timeout so an
+//     always-hot agent can be pinned resident ("0") and never cold-started on
+//     the next event (issue #17)
 //   - streaming.partial_messages -> true so deltas flow once A2A is wired
 func AgentToCard(name string, a *cma.Agent, d RuntimeDefaults) *ahsir.AgentCard {
 	card := &ahsir.AgentCard{
@@ -56,6 +59,11 @@ func AgentToCard(name string, a *cma.Agent, d RuntimeDefaults) *ahsir.AgentCard 
 			// long-running tool-driven turns (e.g. an event agent that shells
 			// out repeatedly). Empty -> ahsir default.
 			Timeout: a.Metadata["runtime_timeout"],
+			// Optional per-agent override of the scale-to-zero idle-reap window
+			// (issue #6). "0" pins an always-hot agent resident so it never gets
+			// idle-reaped and then hit with a cold-start wake on the next facade
+			// event (issue #17). Empty -> ahsir default (10m).
+			AgentIdleTimeout: a.Metadata["agent_idle_timeout"],
 		},
 		Filesystem: ahsir.FilesystemConfig{
 			Enabled:     true,
