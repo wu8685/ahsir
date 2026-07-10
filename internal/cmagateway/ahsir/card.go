@@ -18,6 +18,7 @@ type AgentCard struct {
 	Runtime     RuntimeConfig    `json:"runtime"`
 	Filesystem  FilesystemConfig `json:"filesystem"`
 	Streaming   StreamingConfig  `json:"streaming"`
+	Pool        PoolConfig       `json:"pool,omitempty"`
 	MCP         MCPConfig        `json:"mcp,omitempty"`
 }
 
@@ -54,6 +55,17 @@ type FilesystemConfig struct {
 
 type StreamingConfig struct {
 	PartialMessages bool `json:"partial_messages"`
+}
+
+// PoolConfig mirrors the subset of ahsir's wrapper.PoolConfig this facade sets.
+type PoolConfig struct {
+	// SessionIsolation gives each A2A contextID (session) its own filesystem
+	// working directory so concurrent sessions in one agent process don't race
+	// on a shared working tree (issue #19). Values mirror ahsir's card knob:
+	// "" / "off" (default, shared workdir), "scratch" (empty private dir), or
+	// "worktree" (a git worktree checkout per session). Maps to ahsir's
+	// pool.session_isolation card knob.
+	SessionIsolation string `json:"session_isolation,omitempty"`
 }
 
 type MCPConfig struct {
