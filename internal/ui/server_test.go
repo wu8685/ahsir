@@ -2,9 +2,11 @@ package ui
 
 import (
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -398,5 +400,92 @@ func TestChatLoop(t *testing.T) {
 	}
 	if turns[0]["userText"] != "are you there?" || turns[0]["reply"] != "pong" {
 		t.Errorf("history turn wrong: %+v", turns[0])
+	}
+}
+
+// --- Left-rail layout invariants (issue #27) ---------------------------------
+//
+// The left rail is a flex column: #rooms (.roomlist) and #archived
+// (.archived-list) are fixed-height siblings around the flexible #contexts
+// (.sessions) list. If the two auxiliary lists are capped too high, .sessions
+// gets starved to ~0 height and the conversation list disappears. These tests
+// pin the CSS invariants that keep #contexts usable, reading the SAME embedded
+// assets the server ships so a regression in the stylesheet fails the build.
+
+// cssDecl returns the value of `prop` inside the rule block for `selector`,
+// searching the given embedded asset. Returns "" if not found.
+func cssDecl(t *testing.T, asset, selector, prop string) string {
+	t.Helper()
+	b, err := assetsFS.ReadFile("assets/" + asset)
+	if err != nil {
+		t.Fatalf("read %s: %v", asset, err)
+	}
+	css := string(b)
+	// Find "<selector>{ ... }" (selector at a rule boundary).
+	re := regexp.MustCompile(regexp.QuoteMeta(selector) + `\s*\{([^}]*)\}`)
+	m := re.FindStringSubmatch(css)
+	if m == nil {
+		t.Fatalf("selector %q not found in %s", selector, asset)
+	}
+	pre := regexp.MustCompile(`(?:^|;)\s*` + regexp.QuoteMeta(prop) + `\s*:\s*([^;]+)`)
+	pm := pre.FindStringSubmatch(m[1])
+	if pm == nil {
+		return ""
+	}
+	return strings.TrimSpace(pm[1])
+}
+
+// vhValue parses a "26vh" style length and asserts the unit is vh.
+func vhValue(t *testing.T, raw string) float64 {
+	t.Helper()
+	if !strings.HasSuffix(raw, "vh") {
+		t.Fatalf("length %q is not in vh — units must be unified to vh (issue #27)", raw)
+	}
+	var v float64
+	if _, err := fmt.Sscanf(strings.TrimSuffix(raw, "vh"), "%f", &v); err != nil {
+		t.Fatalf("parse vh from %q: %v", raw, err)
+	}
+	return v
+}
+
+func TestLeftRailAuxListsDoNotStarveContexts(t *testing.T) {
+	roomsRaw := cssDecl(t, "index.html", ".roomlist", "max-height")
+	archRaw := cssDecl(t, "app.css", ".archived-list", "max-height")
+
+	rooms := vhValue(t, roomsRaw)   // fails if not vh
+	arch := vhValue(t, archRaw)     // fails if archived kept its old "38%"
+
+	// Each auxiliary list stays modest on its own.
+	if rooms > 30 {
+		t.Errorf(".roomlist max-height = %gvh, want <= 30vh so #contexts survives", rooms)
+	}
+	if arch > 30 {
+		t.Errorf(".archived-list max-height = %gvh, want <= 30vh so #contexts survives", arch)
+	}
+	// Together they must leave the flexible #contexts list real estate: with
+	// .nav + .left-foot chrome (~10vh), rooms+archived over ~60vh would squeeze
+	// #contexts toward 0. Keep the pair bounded well under that.
+	if rooms+arch > 60 {
+		t.Errorf(".roomlist(%gvh)+.archived-list(%gvh)=%gvh exceeds 60vh; #contexts risks starvation", rooms, arch, rooms+arch)
+	}
+}
+
+// The belt-and-suspenders guard from the issue: .sessions must carry a positive
+// min-height floor so it can never collapse to a 0-height (invisible) scroll box
+// even if the flex math is pushed to an extreme.
+func TestContextsListHasMinHeightFloor(t *testing.T) {
+	raw := cssDecl(t, "app.css", ".sessions", "min-height")
+	if raw == "" || raw == "0" {
+		t.Fatalf(".sessions min-height = %q, want a positive floor so it never collapses to 0", raw)
+	}
+	if !strings.HasSuffix(raw, "px") {
+		t.Fatalf(".sessions min-height = %q, want an absolute px floor", raw)
+	}
+	var v float64
+	if _, err := fmt.Sscanf(strings.TrimSuffix(raw, "px"), "%f", &v); err != nil {
+		t.Fatalf("parse px from %q: %v", raw, err)
+	}
+	if v <= 0 {
+		t.Errorf(".sessions min-height = %gpx, want > 0", v)
 	}
 }

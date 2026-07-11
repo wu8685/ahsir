@@ -84,7 +84,7 @@ svg{display:block;}
 .nav button .ic{width:15px;height:15px;color:var(--muted);}
 .nav button:hover .ic{color:var(--fg-2);}
 .nav button .kbd{margin-left:auto;font-family:var(--mono);font-size:10px;color:var(--faint);}
-.sessions{flex:1;min-height:0;overflow-y:auto;padding:2px 8px 8px;}
+.sessions{flex:1;min-height:120px;overflow-y:auto;padding:2px 8px 8px;}
 .grp{padding:12px 8px 4px;font-size:11px;color:var(--muted);letter-spacing:.02em;display:flex;align-items:center;gap:6px;}
 .grp .c{margin-left:auto;font-family:var(--mono);font-size:10px;color:var(--faint);}
 .sess{display:flex;align-items:center;gap:8px;padding:6px 8px;border-radius:var(--r-sm);cursor:pointer;transition:background .12s;color:var(--fg-2);}
@@ -94,8 +94,10 @@ svg{display:block;}
 .sess .dot{opacity:.9;}
 .sess.on .t{font-weight:500;}
 /* Archived (offline) agents rail: a bounded, scrollable block below the live
-   会话 list so it never fights it for vertical space. */
-.archived-list{flex:0 0 auto;max-height:38%;overflow-y:auto;padding:0 8px 8px;border-top:1px solid var(--border-soft);}
+   会话 list so it never fights it for vertical space. Capped in vh (matching
+   .roomlist's unit) and kept small enough that rooms+archived together leave the
+   flexible #contexts list plenty of room — see issue #27. */
+.archived-list{flex:0 0 auto;max-height:26vh;overflow-y:auto;padding:0 8px 8px;border-top:1px solid var(--border-soft);}
 .archived-list:empty{display:none;}
 .arch-agent{padding:6px 8px 2px;font-size:11px;color:var(--muted);letter-spacing:.02em;}
 .sess.arch .t{color:var(--fg-2);}
