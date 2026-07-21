@@ -23,6 +23,7 @@
     contextId: null,   // null = unsaved "new conversation"
     agent: null,       // currently selected agent name
     agents: [],        // [{name, url, status, skills, ...}]
+    archivedAgents: [],// offline agents with retained, read-only transcripts
     speaker: "console",
     roomId: null,      // active roundtable room
     roomPoll: null,    // interval handle while viewing a room
@@ -275,11 +276,38 @@
     return state.agents.find((a) => a.name === name);
   }
 
+  function archivedAgentByName(name) {
+    return state.archivedAgents.find((a) => a.name === name);
+  }
+
+  function setComposerWritable(writable) {
+    $("#ta").readOnly = !writable;
+    $("#ta").disabled = !writable;
+    $("#sendBtn").disabled = !writable;
+  }
+
+  function renderUnavailableDetail(name) {
+    $("#detailName").textContent = name || "-";
+    $("#detailCard").innerHTML =
+      '<div class="muted-line">该参与者详情不可用：它不在当前 agent 列表，也没有可读取的归档记录。</div>';
+  }
+
   function renderDetail() {
     const a = agentByName(state.agent);
     $("#detailName").textContent = state.agent || "-";
     const card = $("#detailCard");
-    if (!a) { card.innerHTML = '<div class="muted-line">选择一个 agent 查看详情</div>'; return; }
+    if (!a) {
+      if (!state.agent) {
+        setComposerWritable(false);
+        card.innerHTML = '<div class="muted-line">选择一个 agent 查看详情</div>';
+        return;
+      }
+      setComposerWritable(false);
+      if (archivedAgentByName(state.agent)) { renderArchivedDetail(state.agent); return; }
+      renderUnavailableDetail(state.agent);
+      return;
+    }
+    setComposerWritable(true);
     const skills = (a.skills || []).map((s) => `<span>${esc(s.name)}</span>`).join("");
     card.innerHTML = `
       <div class="ch"><span class="av" style="background:${avatarColor(a.name)}">${esc(a.name.slice(0, 2))}</span>
@@ -517,6 +545,7 @@
       box.innerHTML = "";
       return;
     }
+    state.archivedAgents = agents || [];
     box.innerHTML = "";
     if (!agents || !agents.length) return;
     box.appendChild(el("div", "grp", `归档<span class="c">${agents.length}</span>`));
@@ -538,6 +567,7 @@
         box.appendChild(row);
       });
     });
+    if (state.agent && !agentByName(state.agent)) renderDetail();
   }
 
   // Minimal read-only detail for an agent that's no longer registered, so the
@@ -557,6 +587,7 @@
     state.agent = agentName;
     state.contextId = c.contextId;
     $("#agentSel").value = "";
+    setComposerWritable(false);
     $("#ctxTitle").textContent = c.title || c.contextId;
     $("#ctxId").textContent = "归档 · " + agentName + " · " + short(c.contextId);
     renderArchivedDetail(agentName);
@@ -646,9 +677,9 @@
     // Prefer an agent that actually participated in this context.
     if (c.agents && c.agents.length && !c.agents.includes(state.agent)) {
       state.agent = c.agents[0];
-      $("#agentSel").value = state.agent;
-      renderDetail();
     }
+    $("#agentSel").value = agentByName(state.agent) ? state.agent : "";
+    renderDetail();
     await refreshContextViews();
     markActiveContext();
   }
@@ -694,7 +725,7 @@
     } catch (_) {}
     $("#agentCount").textContent = agents.length;
     agents.forEach((name) => {
-      const a = agentByName(name) || { name, status: "unknown" };
+      const a = agentByName(name) || archivedAgentByName(name) || { name, status: "unavailable" };
       const row = el("div", "agent-row");
       row.innerHTML =
         `<span class="av" style="background:${avatarColor(name)}">${esc(name.slice(0, 2))}</span>` +
@@ -771,7 +802,7 @@
 
   function selectAgent(name) {
     state.agent = name;
-    $("#agentSel").value = name;
+    $("#agentSel").value = agentByName(name) ? name : "";
     renderDetail();
     refreshContextViews();
   }
@@ -785,7 +816,7 @@
     if (!message || sending) return;
     if (state.mode === "agentnew") { toast("把上面的命令复制到 scheduler 主机的终端执行即可创建 agent"); return; }
     if (state.mode === "room") { ta.value = ""; autosize(); return sayInRoom(message); }
-    if (!state.agent) { toast("先选择一个 agent"); return; }
+    if (!agentByName(state.agent)) { toast("该参与者不可发送消息"); return; }
     sending = true;
     ta.value = "";
     autosize();
