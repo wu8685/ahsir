@@ -105,6 +105,30 @@ func TestAgentToCard_RuntimeOverrides(t *testing.T) {
 	}
 }
 
+func TestAgentToCard_NetworkAccessRequiresExplicitTrue(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		value string
+		want  bool
+	}{
+		{name: "unset", value: "", want: false},
+		{name: "true", value: "true", want: true},
+		{name: "false", value: "false", want: false},
+		{name: "other casing is not accepted", value: "TRUE", want: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			a := baseAgent()
+			if tc.value != "" {
+				a.Metadata["network_access"] = tc.value
+			}
+			card := mustAgentCard(t, a, RuntimeDefaults{})
+			if card.Network.OutboundAccess != tc.want {
+				t.Fatalf("Network.OutboundAccess = %v, want %v", card.Network.OutboundAccess, tc.want)
+			}
+		})
+	}
+}
+
 func TestAgentToCard_RuntimeAPIKeyEnvAcceptsShellNames(t *testing.T) {
 	for _, envName := range []string{"_KEY", "A", "A1", "MOONSHOT_API_KEY"} {
 		t.Run(envName, func(t *testing.T) {

@@ -22,6 +22,7 @@ const (
 	metadataRuntimeProvider  = "runtime_provider"
 	metadataRuntimeBaseURL   = "runtime_base_url"
 	metadataRuntimeAPIKeyEnv = "runtime_api_key_env"
+	metadataNetworkAccess    = "network_access"
 )
 
 var shellEnvNameRE = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
@@ -101,6 +102,9 @@ func AgentToCard(name string, a *cma.Agent, d RuntimeDefaults) (*ahsir.AgentCard
 			// tools itself. Default stays shell-less.
 			ShellAccess:  a.Metadata["shell_access"] == "true",
 			AllowedPaths: []string{"."},
+		},
+		Network: ahsir.NetworkConfig{
+			OutboundAccess: a.Metadata[metadataNetworkAccess] == "true",
 		},
 		Streaming: ahsir.StreamingConfig{PartialMessages: true},
 		Pool: ahsir.PoolConfig{

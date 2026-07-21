@@ -56,7 +56,7 @@ func main() {
 	var sessionCfg wrapper.SessionConfig
 	if *registry != "" {
 		var err error
-		sessionCfg, err = buildSessionConfig(cfg.Name, cfg.Runtime, cfg.Filesystem, cfg.MCP, cfg.Streaming, *workspace, effectiveWorkdir)
+		sessionCfg, err = buildSessionConfig(cfg.Name, cfg.Runtime, cfg.Filesystem, cfg.MCP, cfg.Streaming, *workspace, effectiveWorkdir, cfg.Network)
 		if err != nil {
 			log.Fatalf("Invalid runtime config for agent %q: %v", cfg.Name, err)
 		}
@@ -396,7 +396,7 @@ func parsePoolDuration(s string) (time.Duration, error) {
 // workspace holds the agent's private .a2a/ state (codex-home etc.); workdir is
 // the CLI cwd and the base for relative allowed_paths. workdir == workspace
 // unless the operator decoupled them to share a cwd across agents.
-func buildSessionConfig(name string, rt wrapper.RuntimeConfig, fs wrapper.FilesystemConfig, mcp wrapper.MCPConfig, stream wrapper.StreamingConfig, workspace, workdir string) (wrapper.SessionConfig, error) {
+func buildSessionConfig(name string, rt wrapper.RuntimeConfig, fs wrapper.FilesystemConfig, mcp wrapper.MCPConfig, stream wrapper.StreamingConfig, workspace, workdir string, network ...wrapper.NetworkConfig) (wrapper.SessionConfig, error) {
 	timeout := 120 * time.Second
 	if rt.Timeout != "" {
 		d, err := time.ParseDuration(rt.Timeout)
@@ -515,15 +515,21 @@ func buildSessionConfig(name string, rt wrapper.RuntimeConfig, fs wrapper.Filesy
 		args = append(args, "--include-partial-messages")
 	}
 
+	networkAccess := false
+	if len(network) > 0 {
+		networkAccess = fs.Enabled && fs.WriteAccess && network[0].OutboundAccess
+	}
+
 	return wrapper.SessionConfig{
-		Name:        name,
-		Provider:    provider,
-		Command:     rt.Command,
-		Args:        args,
-		Env:         env,
-		WorkDir:     workdir,
-		Timeout:     timeout,
-		WriteAccess: fs.Enabled && fs.WriteAccess,
+		Name:          name,
+		Provider:      provider,
+		Command:       rt.Command,
+		Args:          args,
+		Env:           env,
+		WorkDir:       workdir,
+		Timeout:       timeout,
+		WriteAccess:   fs.Enabled && fs.WriteAccess,
+		NetworkAccess: networkAccess,
 	}, nil
 }
 

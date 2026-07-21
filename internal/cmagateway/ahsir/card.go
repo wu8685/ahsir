@@ -17,6 +17,7 @@ type AgentCard struct {
 	Claude      ClaudeConfig     `json:"claude"`
 	Runtime     RuntimeConfig    `json:"runtime"`
 	Filesystem  FilesystemConfig `json:"filesystem"`
+	Network     NetworkConfig    `json:"network,omitempty"`
 	Streaming   StreamingConfig  `json:"streaming"`
 	Pool        PoolConfig       `json:"pool,omitempty"`
 	MCP         MCPConfig        `json:"mcp,omitempty"`
@@ -50,8 +51,8 @@ type RuntimeConfig struct {
 }
 
 type FilesystemConfig struct {
-	Enabled      bool     `json:"enabled"`
-	WriteAccess  bool     `json:"write_access"`
+	Enabled     bool `json:"enabled"`
+	WriteAccess bool `json:"write_access"`
 	// ShellAccess opts the agent into the Bash tool (arbitrary command
 	// execution) — separate from WriteAccess by design. Maps to ahsir's
 	// filesystem.shell_access card knob.
@@ -61,6 +62,10 @@ type FilesystemConfig struct {
 
 type StreamingConfig struct {
 	PartialMessages bool `json:"partial_messages"`
+}
+
+type NetworkConfig struct {
+	OutboundAccess bool `json:"outbound_access"`
 }
 
 // PoolConfig mirrors the subset of ahsir's wrapper.PoolConfig this facade sets.

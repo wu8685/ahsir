@@ -221,8 +221,9 @@ func ResolveUploadDir() string {
 
 // NetworkConfig holds network settings from the card.
 type NetworkConfig struct {
-	Bind      string `yaml:"bind" json:"bind"`
-	Advertise string `yaml:"advertise" json:"advertise"`
+	Bind           string `yaml:"bind" json:"bind"`
+	Advertise      string `yaml:"advertise" json:"advertise"`
+	OutboundAccess bool   `yaml:"outbound_access" json:"outbound_access"`
 }
 
 // isLoopbackBind reports whether the configured network.bind value names the

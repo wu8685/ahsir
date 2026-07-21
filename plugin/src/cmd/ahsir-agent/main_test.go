@@ -83,6 +83,44 @@ func TestBuildSessionConfig_CodexWriteAccessRequiresEnabledFilesystem(t *testing
 	}
 }
 
+func TestBuildSessionConfig_CodexNetworkAccessRequiresWritableFilesystem(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		fs   wrapper.FilesystemConfig
+		net  wrapper.NetworkConfig
+		want bool
+	}{
+		{
+			name: "explicit outbound access with writable filesystem",
+			fs:   wrapper.FilesystemConfig{Enabled: true, WriteAccess: true},
+			net:  wrapper.NetworkConfig{OutboundAccess: true},
+			want: true,
+		},
+		{
+			name: "outbound access defaults disabled",
+			fs:   wrapper.FilesystemConfig{Enabled: true, WriteAccess: true},
+		},
+		{
+			name: "read only filesystem cannot gain outbound access",
+			fs:   wrapper.FilesystemConfig{Enabled: true, WriteAccess: false},
+			net:  wrapper.NetworkConfig{OutboundAccess: true},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg, err := buildSessionConfig("coder", wrapper.RuntimeConfig{
+				Provider: "codex",
+				Command:  "codex",
+			}, tc.fs, wrapper.MCPConfig{}, wrapper.StreamingConfig{}, t.TempDir(), t.TempDir(), tc.net)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if cfg.NetworkAccess != tc.want {
+				t.Fatalf("NetworkAccess = %v, want %v", cfg.NetworkAccess, tc.want)
+			}
+		})
+	}
+}
+
 func TestBuildSessionConfig_RuntimeTimeoutZeroIsPreserved(t *testing.T) {
 	cfg, err := buildSessionConfig("coder", wrapper.RuntimeConfig{
 		Provider: "codex",
