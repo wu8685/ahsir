@@ -762,7 +762,10 @@ func (s *Server) ensureRegistered(ctx context.Context, ahsirName string, agent *
 	if already {
 		return nil
 	}
-	card := translate.AgentToCard(ahsirName, agent, s.rt)
+	card, err := translate.AgentToCard(ahsirName, agent, s.rt)
+	if err != nil {
+		return fmt.Errorf("translate agent card: %w", err)
+	}
 	instances := translate.Instances(agent)
 	if err := s.ahsir.RegisterAgent(ctx, ahsirName, card, instances); err != nil {
 		return err
