@@ -16,12 +16,26 @@ func TestBuildCodexExecArgs_NewThread(t *testing.T) {
 	// User-supplied --sandbox is stripped: the wrapper owns the sandbox
 	// posture and always pins read-only. Loosening must go through an
 	// explicit card-schema knob, not raw arg passthrough.
-	got := buildCodexExecArgs([]string{"--json", "--model=gpt-5.4", "--sandbox=workspace-write"}, "", "hello")
+	got := buildCodexExecArgs([]string{"--json", "--model=gpt-5.4", "--sandbox=workspace-write"}, "", "hello", false)
 	want := []string{
 		"exec",
 		"--model=gpt-5.4",
 		"--json",
 		"--sandbox=read-only",
+		"--skip-git-repo-check",
+		"hello",
+	}
+	if !equalStrings(got, want) {
+		t.Fatalf("got %v, want %v", got, want)
+	}
+}
+
+func TestBuildCodexExecArgs_CardWriteAccessUsesWorkspaceWrite(t *testing.T) {
+	got := buildCodexExecArgs([]string{"--sandbox=danger-full-access"}, "", "hello", true)
+	want := []string{
+		"exec",
+		"--json",
+		"--sandbox=workspace-write",
 		"--skip-git-repo-check",
 		"hello",
 	}
@@ -78,7 +92,7 @@ func TestSanitizeCodexExecArgs_StripsSandboxBypassVectors(t *testing.T) {
 }
 
 func TestBuildCodexExecArgs_Resume(t *testing.T) {
-	got := buildCodexExecArgs(nil, "thread-123", "continue")
+	got := buildCodexExecArgs(nil, "thread-123", "continue", false)
 	want := []string{
 		"exec",
 		"--json",
@@ -94,7 +108,7 @@ func TestBuildCodexExecArgs_Resume(t *testing.T) {
 }
 
 func TestBuildCodexExecArgs_StripsUnsupportedApprovalFlag(t *testing.T) {
-	got := buildCodexExecArgs([]string{"--ask-for-approval=never", "-a", "never"}, "", "hello")
+	got := buildCodexExecArgs([]string{"--ask-for-approval=never", "-a", "never"}, "", "hello", false)
 	joined := strings.Join(got, " ")
 	if strings.Contains(joined, "ask-for-approval") || strings.Contains(joined, " -a ") {
 		t.Fatalf("approval flags should be stripped for codex exec compatibility, got %v", got)
