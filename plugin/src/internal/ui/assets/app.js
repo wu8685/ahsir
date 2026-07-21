@@ -23,6 +23,7 @@
     contextId: null,   // null = unsaved "new conversation"
     agent: null,       // currently selected agent name
     agents: [],        // [{name, url, status, skills, ...}]
+    archivedAgents: [],// offline agents with retained, read-only transcripts
     speaker: "console",
     roomId: null,      // active roundtable room
     roomPoll: null,    // interval handle while viewing a room
@@ -275,11 +276,38 @@
     return state.agents.find((a) => a.name === name);
   }
 
+  function archivedAgentByName(name) {
+    return state.archivedAgents.find((a) => a.name === name);
+  }
+
+  function setComposerWritable(writable) {
+    $("#ta").readOnly = !writable;
+    $("#ta").disabled = !writable;
+    $("#sendBtn").disabled = !writable;
+  }
+
+  function renderUnavailableDetail(name) {
+    $("#detailName").textContent = name || "-";
+    $("#detailCard").innerHTML =
+      '<div class="muted-line">该参与者详情不可用：它不在当前 agent 列表，也没有可读取的归档记录。</div>';
+  }
+
   function renderDetail() {
     const a = agentByName(state.agent);
     $("#detailName").textContent = state.agent || "-";
     const card = $("#detailCard");
-    if (!a) { card.innerHTML = '<div class="muted-line">选择一个 agent 查看详情</div>'; return; }
+    if (!a) {
+      if (!state.agent) {
+        setComposerWritable(false);
+        card.innerHTML = '<div class="muted-line">选择一个 agent 查看详情</div>';
+        return;
+      }
+      setComposerWritable(false);
+      if (archivedAgentByName(state.agent)) { renderArchivedDetail(state.agent); return; }
+      renderUnavailableDetail(state.agent);
+      return;
+    }
+    setComposerWritable(true);
     const skills = (a.skills || []).map((s) => `<span>${esc(s.name)}</span>`).join("");
     card.innerHTML = `
       <div class="ch"><span class="av" style="background:${avatarColor(a.name)}">${esc(a.name.slice(0, 2))}</span>
@@ -500,6 +528,83 @@
     });
   }
 
+  // ---- archived (offline) agents ------------------------------------------
+
+  // Offline agents whose managed workspace still holds transcripts on disk
+  // (deleted / stopped agents). Read-only: clicking a context replays it via the
+  // same /agents/{name}/history/{contextId} path a live agent uses — the
+  // scheduler falls back to the on-disk transcript when the agent isn't running.
+  async function loadArchived() {
+    const box = $("#archived");
+    if (!box) return;
+    let agents;
+    try {
+      agents = await getJSON("/archived-agents");
+    } catch (_) {
+      // Older scheduler without the endpoint, or transient error — just hide.
+      box.innerHTML = "";
+      return;
+    }
+    state.archivedAgents = agents || [];
+    box.innerHTML = "";
+    if (!agents || !agents.length) return;
+    box.appendChild(el("div", "grp", `归档<span class="c">${agents.length}</span>`));
+    agents.forEach((a) => {
+      box.appendChild(el("div", "arch-agent mono", esc(a.name)));
+      (a.contexts || []).forEach((c) => {
+        const row = el(
+          "div",
+          "sess arch" +
+            (state.agent === a.name && state.contextId === c.contextId ? " on" : "")
+        );
+        const dot = c.lastStatus === "failed" ? "s-wait" : "s-idle";
+        row.innerHTML =
+          `<span class="dot ${dot}"></span>` +
+          `<span class="t">${esc(c.title || c.contextId)}</span>` +
+          `<span class="meta">${esc(timeAgo(c.lastActivity))}</span>`;
+        row.title = `${a.name} · ${c.contextId}\n${c.turns} 轮 · 已归档（只读）`;
+        row.addEventListener("click", () => openArchivedContext(a.name, c));
+        box.appendChild(row);
+      });
+    });
+    if (state.agent && !agentByName(state.agent)) renderDetail();
+  }
+
+  // Minimal read-only detail for an agent that's no longer registered, so the
+  // right rail doesn't fall back to the "选择一个 agent" placeholder.
+  function renderArchivedDetail(name) {
+    $("#detailName").textContent = name;
+    const card = $("#detailCard");
+    if (!card) return;
+    card.innerHTML =
+      `<div class="ch"><span class="av" style="background:${avatarColor(name)}">${esc(name.slice(0, 2))}</span>` +
+      `<div class="t">${esc(name)}<small class="mono">已归档 · 只读</small></div></div>` +
+      `<div class="da-note">该 agent 已下线/删除，工作区仍保留历史。此处为只读回放，不能再发消息。</div>`;
+  }
+
+  async function openArchivedContext(agentName, c) {
+    enterChatMode();
+    state.agent = agentName;
+    state.contextId = c.contextId;
+    $("#agentSel").value = "";
+    setComposerWritable(false);
+    $("#ctxTitle").textContent = c.title || c.contextId;
+    $("#ctxId").textContent = "归档 · " + agentName + " · " + short(c.contextId);
+    renderArchivedDetail(agentName);
+    try {
+      const turns = await getJSON(
+        `/agents/${encodeURIComponent(agentName)}/history/${encodeURIComponent(c.contextId)}`
+      );
+      renderThread(turns);
+    } catch (e) {
+      renderThread([]);
+      toast("无法读取归档记录：" + e.message);
+    }
+    $("#trace").innerHTML = '<div class="muted-line">归档会话 · 无轨迹</div>';
+    document.querySelectorAll("#contexts .sess, #archived .sess").forEach((s) => s.classList.remove("on"));
+    loadArchived();
+  }
+
   // ---- thread (center) ----------------------------------------------------
 
   function renderThread(turns) {
@@ -572,9 +677,9 @@
     // Prefer an agent that actually participated in this context.
     if (c.agents && c.agents.length && !c.agents.includes(state.agent)) {
       state.agent = c.agents[0];
-      $("#agentSel").value = state.agent;
-      renderDetail();
     }
+    $("#agentSel").value = agentByName(state.agent) ? state.agent : "";
+    renderDetail();
     await refreshContextViews();
     markActiveContext();
   }
@@ -620,7 +725,7 @@
     } catch (_) {}
     $("#agentCount").textContent = agents.length;
     agents.forEach((name) => {
-      const a = agentByName(name) || { name, status: "unknown" };
+      const a = agentByName(name) || archivedAgentByName(name) || { name, status: "unavailable" };
       const row = el("div", "agent-row");
       row.innerHTML =
         `<span class="av" style="background:${avatarColor(name)}">${esc(name.slice(0, 2))}</span>` +
@@ -697,7 +802,7 @@
 
   function selectAgent(name) {
     state.agent = name;
-    $("#agentSel").value = name;
+    $("#agentSel").value = agentByName(name) ? name : "";
     renderDetail();
     refreshContextViews();
   }
@@ -711,7 +816,7 @@
     if (!message || sending) return;
     if (state.mode === "agentnew") { toast("把上面的命令复制到 scheduler 主机的终端执行即可创建 agent"); return; }
     if (state.mode === "room") { ta.value = ""; autosize(); return sayInRoom(message); }
-    if (!state.agent) { toast("先选择一个 agent"); return; }
+    if (!agentByName(state.agent)) { toast("该参与者不可发送消息"); return; }
     sending = true;
     ta.value = "";
     autosize();
@@ -1553,11 +1658,11 @@
       });
     });
 
-    loadAgents().then(() => { loadContexts(); loadRooms(); });
+    loadAgents().then(() => { loadContexts(); loadArchived(); loadRooms(); });
     // Light polling so external CLI activity shows up in the rails.
     setInterval(() => {
       loadRooms();
-      if (state.mode === "chat") { loadContexts(); if (state.contextId) loadTrace(); }
+      if (state.mode === "chat") { loadContexts(); loadArchived(); if (state.contextId) loadTrace(); }
     }, 8000);
   }
 
