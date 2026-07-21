@@ -462,13 +462,14 @@ func buildSessionConfig(name string, rt wrapper.RuntimeConfig, fs wrapper.Filesy
 	}
 
 	return wrapper.SessionConfig{
-		Name:     name,
-		Provider: provider,
-		Command:  rt.Command,
-		Args:     args,
-		Env:      env,
-		WorkDir:  workdir,
-		Timeout:  timeout,
+		Name:        name,
+		Provider:    provider,
+		Command:     rt.Command,
+		Args:        args,
+		Env:         env,
+		WorkDir:     workdir,
+		Timeout:     timeout,
+		WriteAccess: fs.Enabled && fs.WriteAccess,
 	}, nil
 }
 

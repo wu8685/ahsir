@@ -84,7 +84,7 @@ filesystem.enabled && filesystem.write_access
 - `cmd/ahsir-agent/main.go`
 - `cmd/ahsir-agent/main_test.go`
 
-不运行会重建全部 bundle 的 `make plugin-src`；只同步本次触及且已存在于 plugin bundle 的文件，避免把不相关 source drift 混入提交。
+root 与 plugin bundle 已存在历史 source drift，因此不要求整文件 byte-identical，也不运行会带入全部 drift/vendor 的 `make plugin-src`。在两侧分别落同一权限契约和测试，使本次行为一致，同时保持提交范围可审查。
 
 ## TDD 验收
 
@@ -95,7 +95,7 @@ filesystem.enabled && filesystem.write_access
 3. user runtime args 即使请求 `danger-full-access`，最终仍只能得到 card 派生的值。
 4. `buildSessionConfig` 仅在 `enabled && write_access` 时设置 session write capability。
 5. Claude provider 既有 permission tests 不变。
-6. root 与 plugin 对应文件 byte-identical。
+6. root 与 plugin 的 write-access mapping tests 使用同一组输入/期望并分别通过。
 7. `go test ./internal/wrapper ./cmd/ahsir-agent`、`go test -race ./...` 与 `go build ./...` 全部通过。
 
 ## 运行时验收
