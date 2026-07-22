@@ -3,6 +3,7 @@ package translate
 
 import (
 	"fmt"
+	"regexp"
 	"strconv"
 	"strings"
 
@@ -17,6 +18,15 @@ type RuntimeDefaults struct {
 	APIKey   string
 }
 
+const (
+	metadataRuntimeProvider  = "runtime_provider"
+	metadataRuntimeBaseURL   = "runtime_base_url"
+	metadataRuntimeAPIKeyEnv = "runtime_api_key_env"
+	metadataNetworkAccess    = "network_access"
+)
+
+var shellEnvNameRE = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
+
 // AhsirAgentName derives a stable, unique ahsir agent name for one
 // (agentID, version). Versioning lives entirely here — ahsir sees distinct
 // agents and stays version-agnostic.
@@ -30,7 +40,12 @@ func AhsirAgentName(agentID string, version int64) string {
 
 // AgentToCard renders a versioned CMA agent into an ahsir card.
 //
-//   - model        -> runtime.model (provider/baseURL/apiKey from defaults)
+//   - model        -> runtime.model
+//   - metadata["runtime_provider"] -> runtime.provider (default: facade)
+//   - metadata["runtime_base_url"] -> runtime.baseURL (default: facade)
+//   - metadata["runtime_api_key_env"] -> runtime.apiKey as a symbolic
+//     ${ENV_NAME} reference (default: facade); invalid shell variable names
+//     fail registration rather than falling back to global credentials
 //   - system       -> claude.systemPrompt
 //   - skills        -> descriptive skills list (ahsir skills are descriptive)
 //   - mcp_servers  -> mcp.servers (claude remote-server shape; auth deferred)
@@ -42,7 +57,21 @@ func AhsirAgentName(agentID string, version int64) string {
 //     always-hot agent can be pinned resident ("0") and never cold-started on
 //     the next event (issue #17)
 //   - streaming.partial_messages -> true so deltas flow once A2A is wired
-func AgentToCard(name string, a *cma.Agent, d RuntimeDefaults) *ahsir.AgentCard {
+func AgentToCard(name string, a *cma.Agent, d RuntimeDefaults) (*ahsir.AgentCard, error) {
+	provider, baseURL, apiKey := d.Provider, d.BaseURL, d.APIKey
+	if value := strings.TrimSpace(a.Metadata[metadataRuntimeProvider]); value != "" {
+		provider = value
+	}
+	if value := strings.TrimSpace(a.Metadata[metadataRuntimeBaseURL]); value != "" {
+		baseURL = value
+	}
+	if envName := strings.TrimSpace(a.Metadata[metadataRuntimeAPIKeyEnv]); envName != "" {
+		if !shellEnvNameRE.MatchString(envName) {
+			return nil, fmt.Errorf("invalid %s %q: must be a shell environment variable name", metadataRuntimeAPIKeyEnv, envName)
+		}
+		apiKey = "${" + envName + "}"
+	}
+
 	card := &ahsir.AgentCard{
 		Name:        name,
 		Description: a.Description,
@@ -51,9 +80,9 @@ func AgentToCard(name string, a *cma.Agent, d RuntimeDefaults) *ahsir.AgentCard 
 			SystemPrompt: a.System,
 		},
 		Runtime: ahsir.RuntimeConfig{
-			Provider: d.Provider,
-			BaseURL:  d.BaseURL,
-			APIKey:   d.APIKey,
+			Provider: provider,
+			BaseURL:  baseURL,
+			APIKey:   apiKey,
 			Model:    a.Model.ID,
 			// Optional per-agent override of ahsir's 120s runtime timeout, for
 			// long-running tool-driven turns (e.g. an event agent that shells
@@ -73,6 +102,9 @@ func AgentToCard(name string, a *cma.Agent, d RuntimeDefaults) *ahsir.AgentCard 
 			// tools itself. Default stays shell-less.
 			ShellAccess:  a.Metadata["shell_access"] == "true",
 			AllowedPaths: []string{"."},
+		},
+		Network: ahsir.NetworkConfig{
+			OutboundAccess: a.Metadata[metadataNetworkAccess] == "true",
 		},
 		Streaming: ahsir.StreamingConfig{PartialMessages: true},
 		Pool: ahsir.PoolConfig{
@@ -99,7 +131,7 @@ func AgentToCard(name string, a *cma.Agent, d RuntimeDefaults) *ahsir.AgentCard 
 		card.MCP = ahsir.MCPConfig{Servers: servers}
 	}
 
-	return card
+	return card, nil
 }
 
 // Instances reads the optional metadata["instances"] knob — the maximum number

@@ -22,6 +22,7 @@ func TestBuildSessionConfig_CodexProvider(t *testing.T) {
 		Args:     []string{"--sandbox=workspace-write"},
 	}, wrapper.FilesystemConfig{
 		Enabled:      true,
+		WriteAccess:  true,
 		AllowedPaths: []string{"."},
 	}, wrapper.MCPConfig{}, wrapper.StreamingConfig{PartialMessages: true}, "/tmp/workspace", "/tmp/workspace")
 	if err != nil {
@@ -32,6 +33,9 @@ func TestBuildSessionConfig_CodexProvider(t *testing.T) {
 	}
 	if cfg.Command != "codex" {
 		t.Fatalf("Command = %q", cfg.Command)
+	}
+	if !cfg.WriteAccess {
+		t.Fatal("WriteAccess = false, want true for enabled writable filesystem")
 	}
 	joined := strings.Join(cfg.Args, " ")
 	if !strings.Contains(joined, "--model=gpt-5.4") {
@@ -45,6 +49,75 @@ func TestBuildSessionConfig_CodexProvider(t *testing.T) {
 	}
 	if strings.Contains(joined, "--include-partial-messages") {
 		t.Fatalf("codex config should not receive claude partial flag: %v", cfg.Args)
+	}
+}
+
+func TestBuildSessionConfig_CodexWriteAccessRequiresEnabledFilesystem(t *testing.T) {
+	tests := []struct {
+		name string
+		fs   wrapper.FilesystemConfig
+	}{
+		{
+			name: "disabled filesystem ignores write flag",
+			fs:   wrapper.FilesystemConfig{Enabled: false, WriteAccess: true},
+		},
+		{
+			name: "enabled read only filesystem",
+			fs:   wrapper.FilesystemConfig{Enabled: true, WriteAccess: false},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg, err := buildSessionConfig("coder", wrapper.RuntimeConfig{
+				Provider: "codex",
+				Command:  "codex",
+			}, tc.fs, wrapper.MCPConfig{}, wrapper.StreamingConfig{}, t.TempDir(), t.TempDir())
+			if err != nil {
+				t.Fatal(err)
+			}
+			if cfg.WriteAccess {
+				t.Fatal("WriteAccess = true, want false")
+			}
+		})
+	}
+}
+
+func TestBuildSessionConfig_CodexNetworkAccessRequiresWritableFilesystem(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		fs   wrapper.FilesystemConfig
+		net  wrapper.NetworkConfig
+		want bool
+	}{
+		{
+			name: "explicit outbound access with writable filesystem",
+			fs:   wrapper.FilesystemConfig{Enabled: true, WriteAccess: true},
+			net:  wrapper.NetworkConfig{OutboundAccess: true},
+			want: true,
+		},
+		{
+			name: "outbound access defaults disabled",
+			fs:   wrapper.FilesystemConfig{Enabled: true, WriteAccess: true},
+		},
+		{
+			name: "read only filesystem cannot gain outbound access",
+			fs:   wrapper.FilesystemConfig{Enabled: true, WriteAccess: false},
+			net:  wrapper.NetworkConfig{OutboundAccess: true},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg, err := buildSessionConfig("coder", wrapper.RuntimeConfig{
+				Provider: "codex",
+				Command:  "codex",
+			}, tc.fs, wrapper.MCPConfig{}, wrapper.StreamingConfig{}, t.TempDir(), t.TempDir(), tc.net)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if cfg.NetworkAccess != tc.want {
+				t.Fatalf("NetworkAccess = %v, want %v", cfg.NetworkAccess, tc.want)
+			}
+		})
 	}
 }
 

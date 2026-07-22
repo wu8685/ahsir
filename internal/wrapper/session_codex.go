@@ -178,7 +178,7 @@ func (s *CodexSession) Close() error {
 }
 
 func runCodexExec(ctx context.Context, cfg SessionConfig, resumeID, prompt string) (codexRunResult, error) {
-	args := buildCodexExecArgs(cfg.Args, resumeID, prompt)
+	args := buildCodexExecArgs(cfg.Args, resumeID, prompt, cfg.WriteAccess, cfg.NetworkAccess)
 	cmd := exec.CommandContext(ctx, cfg.Command, args...)
 	ahprocess.PrepareCommand(cmd)
 	if cfg.WorkDir != "" {
@@ -227,11 +227,18 @@ func runCodexExec(ctx context.Context, cfg SessionConfig, resumeID, prompt strin
 // buildCodexExecArgs returns arguments for the Codex CLI binary. Runtime args
 // are treated as `codex exec` flags; the provider owns --json so the parser can
 // consume a stable JSONL event stream.
-func buildCodexExecArgs(runtimeArgs []string, resumeID, prompt string) []string {
+func buildCodexExecArgs(runtimeArgs []string, resumeID, prompt string, writeAccess, networkAccess bool) []string {
 	args := []string{"exec"}
 	args = append(args, sanitizeCodexExecArgs(runtimeArgs)...)
 	args = ensureCodexFlag(args, "--json")
-	args = ensureCodexFlagValue(args, "--sandbox", "-s", "read-only")
+	sandbox := "read-only"
+	if writeAccess {
+		sandbox = "workspace-write"
+	}
+	args = ensureCodexFlagValue(args, "--sandbox", "-s", sandbox)
+	if writeAccess && networkAccess {
+		args = append(args, "-c", "sandbox_workspace_write.network_access=true")
+	}
 	args = ensureCodexFlag(args, "--skip-git-repo-check")
 	if resumeID != "" {
 		args = append(args, "resume", resumeID, prompt)

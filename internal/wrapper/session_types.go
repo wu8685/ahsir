@@ -24,6 +24,14 @@ type SessionConfig struct {
 	Env      []string
 	WorkDir  string
 	Timeout  time.Duration
+	// WriteAccess is the card-owned filesystem capability. Codex maps it to
+	// workspace-write; false remains read-only. It is deliberately a bool so
+	// callers cannot request danger-full-access through this config.
+	WriteAccess bool
+	// NetworkAccess is a card-owned capability. Codex only honors it while
+	// running in workspace-write and maps it to the narrow workspace sandbox
+	// network override; false keeps outbound network disabled.
+	NetworkAccess bool
 }
 
 // Validate checks the config for required fields.
@@ -127,13 +135,13 @@ type TurnStats struct {
 	DurationMS   int64
 }
 
-func (EventText) isEvent()      {}
-func (EventTextDelta) isEvent()   {}
-func (EventToolUse) isEvent()     {}
-func (EventThinking) isEvent()    {}
-func (EventToolResult) isEvent()  {}
-func (EventAgentCall) isEvent()   {}
-func (EventTurnDone) isEvent()  {}
+func (EventText) isEvent()       {}
+func (EventTextDelta) isEvent()  {}
+func (EventToolUse) isEvent()    {}
+func (EventThinking) isEvent()   {}
+func (EventToolResult) isEvent() {}
+func (EventAgentCall) isEvent()  {}
+func (EventTurnDone) isEvent()   {}
 
 // ErrTurnInFlight is returned by Session.Stream when a turn is already
 // running on the same session (one contextId = one session = one physically

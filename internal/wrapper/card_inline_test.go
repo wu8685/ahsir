@@ -16,6 +16,7 @@ func TestAgentCardConfig_JSONInlineDecode(t *testing.T) {
 		"claude":{"systemPrompt":"be concise","maxAgentCalls":3},
 		"runtime":{"provider":"anthropic","baseURL":"https://api","apiKey":"sk","model":"claude-opus-4-8"},
 		"filesystem":{"enabled":true,"write_access":true,"allowed_paths":["."]},
+		"network":{"outbound_access":true},
 		"streaming":{"partial_messages":true},
 		"mcp":{"servers":{"search":{"type":"http","url":"https://mcp"}}}
 	}`
@@ -35,6 +36,9 @@ func TestAgentCardConfig_JSONInlineDecode(t *testing.T) {
 	if !c.Filesystem.Enabled || !c.Filesystem.WriteAccess || len(c.Filesystem.AllowedPaths) != 1 {
 		t.Errorf("filesystem = %+v", c.Filesystem)
 	}
+	if !c.Network.OutboundAccess {
+		t.Error("network.outbound_access did not decode")
+	}
 	if !c.Streaming.PartialMessages {
 		t.Error("streaming.partial_messages did not decode")
 	}
@@ -53,6 +57,7 @@ func TestWriteCardRoundTrip(t *testing.T) {
 		Claude:     ClaudeConfig{SystemPrompt: "hi"},
 		Runtime:    RuntimeConfig{Provider: "anthropic", BaseURL: "https://api", Model: "m"},
 		Filesystem: FilesystemConfig{Enabled: true, WriteAccess: true, AllowedPaths: []string{"."}},
+		Network:    NetworkConfig{OutboundAccess: true},
 		Streaming:  StreamingConfig{PartialMessages: true},
 	}
 	if err := WriteCard(dir, in); err != nil {
@@ -70,5 +75,8 @@ func TestWriteCardRoundTrip(t *testing.T) {
 	}
 	if !got.Filesystem.WriteAccess || !got.Streaming.PartialMessages {
 		t.Errorf("fs/streaming = %+v / %+v", got.Filesystem, got.Streaming)
+	}
+	if !got.Network.OutboundAccess {
+		t.Errorf("network = %+v", got.Network)
 	}
 }
