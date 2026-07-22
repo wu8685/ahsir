@@ -21,8 +21,9 @@ runtime:
   args: []
   timeout: 300s
   provider: anthropic
-  apiKey: "${ANTHROPIC_AUTH_TOKEN}"
-  model: claude-opus-4-8
+  apiKey: "${MOONSHOT_API_KEY}"
+  baseURL: https://api.kimi.com/coding/
+  model: k3
 filesystem:
   enabled: false
 network:
