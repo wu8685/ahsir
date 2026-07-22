@@ -50,8 +50,10 @@ The first phase will not:
 - run Firefox or WebKit;
 - depend on a live ahsir scheduler, an LLM provider, API keys, user workspaces,
   or existing local transcripts;
-- change production UI behavior except where the initial red tests expose an
-  already-present root/plugin asset drift that must be synchronized.
+- change production UI behavior except for the minimum fixes exposed by the
+  agreed core cases: synchronizing the already-present root/plugin asset drift
+  and completing the narrow-screen navigation whose CSS contract exists but
+  whose controls and JavaScript wiring are currently absent.
 
 Future UI features and fixed UI bugs must add focused cases to the nearest fast
 or browser layer rather than expanding one monolithic end-to-end scenario.
@@ -184,6 +186,11 @@ At a narrow viewport of 800×900:
   card without horizontal page overflow;
 - switching back restores the chat surface.
 
+The minimum production fix for this case is a three-button bottom navigation
+for conversations, chat, and details. It only switches which existing rail or
+center surface is visible; it does not redesign those surfaces or add new data
+behavior.
+
 ### 6.6 Empty and scheduler-error states
 
 For `empty`:
@@ -269,9 +276,11 @@ Implementation follows TDD:
 2. synchronize the plugin assets and make the parity test pass;
 3. add each Playwright case against the fixture, observe its initial failure for
    the missing fixture/test behavior, then add the minimum fixture support;
-4. add Make targets and verify local commands;
-5. add CI and verify the workflow on the feature pull request;
-6. after a successful workflow run, configure `UI / ui-regression` as a required
+4. add the narrow-screen case, observe that navigation controls are absent, and
+   implement only the three-surface switch described in Section 6.5;
+5. add Make targets and verify local commands;
+6. add CI and verify the workflow on the feature pull request;
+7. after a successful workflow run, configure `UI / ui-regression` as a required
    `main` check.
 
 The work is accepted when:
