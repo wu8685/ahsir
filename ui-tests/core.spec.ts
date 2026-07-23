@@ -1,5 +1,9 @@
 import { expect, resetScenario, test } from './helpers';
 
+function isAgentChatRequest(url: string, method: string) {
+  return method === 'POST' && /^\/api\/agents\/[^/]+\/chat$/.test(new URL(url).pathname);
+}
+
 test('core page settles with all primary rails', async ({ page, request }) => {
   await resetScenario(request, 'core');
   await page.goto('/');
@@ -52,13 +56,32 @@ test('live participant details and chat remain usable', async ({ page, request }
   await expect(page.locator('#thread')).toContainText('E2E fixed reply');
 });
 
-test('archived participant is detailed but read-only', async ({ page, request }) => {
+test('chat request detector includes query-string URLs', async ({ page, request }) => {
   await resetScenario(request, 'core');
-  await page.goto('/');
   let chatRequests = 0;
   page.on('request', r => {
-    if (/\/api\/agents\/.*\/chat$/.test(r.url())) chatRequests++;
+    if (isAgentChatRequest(r.url(), r.method())) chatRequests++;
   });
+  await page.goto('/');
+  const status = await page.evaluate(async () => {
+    const response = await fetch('/api/agents/live-codex/chat?e2e=pathname', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ message: 'query-string sensitivity check' }),
+    });
+    return response.status;
+  });
+  expect(status).toBe(202);
+  await expect.poll(() => chatRequests).toBe(1);
+});
+
+test('archived participant is detailed but read-only', async ({ page, request }) => {
+  await resetScenario(request, 'core');
+  let chatRequests = 0;
+  page.on('request', r => {
+    if (isAgentChatRequest(r.url(), r.method())) chatRequests++;
+  });
+  await page.goto('/');
   await page.locator('#archived .sess', { hasText: 'Archived core context' }).click();
   await expect(page.locator('#detailCard')).toContainText('archived-kimi');
   await expect(page.locator('#detailCard')).toContainText('已归档 · 只读');
