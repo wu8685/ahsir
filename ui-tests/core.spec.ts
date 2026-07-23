@@ -294,6 +294,11 @@ test('empty state settles without a writable composer', async ({ page, request }
   await expect(page.locator('#rooms .sess')).toHaveCount(0);
   await expect(page.locator('#archived .sess')).toHaveCount(0);
   await expect(page.locator('#agentSel option')).toHaveCount(0);
+  await expect(page.locator('#detailCard')).toContainText('当前没有运行中的 Agent');
+  await expect(page.locator('#detailCard')).toContainText(
+    '启动 Agent 后，可在这里查看运行状态和配置信息',
+  );
+  await expect(page.locator('#detailCard')).not.toContainText('选择一个 agent 查看详情');
   await expect(page.locator('#ta')).toBeDisabled();
   await expect(page.locator('#ta')).toHaveJSProperty('readOnly', true);
   await expect(page.locator('#sendBtn')).toBeDisabled();
