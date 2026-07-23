@@ -289,7 +289,7 @@
   function renderUnavailableDetail(name) {
     $("#detailName").textContent = name || "-";
     $("#detailCard").innerHTML =
-      '<div class="muted-line">该参与者详情不可用：它不在当前 agent 列表，也没有可读取的归档记录。</div>';
+      '<div class="muted-line">该 Agent 已离线，且没有可用的归档详情</div>';
   }
 
   function renderDetail() {
@@ -299,6 +299,12 @@
     if (!a) {
       if (!state.agent) {
         setComposerWritable(false);
+        if (!state.agents.length) {
+          card.innerHTML =
+            '<div class="muted-line">当前没有运行中的 Agent</div>' +
+            '<div class="muted-line">启动 Agent 后，可在这里查看运行状态和配置信息</div>';
+          return;
+        }
         card.innerHTML = '<div class="muted-line">选择一个 agent 查看详情</div>';
         return;
       }

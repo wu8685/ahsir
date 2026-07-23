@@ -245,10 +245,32 @@ async function testUnavailableParticipant() {
   await openParticipant(page);
   const detail = page.elements.get("detailCard").innerHTML;
   const row = page.elements.get("agentRows").children[0].innerHTML;
-  assert.match(detail, /详情不可用|unavailable/i);
+  assert.match(detail, /该 Agent 已离线，且没有可用的归档详情/);
   assert.doesNotMatch(detail, /选择一个 agent 查看详情/);
   assert.doesNotMatch(row, /unknown/i);
   assert.equal(page.elements.get("sendBtn").disabled, true);
+}
+
+async function testActiveButUnselectedAgent() {
+  const page = makePage({
+    participant: "teacher", archived: [],
+    live: [{ name: "teacher", url: "http://127.0.0.1:9802", status: "online" }],
+  });
+  await waitFor(() => page.elements.get("schedLabel").textContent === "scheduler · 1 agents", "active agents");
+  const select = page.elements.get("agentSel");
+  select.value = "";
+  await select.listeners.get("change")({ target: select });
+  assert.match(page.elements.get("detailCard").innerHTML, /选择一个 agent 查看详情/);
+  assert.doesNotMatch(page.elements.get("detailCard").innerHTML, /当前没有运行中的 Agent/);
+}
+
+async function testNoActiveAgentDetail() {
+  const page = makePage({ live: [], archived: [], participant: "missing" });
+  await waitFor(() => page.elements.get("schedLabel").textContent === "scheduler · 0 agents", "empty agents");
+  const detail = page.elements.get("detailCard").innerHTML;
+  assert.match(detail, /当前没有运行中的 Agent/);
+  assert.match(detail, /启动 Agent 后，可在这里查看运行状态和配置信息/);
+  assert.doesNotMatch(detail, /选择一个 agent 查看详情/);
 }
 
 (async () => {
@@ -258,6 +280,8 @@ async function testUnavailableParticipant() {
   await testArchivedParticipant();
   await testLiveParticipant();
   await testUnavailableParticipant();
+  await testActiveButUnselectedAgent();
+  await testNoActiveAgentDetail();
   console.log("participant selection regression tests passed");
 })().catch((err) => {
   console.error(err.stack || err);
