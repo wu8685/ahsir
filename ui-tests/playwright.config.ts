@@ -15,7 +15,7 @@ export default defineConfig({
     ...devices['Desktop Chrome'],
   },
   webServer: {
-    command: "sh -c 'mkdir -p ui-tests/test-results && exec go run ./internal/ui/e2e/testserver >>ui-tests/test-results/fixture.log 2>&1'",
+    command: "sh -c 'mkdir -p ui-tests/test-results && exec go run ./internal/ui/e2e/testserver >ui-tests/test-results/fixture.log 2>&1'",
     cwd: '..',
     url: 'http://127.0.0.1:19809/',
     reuseExistingServer: false,

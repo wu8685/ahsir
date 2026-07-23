@@ -1,6 +1,6 @@
 {
   "name": "ahsir-ui-tests",
   "private": true,
-  "scripts": { "test": "playwright test" },
+  "scripts": { "test": "playwright test --config playwright.config.ts" },
   "devDependencies": { "@playwright/test": "1.61.1" }
 }

@@ -483,13 +483,13 @@ test('scheduler failure is explicit and leaves a rendered shell', async ({ page,
 
 - [ ] **Step 5: Verify red, install Chromium, then verify green**
 
-Run: `npm ci --prefix ui-tests && npm exec --prefix ui-tests playwright test`
+Run: `npm ci --prefix ui-tests && npm test --prefix ui-tests`
 
 Expected before browser installation: FAIL stating that the Chromium executable is missing.
 
 Run: `npm exec --prefix ui-tests playwright install chromium`
 
-Run: `npm exec --prefix ui-tests playwright test`
+Run: `npm test --prefix ui-tests`
 
 Expected: 3 passed.
 
@@ -551,7 +551,7 @@ test('archived participant is detailed but read-only', async ({ page, request })
 
 - [ ] **Step 2: Run the characterization cases**
 
-Run: `npm exec --prefix ui-tests playwright test --grep 'live participant|archived participant'`
+Run: `npm test --prefix ui-tests -- --grep 'live participant|archived participant'`
 
 Expected: 2 passed because these behaviors were repaired before this test project. Prove the archived test's sensitivity by temporarily changing `renderArchivedDetail` to render the unselected placeholder, rerun the archived case and observe FAIL, then restore `app.js`.
 
@@ -563,7 +563,7 @@ Ensure the archived history response contains:
 [{"turn":1,"speaker":"operator","userText":"Archived retained question","reply":"Archived retained reply","status":"completed","ts":"2026-07-22T02:00:01Z","durationMs":1000}]
 ```
 
-Run: `npm exec --prefix ui-tests playwright test --grep 'live participant|archived participant'`
+Run: `npm test --prefix ui-tests -- --grep 'live participant|archived participant'`
 
 Expected: 2 passed.
 
@@ -614,7 +614,7 @@ test('desktop left rail preserves conversations and independent scrolling', asyn
 
 - [ ] **Step 2: Run the test and verify current canonical CSS green**
 
-Run: `npm exec --prefix ui-tests playwright test --grep 'desktop left rail'`
+Run: `npm test --prefix ui-tests -- --grep 'desktop left rail'`
 
 Expected: PASS on canonical assets. To prove sensitivity, temporarily change `.sessions{...min-height:120px...}` to `min-height:0`, rerun and observe FAIL, then restore the file before continuing.
 
@@ -664,7 +664,7 @@ test('narrow screen switches conversations, chat, and details without overflow',
 
 - [ ] **Step 2: Run and verify red**
 
-Run: `npm exec --prefix ui-tests playwright test --grep 'narrow screen'`
+Run: `npm test --prefix ui-tests -- --grep 'narrow screen'`
 
 Expected: FAIL because `.mob` and its buttons are absent.
 
@@ -705,7 +705,7 @@ In `init()`, bind every `.mob button` click to `showMobileSurface(button.dataset
 
 - [ ] **Step 5: Verify browser behavior and mirror parity**
 
-Run: `npm exec --prefix ui-tests playwright test --grep 'narrow screen'`
+Run: `npm test --prefix ui-tests -- --grep 'narrow screen'`
 
 Expected: 1 passed.
 
@@ -751,7 +751,7 @@ ui-test-deps:
 	npm exec --prefix ui-tests playwright install chromium
 
 test-ui-browser:
-	npm exec --prefix ui-tests playwright test
+	npm test --prefix ui-tests
 
 test-ui: test-ui-fast test-ui-browser
 ```
