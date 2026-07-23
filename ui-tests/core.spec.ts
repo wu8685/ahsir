@@ -9,10 +9,19 @@ type RailBox = {
   client: number;
   scroll: number;
   minHeight: number;
+  overflowY: string;
+};
+
+type RailScrollMetric = {
+  before: number;
+  after: number;
+  positions: Record<RailListID, number>;
 };
 
 type RailMetrics = {
   boxes: Record<RailListID, RailBox>;
+  scrolls: Record<RailListID, RailScrollMetric>;
+  railTop: number;
   railBottom: number;
 };
 
@@ -56,9 +65,28 @@ test('desktop left rail preserves conversations and independent scrolling', asyn
         client: list.clientHeight,
         scroll: list.scrollHeight,
         minHeight: Number.parseFloat(getComputedStyle(list).minHeight),
+        overflowY: getComputedStyle(list).overflowY,
       };
     }
-    return { boxes, railBottom: element.getBoundingClientRect().bottom };
+    const lists = ids.reduce((accumulator, id) => {
+      const list = element.querySelector<HTMLElement>(`#${id}`);
+      if (!list) throw new Error(`left rail list #${id} is missing`);
+      accumulator[id] = list;
+      return accumulator;
+    }, {} as Record<RailListID, HTMLElement>);
+    for (const id of ids) lists[id].scrollTop = 0;
+    const scrolls = {} as Record<RailListID, RailScrollMetric>;
+    for (const id of ids) {
+      const list = lists[id];
+      const before = list.scrollTop;
+      list.scrollTop = 1;
+      const positions = {} as Record<RailListID, number>;
+      for (const otherID of ids) positions[otherID] = lists[otherID].scrollTop;
+      scrolls[id] = { before, after: list.scrollTop, positions };
+      list.scrollTop = 0;
+    }
+    const railRect = element.getBoundingClientRect();
+    return { boxes, scrolls, railTop: railRect.top, railBottom: railRect.bottom };
   });
   expect(metrics.boxes.contexts.height).toBeGreaterThanOrEqual(120);
   expect(metrics.boxes.contexts.minHeight).toBeGreaterThanOrEqual(120);
@@ -66,10 +94,18 @@ test('desktop left rail preserves conversations and independent scrolling', asyn
   expect(metrics.boxes.archived.height).toBeLessThanOrEqual(900 * 0.26 + 1);
   expect(metrics.boxes.rooms.bottom).toBeLessThanOrEqual(metrics.boxes.contexts.top + 1);
   expect(metrics.boxes.contexts.bottom).toBeLessThanOrEqual(metrics.boxes.archived.top + 1);
-  expect(metrics.boxes.archived.bottom).toBeLessThanOrEqual(metrics.railBottom);
-  expect(metrics.boxes.rooms.scroll).toBeGreaterThan(metrics.boxes.rooms.client);
-  expect(metrics.boxes.contexts.scroll).toBeGreaterThan(metrics.boxes.contexts.client);
-  expect(metrics.boxes.archived.scroll).toBeGreaterThan(metrics.boxes.archived.client);
+  for (const id of ['rooms', 'contexts', 'archived'] as const) {
+    const box = metrics.boxes[id];
+    expect(box.top).toBeGreaterThanOrEqual(metrics.railTop - 1);
+    expect(box.bottom).toBeLessThanOrEqual(metrics.railBottom + 1);
+    expect(box.scroll).toBeGreaterThan(box.client);
+    expect(['auto', 'scroll']).toContain(box.overflowY);
+    expect(metrics.scrolls[id].before).toBe(0);
+    expect(metrics.scrolls[id].after).toBeGreaterThan(metrics.scrolls[id].before);
+    for (const otherID of ['rooms', 'contexts', 'archived'] as const) {
+      if (otherID !== id) expect(metrics.scrolls[id].positions[otherID]).toBe(0);
+    }
+  }
 });
 
 test('empty state settles without a writable composer', async ({ page, request }) => {
