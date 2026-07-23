@@ -1627,11 +1627,16 @@
       ["center", center],
       ["right", right],
     ].filter(([, element]) => !element).map(([name]) => name);
-    if (missingSurfaces.length === 3) return [];
+    const buttons = Array.from(document.querySelectorAll(".mob button"));
+    const resetButtons = () => buttons.forEach((button) => {
+      button.classList.remove("on");
+      button.setAttribute("aria-pressed", "false");
+    });
+    if (missingSurfaces.length === 3 && buttons.length === 0) return [];
     if (missingSurfaces.length > 0) {
+      resetButtons();
       throw new Error(`mobile navigation missing layout surfaces: ${missingSurfaces.join(", ")}`);
     }
-    const buttons = Array.from(document.querySelectorAll(".mob button"));
     const expectedButtonSurfaces = ["left", "center", "right"];
     const invalidButtonSurfaces = expectedButtonSurfaces.filter(
       (expected) => buttons.filter((button) => button.dataset.surface === expected).length !== 1,
@@ -1640,10 +1645,7 @@
       (button) => !expectedButtonSurfaces.includes(button.dataset.surface),
     );
     if (invalidButtonSurfaces.length > 0 || unexpectedButtons.length > 0) {
-      buttons.forEach((button) => {
-        button.classList.remove("on");
-        button.setAttribute("aria-pressed", "false");
-      });
+      resetButtons();
       throw new Error(
         `mobile navigation requires exactly one button for: ${invalidButtonSurfaces.join(", ") || "left, center, right"}`,
       );

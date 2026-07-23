@@ -187,6 +187,18 @@ function testRejectsIncompleteMobileButtons() {
   assert.equal(centerButton.getAttribute("aria-pressed"), "false", "invalid navigation must clear pressed state");
 }
 
+function testRejectsMobileButtonsWithoutSurfaces() {
+  const mobile = makeMobileFixture([], ["left", "center", "right"]);
+  assert.throws(
+    () => makePage({ live: [], archived: [], participant: "missing", mobile }),
+    /mobile navigation.*left.*center.*right/i,
+  );
+  mobile.buttons.forEach((button) => {
+    assert.equal(button.classList.contains("on"), false, "orphaned navigation must clear static selection");
+    assert.equal(button.getAttribute("aria-pressed"), "false", "orphaned navigation must clear pressed state");
+  });
+}
+
 async function openParticipant(page) {
   await waitFor(() => page.elements.get("contexts").children.length >= 2, "context row");
   await page.elements.get("contexts").children[1].click();
@@ -242,6 +254,7 @@ async function testUnavailableParticipant() {
 (async () => {
   testRejectsPartialMobileSurfaces();
   testRejectsIncompleteMobileButtons();
+  testRejectsMobileButtonsWithoutSurfaces();
   await testArchivedParticipant();
   await testLiveParticipant();
   await testUnavailableParticipant();
