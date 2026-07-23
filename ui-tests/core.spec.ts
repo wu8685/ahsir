@@ -1,5 +1,21 @@
 import { expect, resetScenario, test } from './helpers';
 
+type RailListID = 'rooms' | 'contexts' | 'archived';
+
+type RailBox = {
+  top: number;
+  bottom: number;
+  height: number;
+  client: number;
+  scroll: number;
+  minHeight: number;
+};
+
+type RailMetrics = {
+  boxes: Record<RailListID, RailBox>;
+  railBottom: number;
+};
+
 function isAgentChatRequest(url: string, method: string) {
   return method === 'POST' && /^\/api\/agents\/[^/]+\/chat$/.test(new URL(url).pathname);
 }
@@ -12,6 +28,48 @@ test('core page settles with all primary rails', async ({ page, request }) => {
   await expect(page.locator('#rooms .sess')).toHaveCount(14);
   await expect(page.locator('#archived .sess')).toHaveCount(8);
   await expect(page.locator('#contexts')).not.toContainText('加载中…');
+});
+
+test('desktop left rail preserves conversations and independent scrolling', async ({ page, request }) => {
+  await resetScenario(request, 'core');
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await page.goto('/');
+
+  const rail = page.locator('.rail.left');
+  await expect(rail).toBeVisible();
+  await expect(page.locator('#contexts .sess')).toHaveCount(18);
+  for (const id of ['rooms', 'contexts', 'archived'] as const) {
+    await expect(page.locator(`#${id}`)).toBeVisible();
+  }
+
+  const metrics = await rail.evaluate((element): RailMetrics => {
+    const ids: RailListID[] = ['rooms', 'contexts', 'archived'];
+    const boxes = {} as Record<RailListID, RailBox>;
+    for (const id of ids) {
+      const list = element.querySelector<HTMLElement>(`#${id}`);
+      if (!list) throw new Error(`left rail list #${id} is missing`);
+      const rect = list.getBoundingClientRect();
+      boxes[id] = {
+        top: rect.top,
+        bottom: rect.bottom,
+        height: rect.height,
+        client: list.clientHeight,
+        scroll: list.scrollHeight,
+        minHeight: Number.parseFloat(getComputedStyle(list).minHeight),
+      };
+    }
+    return { boxes, railBottom: element.getBoundingClientRect().bottom };
+  });
+  expect(metrics.boxes.contexts.height).toBeGreaterThanOrEqual(120);
+  expect(metrics.boxes.contexts.minHeight).toBeGreaterThanOrEqual(120);
+  expect(metrics.boxes.rooms.height).toBeLessThanOrEqual(900 * 0.26 + 1);
+  expect(metrics.boxes.archived.height).toBeLessThanOrEqual(900 * 0.26 + 1);
+  expect(metrics.boxes.rooms.bottom).toBeLessThanOrEqual(metrics.boxes.contexts.top + 1);
+  expect(metrics.boxes.contexts.bottom).toBeLessThanOrEqual(metrics.boxes.archived.top + 1);
+  expect(metrics.boxes.archived.bottom).toBeLessThanOrEqual(metrics.railBottom);
+  expect(metrics.boxes.rooms.scroll).toBeGreaterThan(metrics.boxes.rooms.client);
+  expect(metrics.boxes.contexts.scroll).toBeGreaterThan(metrics.boxes.contexts.client);
+  expect(metrics.boxes.archived.scroll).toBeGreaterThan(metrics.boxes.archived.client);
 });
 
 test('empty state settles without a writable composer', async ({ page, request }) => {
