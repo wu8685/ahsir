@@ -372,7 +372,9 @@ git commit -m "test: add deterministic UI fixture server"
 
 **Interfaces:**
 - Consumes: `POST /__test/reset?scenario=<name>` and base URL `http://127.0.0.1:19809`.
-- Produces: `resetScenario(request, scenario)` and `collectPageErrors(page)`.
+- Produces: `resetScenario(request, scenario)`, structured `BrowserDiagnostics`,
+  `collectPageErrors(page, baseURL)`, and an extended `test` whose automatic
+  `afterEach` validates and attaches browser diagnostics.
 
 - [ ] **Step 1: Pin Playwright and generate the lock file**
 
@@ -382,7 +384,7 @@ Create `ui-tests/package.json`:
 {
   "name": "ahsir-ui-tests",
   "private": true,
-  "scripts": { "test": "playwright test" },
+  "scripts": { "test": "playwright test --config playwright.config.ts" },
   "devDependencies": { "@playwright/test": "1.61.1" }
 }
 ```
@@ -411,7 +413,7 @@ export default defineConfig({
     ...devices['Desktop Chrome'],
   },
   webServer: {
-    command: "sh -c 'mkdir -p ui-tests/test-results && exec go run ./internal/ui/e2e/testserver >>ui-tests/test-results/fixture.log 2>&1'",
+    command: "sh -c 'mkdir -p ui-tests/test-results && exec go run ./internal/ui/e2e/testserver >ui-tests/test-results/fixture.log 2>&1'",
     cwd: '..',
     url: 'http://127.0.0.1:19809/',
     reuseExistingServer: false,
@@ -422,62 +424,186 @@ export default defineConfig({
 });
 ```
 
-- [ ] **Step 3: Add reset and browser-error helpers**
+- [ ] **Step 3: Add reset and automatic browser-diagnostics helpers**
 
 ```ts
-import { APIRequestContext, Page, expect } from '@playwright/test';
+import {
+  APIRequestContext,
+  Page,
+  expect,
+  test as base,
+} from '@playwright/test';
+import { writeFile } from 'node:fs/promises';
+
+type ConsoleError = {
+  locationURL: string;
+  text: string;
+};
+
+type FailedResponse = {
+  status: number;
+  statusText: string;
+  url: string;
+};
+
+type RequestFailure = {
+  errorText: string;
+  url: string;
+};
 
 export async function resetScenario(request: APIRequestContext, scenario: string) {
   const response = await request.post(`/__test/reset?scenario=${encodeURIComponent(scenario)}`);
   expect(response.status()).toBe(204);
 }
 
-export function collectPageErrors(page: Page) {
-  const errors: string[] = [];
-  page.on('pageerror', error => errors.push(`pageerror: ${error.message}`));
-  page.on('console', message => {
-    if (message.type() === 'error') errors.push(`console: ${message.text()}`);
-  });
-  return errors;
+export class BrowserDiagnostics {
+  private readonly allowedFailedResponses = new Set<string>();
+  private readonly consoleErrors: ConsoleError[] = [];
+  private readonly failedResponses: FailedResponse[] = [];
+  private readonly pageErrors: string[] = [];
+  private readonly requestFailures: RequestFailure[] = [];
+
+  constructor(page: Page, private readonly baseURL: string) {
+    page.on('pageerror', error => this.pageErrors.push(error.message));
+    page.on('console', message => {
+      if (message.type() !== 'error') return;
+      this.consoleErrors.push({
+        locationURL: message.location().url,
+        text: message.text(),
+      });
+    });
+    page.on('response', response => {
+      if (response.status() < 400) return;
+      this.failedResponses.push({
+        status: response.status(),
+        statusText: response.statusText(),
+        url: response.url(),
+      });
+    });
+    page.on('requestfailed', request => {
+      this.requestFailures.push({
+        errorText: request.failure()?.errorText ?? 'unknown request failure',
+        url: request.url(),
+      });
+    });
+  }
+
+  allowFailedResponse(path: string, status: number) {
+    this.allowedFailedResponses.add(responseKey(new URL(path, this.baseURL).href, status));
+  }
+
+  snapshot() {
+    return {
+      allowedFailedResponses: [...this.allowedFailedResponses].sort(),
+      consoleErrors: this.consoleErrors,
+      failedResponses: this.failedResponses,
+      pageErrors: this.pageErrors,
+      requestFailures: this.requestFailures,
+    };
+  }
+
+  unexpectedErrors() {
+    const errors = [
+      ...this.pageErrors.map(error => `pageerror: ${error}`),
+      ...this.requestFailures.map(
+        failure => `requestfailed: ${failure.url}: ${failure.errorText}`,
+      ),
+      ...this.failedResponses
+        .filter(response => !this.isAllowedResponse(response))
+        .map(response => `response: ${response.status} ${response.url}`),
+      ...this.consoleErrors
+        .filter(error => !this.isExpectedResourceError(error))
+        .map(error => `console: ${error.text} (${error.locationURL || 'no location'})`),
+    ];
+    return errors;
+  }
+
+  private isAllowedResponse(response: FailedResponse) {
+    return this.allowedFailedResponses.has(responseKey(response.url, response.status));
+  }
+
+  private isExpectedResourceError(error: ConsoleError) {
+    if (!error.text.startsWith('Failed to load resource:')) return false;
+    return this.failedResponses.some(
+      response =>
+        response.url === error.locationURL &&
+        this.isAllowedResponse(response),
+    );
+  }
 }
+
+function responseKey(url: string, status: number) {
+  return `${status} ${url}`;
+}
+
+export function collectPageErrors(page: Page, baseURL: string) {
+  return new BrowserDiagnostics(page, baseURL);
+}
+
+type DiagnosticsFixtures = {
+  browserDiagnostics: BrowserDiagnostics;
+};
+
+export const test = base.extend<DiagnosticsFixtures>({
+  browserDiagnostics: async ({ baseURL, page }, use) => {
+    if (!baseURL) throw new Error('Playwright baseURL is required for browser diagnostics');
+    await use(collectPageErrors(page, baseURL));
+  },
+});
+
+test.afterEach(async ({ browserDiagnostics }, testInfo) => {
+  const unexpectedErrors = browserDiagnostics.unexpectedErrors();
+  if (testInfo.status !== testInfo.expectedStatus || unexpectedErrors.length > 0) {
+    const diagnosticsPath = testInfo.outputPath('browser-diagnostics.json');
+    await writeFile(diagnosticsPath, JSON.stringify(browserDiagnostics.snapshot(), null, 2));
+    await testInfo.attach('browser-diagnostics.json', {
+      path: diagnosticsPath,
+      contentType: 'application/json',
+    });
+  }
+  expect(unexpectedErrors, 'unexpected browser diagnostics').toEqual([]);
+});
+
+export { expect };
 ```
 
 - [ ] **Step 4: Write initial, empty, and error cases before installing Chromium**
 
 ```ts
-import { test, expect } from '@playwright/test';
-import { collectPageErrors, resetScenario } from './helpers';
+import { expect, resetScenario, test } from './helpers';
 
 test('core page settles with all primary rails', async ({ page, request }) => {
   await resetScenario(request, 'core');
-  const errors = collectPageErrors(page);
   await page.goto('/');
   await expect(page.locator('#schedLabel')).toHaveText('scheduler · 1 agents');
   await expect(page.locator('#contexts .sess')).toHaveCount(18);
   await expect(page.locator('#rooms .sess')).toHaveCount(14);
   await expect(page.locator('#archived .sess')).toHaveCount(8);
   await expect(page.locator('#contexts')).not.toContainText('加载中…');
-  expect(errors).toEqual([]);
 });
 
 test('empty state settles without a writable composer', async ({ page, request }) => {
   await resetScenario(request, 'empty');
-  const errors = collectPageErrors(page);
   await page.goto('/');
   await expect(page.locator('#schedLabel')).toHaveText('scheduler · 0 agents');
   await expect(page.locator('#contexts')).toContainText('还没有对话');
   await expect(page.locator('#sendBtn')).toBeDisabled();
-  expect(errors).toEqual([]);
 });
 
-test('scheduler failure is explicit and leaves a rendered shell', async ({ page, request }) => {
+test('scheduler failure is explicit and leaves a rendered shell', async ({
+  browserDiagnostics,
+  page,
+  request,
+}) => {
   await resetScenario(request, 'scheduler-error');
-  const errors = collectPageErrors(page);
+  browserDiagnostics.allowFailedResponse('/api/agents', 503);
+  browserDiagnostics.allowFailedResponse('/api/archived-agents', 503);
+  browserDiagnostics.allowFailedResponse('/api/contexts', 502);
+  browserDiagnostics.allowFailedResponse('/api/rooms', 503);
   await page.goto('/');
   await expect(page.locator('#schedLabel')).toHaveText('scheduler 不可达');
   await expect(page.locator('.app')).toBeVisible();
   await expect(page.locator('#contexts')).not.toContainText('加载中…');
-  expect(errors).toEqual([]);
 });
 ```
 
@@ -511,10 +637,12 @@ git commit -m "test: cover core UI page states in Chromium"
 
 - [ ] **Step 1: Add failing interaction cases**
 
+Keep the existing `import { expect, resetScenario, test } from './helpers';` at
+the top of `core.spec.ts`; do not import a raw `test` from `@playwright/test`.
+
 ```ts
 test('live participant details and chat remain usable', async ({ page, request }) => {
   await resetScenario(request, 'core');
-  const errors = collectPageErrors(page);
   await page.goto('/');
   await page.locator('#contexts .sess', { hasText: 'Existing core question' }).click();
   await page.locator('#agentRows .agent-row', { hasText: 'live-codex' }).click();
@@ -527,12 +655,10 @@ test('live participant details and chat remain usable', async ({ page, request }
   await page.locator('#sendBtn').click();
   await chat;
   await expect(page.locator('#thread')).toContainText('E2E fixed reply');
-  expect(errors).toEqual([]);
 });
 
 test('archived participant is detailed but read-only', async ({ page, request }) => {
   await resetScenario(request, 'core');
-  const errors = collectPageErrors(page);
   await page.goto('/');
   let chatRequests = 0;
   page.on('request', r => { if (/\/api\/agents\/.*\/chat$/.test(r.url())) chatRequests++; });
@@ -545,7 +671,6 @@ test('archived participant is detailed but read-only', async ({ page, request })
   await expect(page.locator('#sendBtn')).toBeDisabled();
   await page.waitForTimeout(100);
   expect(chatRequests).toBe(0);
-  expect(errors).toEqual([]);
 });
 ```
 
