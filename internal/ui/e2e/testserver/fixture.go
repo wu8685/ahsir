@@ -191,11 +191,57 @@ func (f *fixture) schedulerHandler() http.Handler {
 
 func validateFixtureChatRequest(r *http.Request) error {
 	decoder := json.NewDecoder(r.Body)
-	decoder.DisallowUnknownFields()
-	var got fixtureChatRequest
-	if err := decoder.Decode(&got); err != nil {
-		return fmt.Errorf("decode JSON: %w", err)
+	opening, err := decoder.Token()
+	if err != nil {
+		return fmt.Errorf("decode opening JSON token: %w", err)
 	}
+	if opening != json.Delim('{') {
+		return fmt.Errorf("payload must be a JSON object")
+	}
+
+	var got fixtureChatRequest
+	seen := make(map[string]struct{}, 4)
+	for decoder.More() {
+		token, err := decoder.Token()
+		if err != nil {
+			return fmt.Errorf("decode JSON key: %w", err)
+		}
+		key, ok := token.(string)
+		if !ok {
+			return fmt.Errorf("JSON object key has type %T, want string", token)
+		}
+		if _, duplicate := seen[key]; duplicate {
+			return fmt.Errorf("duplicate field %q", key)
+		}
+		seen[key] = struct{}{}
+
+		switch key {
+		case "message":
+			err = decoder.Decode(&got.Message)
+		case "async":
+			err = decoder.Decode(&got.Async)
+		case "speaker":
+			err = decoder.Decode(&got.Speaker)
+		case "contextId":
+			err = decoder.Decode(&got.ContextID)
+		default:
+			return fmt.Errorf("unknown field %q", key)
+		}
+		if err != nil {
+			return fmt.Errorf("decode field %q: %w", key, err)
+		}
+	}
+	closing, err := decoder.Token()
+	if err != nil {
+		return fmt.Errorf("decode closing JSON token: %w", err)
+	}
+	if closing != json.Delim('}') {
+		return fmt.Errorf("payload has closing token %v, want object delimiter", closing)
+	}
+	if len(seen) != 4 {
+		return fmt.Errorf("payload has %d fields, want 4", len(seen))
+	}
+
 	var trailing any
 	if err := decoder.Decode(&trailing); err != io.EOF {
 		if err == nil {

@@ -10,6 +10,7 @@ export default defineConfig({
   use: {
     baseURL: 'http://127.0.0.1:19809',
     screenshot: 'only-on-failure',
+    serviceWorkers: 'block',
     trace: 'retain-on-failure',
     video: 'off',
     ...devices['Desktop Chrome'],

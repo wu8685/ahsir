@@ -121,7 +121,9 @@ The fixture server provides deterministic scenarios:
   `GET /agents/archived-kimi/history/ctx-archived-01`;
 - a successful chat submission whose JSON body is exactly `message: "E2E ping"`,
   `async: true`, `speaker: "console"`, and `contextId: "ctx-live-01"`; malformed
-  or different payloads return HTTP 400 before the accepted/completed sequence
+  or different payloads return HTTP 400. Object keys are case-sensitive, each
+  required key appears exactly once, and unknown, missing, duplicate, or
+  trailing fields/values are rejected before the accepted/completed sequence
   yields the fixed reply.
 
 ### `empty`
@@ -192,10 +194,14 @@ At a narrow viewport of 800×900:
 
 - the mobile navigation is visible;
 - the initial center/chat surface, textarea, and send button are usable and
-  remain above the bottom navigation rather than being clipped or overlapped;
+  remain within both the active chat surface and the viewport, above the bottom
+  navigation rather than being clipped, shifted offscreen, or overlapped;
 - switching to the details surface reveals the selected participant and detail
   card without horizontal page overflow;
-- switching back restores the chat surface.
+- every visible surface has positive dimensions and remains within the viewport
+  on all four edges;
+- switching back, including a repeated detail/chat cycle, restores the chat
+  surface and revalidates composer geometry and usability.
 
 The minimum production fix for this case is a three-button bottom navigation
 for conversations, chat, and details. It only switches which existing rail or
@@ -225,11 +231,13 @@ computed geometry, and scrollability. They must prefer stable IDs and existing
 DOM contracts over CSS ancestry or positional selectors.
 
 An automatic Playwright fixture installs console and page-error listeners plus
-an HTTP(S) route guard before every test body. Requests to the configured
-`baseURL` origin continue normally; every other HTTP(S) request is recorded,
-blocked before network I/O, and fails diagnostics. `data:` and `blob:` URLs are
-outside that guard. Expected scheduler-error responses use exact URL/status
-allowlist entries rather than broad error suppression.
+a browser-context HTTP(S) route guard before every test body. Requests to the
+configured `baseURL` origin continue normally; every other HTTP(S) request,
+including a popup's initial document navigation, is recorded, blocked before
+network I/O, and fails diagnostics. Service Workers are blocked so they cannot
+bypass routing. `data:` and `blob:` URLs are outside that guard. Expected
+scheduler-error responses use exact URL/status allowlist entries rather than
+broad error suppression.
 
 The suite does not compare golden screenshots. On failure, Playwright retains:
 

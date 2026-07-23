@@ -149,20 +149,35 @@ test('narrow screen switches conversations, chat, and details without overflow',
   const right = page.locator('.rail.right');
   const textarea = page.locator('#ta');
   const sendButton = page.locator('#sendBtn');
-  const expectSurfaceAboveNavigation = async (surface: typeof center, surfaceName: string) => {
+  const expectSurfaceWithinViewport = async (surface: typeof center, surfaceName: string) => {
     const [surfaceBox, navigationBox] = await Promise.all([
       surface.boundingBox(),
       mobileNavigation.boundingBox(),
     ]);
+    const viewport = page.viewportSize();
     expect(surfaceBox, `${surfaceName} surface bounding box`).not.toBeNull();
     expect(navigationBox, 'mobile navigation bounding box').not.toBeNull();
-    if (!surfaceBox || !navigationBox) return;
+    expect(viewport, 'mobile viewport').not.toBeNull();
+    if (!surfaceBox || !navigationBox || !viewport) return;
+    expect(surfaceBox.width, `${surfaceName} surface width`).toBeGreaterThan(0);
+    expect(surfaceBox.height, `${surfaceName} surface height`).toBeGreaterThan(0);
+    expect(surfaceBox.x, `${surfaceName} surface left`).toBeGreaterThanOrEqual(-1);
     expect(surfaceBox.y, `${surfaceName} surface top`).toBeGreaterThanOrEqual(-1);
+    expect(surfaceBox.x + surfaceBox.width, `${surfaceName} surface right`).toBeLessThanOrEqual(
+      viewport.width + 1,
+    );
     expect(surfaceBox.y + surfaceBox.height, `${surfaceName} surface bottom`).toBeLessThanOrEqual(
       navigationBox.y + 1,
     );
+    expect(navigationBox.width, 'mobile navigation width').toBeGreaterThan(0);
+    expect(navigationBox.height, 'mobile navigation height').toBeGreaterThan(0);
+    expect(navigationBox.x, 'mobile navigation left').toBeGreaterThanOrEqual(-1);
+    expect(navigationBox.y, 'mobile navigation top').toBeGreaterThanOrEqual(-1);
+    expect(navigationBox.x + navigationBox.width, 'mobile navigation right').toBeLessThanOrEqual(
+      viewport.width + 1,
+    );
     expect(navigationBox.y + navigationBox.height, 'mobile navigation bottom').toBeLessThanOrEqual(
-      901,
+      viewport.height + 1,
     );
   };
   const expectNoHorizontalOverflow = async (surface: string) => {
@@ -170,6 +185,47 @@ test('narrow screen switches conversations, chat, and details without overflow',
       () => document.documentElement.scrollWidth - document.documentElement.clientWidth,
     );
     expect(overflow, `${surface} surface horizontal overflow`).toBeLessThanOrEqual(1);
+  };
+  const expectComposerUsable = async (stateName: string) => {
+    await expect(textarea).toBeEditable();
+    await expect(sendButton).toBeEnabled();
+    const [surfaceBox, textareaBox, sendButtonBox, navigationBox] = await Promise.all([
+      center.boundingBox(),
+      textarea.boundingBox(),
+      sendButton.boundingBox(),
+      mobileNavigation.boundingBox(),
+    ]);
+    const viewport = page.viewportSize();
+    expect(surfaceBox, `${stateName} chat surface bounding box`).not.toBeNull();
+    expect(textareaBox, `${stateName} chat textarea bounding box`).not.toBeNull();
+    expect(sendButtonBox, `${stateName} send button bounding box`).not.toBeNull();
+    expect(navigationBox, `${stateName} mobile navigation bounding box`).not.toBeNull();
+    expect(viewport, `${stateName} mobile viewport`).not.toBeNull();
+    if (!surfaceBox || !textareaBox || !sendButtonBox || !navigationBox || !viewport) return;
+
+    for (const { box, name } of [
+      { box: textareaBox, name: 'chat textarea' },
+      { box: sendButtonBox, name: 'send button' },
+    ]) {
+      expect(box.width, `${stateName} ${name} width`).toBeGreaterThan(0);
+      expect(box.height, `${stateName} ${name} height`).toBeGreaterThan(0);
+      expect(box.x, `${stateName} ${name} viewport left`).toBeGreaterThanOrEqual(-1);
+      expect(box.y, `${stateName} ${name} viewport top`).toBeGreaterThanOrEqual(-1);
+      expect(box.x, `${stateName} ${name} surface left`).toBeGreaterThanOrEqual(surfaceBox.x - 1);
+      expect(box.y, `${stateName} ${name} surface top`).toBeGreaterThanOrEqual(surfaceBox.y - 1);
+      expect(box.x + box.width, `${stateName} ${name} viewport right`).toBeLessThanOrEqual(
+        viewport.width + 1,
+      );
+      expect(box.x + box.width, `${stateName} ${name} surface right`).toBeLessThanOrEqual(
+        surfaceBox.x + surfaceBox.width + 1,
+      );
+      expect(box.y + box.height, `${stateName} ${name} surface bottom`).toBeLessThanOrEqual(
+        surfaceBox.y + surfaceBox.height + 1,
+      );
+      expect(box.y + box.height, `${stateName} ${name} navigation overlap`).toBeLessThanOrEqual(
+        navigationBox.y + 1,
+      );
+    }
   };
 
   await expect(mobileNavigation).toBeVisible();
@@ -182,25 +238,8 @@ test('narrow screen switches conversations, chat, and details without overflow',
   await expect(leftButton).toHaveAttribute('aria-pressed', 'false');
   await expect(chatButton).toHaveAttribute('aria-pressed', 'true');
   await expect(detailButton).toHaveAttribute('aria-pressed', 'false');
-  await expect(textarea).toBeEditable();
-  await expect(sendButton).toBeEnabled();
-  await expectSurfaceAboveNavigation(center, 'chat');
-  const [textareaBox, sendButtonBox, navigationBox] = await Promise.all([
-    textarea.boundingBox(),
-    sendButton.boundingBox(),
-    mobileNavigation.boundingBox(),
-  ]);
-  expect(textareaBox, 'chat textarea bounding box').not.toBeNull();
-  expect(sendButtonBox, 'send button bounding box').not.toBeNull();
-  expect(navigationBox, 'mobile navigation bounding box').not.toBeNull();
-  if (textareaBox && sendButtonBox && navigationBox) {
-    expect(textareaBox.y + textareaBox.height, 'chat textarea bottom').toBeLessThanOrEqual(
-      navigationBox.y + 1,
-    );
-    expect(sendButtonBox.y + sendButtonBox.height, 'send button bottom').toBeLessThanOrEqual(
-      navigationBox.y + 1,
-    );
-  }
+  await expectSurfaceWithinViewport(center, 'chat');
+  await expectComposerUsable('initial');
   await expectNoHorizontalOverflow('chat');
 
   await detailButton.click();
@@ -212,7 +251,7 @@ test('narrow screen switches conversations, chat, and details without overflow',
   await expect(leftButton).toHaveAttribute('aria-pressed', 'false');
   await expect(chatButton).toHaveAttribute('aria-pressed', 'false');
   await expect(detailButton).toHaveAttribute('aria-pressed', 'true');
-  await expectSurfaceAboveNavigation(right, 'detail');
+  await expectSurfaceWithinViewport(right, 'detail');
   await expectNoHorizontalOverflow('detail');
 
   await leftButton.click();
@@ -222,7 +261,7 @@ test('narrow screen switches conversations, chat, and details without overflow',
   await expect(leftButton).toHaveAttribute('aria-pressed', 'true');
   await expect(chatButton).toHaveAttribute('aria-pressed', 'false');
   await expect(detailButton).toHaveAttribute('aria-pressed', 'false');
-  await expectSurfaceAboveNavigation(left, 'conversations');
+  await expectSurfaceWithinViewport(left, 'conversations');
   await expectNoHorizontalOverflow('conversations');
 
   await chatButton.click();
@@ -230,7 +269,8 @@ test('narrow screen switches conversations, chat, and details without overflow',
   await expect(left).toBeHidden();
   await expect(right).toBeHidden();
   await expect(chatButton).toHaveAttribute('aria-pressed', 'true');
-  await expectSurfaceAboveNavigation(center, 'chat after switching');
+  await expectSurfaceWithinViewport(center, 'chat after switching');
+  await expectComposerUsable('after switching');
 
   await detailButton.click();
   await expect(right).toBeVisible();
@@ -240,9 +280,8 @@ test('narrow screen switches conversations, chat, and details without overflow',
   await expect(left).toBeHidden();
   await expect(right).toBeHidden();
   await expect(chatButton).toHaveAttribute('aria-pressed', 'true');
-  await expect(textarea).toBeEditable();
-  await expect(sendButton).toBeEnabled();
-  await expectSurfaceAboveNavigation(center, 'chat after repeated switching');
+  await expectSurfaceWithinViewport(center, 'chat after repeated switching');
+  await expectComposerUsable('after repeated switching');
   await expectNoHorizontalOverflow('chat after repeated switching');
 });
 

@@ -384,8 +384,9 @@ func (f *fixture) schedulerHandler() http.Handler {
 }
 ```
 
-`validateFixtureChatRequest` uses `json.Decoder` with
-`DisallowUnknownFields`, rejects malformed or trailing JSON, and accepts only
+`validateFixtureChatRequest` tokenizes the top-level JSON object with
+`json.Decoder`, accepts each exact case-sensitive key once, rejects malformed,
+unknown, missing, duplicate, or trailing JSON, and accepts only
 `{"message":"E2E ping","async":true,"speaker":"console","contextId":"ctx-live-01"}`.
 `writeFixtureJSON` sets `Content-Type: application/json`, writes the status,
 and encodes the value. `currentScenario` and `setScenario` must hold `mu.RLock`
@@ -482,6 +483,7 @@ export default defineConfig({
   use: {
     baseURL: 'http://127.0.0.1:19809',
     screenshot: 'only-on-failure',
+    serviceWorkers: 'block',
     trace: 'retain-on-failure',
     video: 'off',
     ...devices['Desktop Chrome'],
@@ -503,6 +505,7 @@ export default defineConfig({
 ```ts
 import {
   APIRequestContext,
+  BrowserContext,
   Page,
   expect,
   test as base,
@@ -569,9 +572,9 @@ export class BrowserDiagnostics {
     });
   }
 
-  async installNetworkGuard(page: Page) {
+  async installNetworkGuard(context: BrowserContext) {
     const allowedOrigin = new URL(this.baseURL).origin;
-    await page.route(/^https?:\/\//, async route => {
+    await context.route(/^https?:\/\//, async route => {
       const request = route.request();
       if (new URL(request.url()).origin === allowedOrigin) {
         await route.continue();
@@ -651,10 +654,10 @@ type DiagnosticsFixtures = {
 
 export const test = base.extend<DiagnosticsFixtures>({
   browserDiagnostics: [
-    async ({ baseURL, page }, use) => {
+    async ({ baseURL, context, page }, use) => {
       if (!baseURL) throw new Error('Playwright baseURL is required for browser diagnostics');
       const diagnostics = collectPageErrors(page, baseURL);
-      await diagnostics.installNetworkGuard(page);
+      await diagnostics.installNetworkGuard(context);
       await use(diagnostics);
     },
     { auto: true },
@@ -677,12 +680,15 @@ test.afterEach(async ({ browserDiagnostics }, testInfo) => {
 export { expect };
 ```
 
-The automatic fixture must install both listeners and the HTTP(S) route guard
-before each test body. The guard permits only the configured `baseURL` origin,
-does not match `data:` or `blob:`, and turns every other HTTP(S) request into one
+The automatic fixture must install both listeners and the browser-context
+HTTP(S) route guard before each test body. Block Service Workers in Playwright
+configuration so they cannot bypass routing. The guard permits only the
+configured `baseURL` origin, does not match `data:` or `blob:`, and turns every
+other HTTP(S) request—including a popup's initial navigation—into one
 deduplicated diagnostics failure. Prove sensitivity with temporary expected-
-failure probes for `console.error`, an asynchronous page throw, and a loopback
-cross-origin request; restore the probes before committing.
+failure probes for `console.error`, an asynchronous page throw, a loopback
+cross-origin request, and popup initial navigation; restore the probes before
+committing.
 
 - [ ] **Step 4: Write initial, empty, and error cases before installing Chromium**
 
@@ -923,9 +929,14 @@ test('narrow screen switches conversations, chat, and details without overflow',
   await expect(page.locator('#ta')).toBeEditable();
   await expect(page.locator('#sendBtn')).toBeEnabled();
   const [chatBox, navigationBox] = await Promise.all([chat.boundingBox(), navigation.boundingBox()]);
+  const viewport = page.viewportSize();
   expect(chatBox).not.toBeNull();
   expect(navigationBox).not.toBeNull();
-  if (chatBox && navigationBox) {
+  expect(viewport).not.toBeNull();
+  if (chatBox && navigationBox && viewport) {
+    expect(chatBox.x).toBeGreaterThanOrEqual(-1);
+    expect(chatBox.y).toBeGreaterThanOrEqual(-1);
+    expect(chatBox.x + chatBox.width).toBeLessThanOrEqual(viewport.width + 1);
     expect(chatBox.y + chatBox.height).toBeLessThanOrEqual(navigationBox.y + 1);
   }
   await navigation.getByRole('button', { name: '详情', exact: true }).click();
@@ -940,6 +951,14 @@ test('narrow screen switches conversations, chat, and details without overflow',
   expect(overflow).toBeLessThanOrEqual(1);
 });
 ```
+
+The implemented test applies the four-edge/positive-size geometry contract to
+each active surface and to the bottom navigation. It also verifies that the
+textarea and send button remain inside both the chat surface and viewport,
+stay above the navigation, and remain editable/enabled after the first and a
+repeated detail/chat switching cycle. Prove the added sensitivity by
+temporarily shifting `.composer` left offscreen, observing the coordinate
+assertion fail, and restoring the stylesheet before committing.
 
 - [ ] **Step 2: Run and verify red**
 

@@ -1,5 +1,6 @@
 import {
   APIRequestContext,
+  BrowserContext,
   Page,
   expect,
   test as base,
@@ -66,9 +67,9 @@ export class BrowserDiagnostics {
     });
   }
 
-  async installNetworkGuard(page: Page) {
+  async installNetworkGuard(context: BrowserContext) {
     const allowedOrigin = new URL(this.baseURL).origin;
-    await page.route(/^https?:\/\//, async route => {
+    await context.route(/^https?:\/\//, async route => {
       const request = route.request();
       if (new URL(request.url()).origin === allowedOrigin) {
         await route.continue();
@@ -154,10 +155,10 @@ type DiagnosticsFixtures = {
 
 export const test = base.extend<DiagnosticsFixtures>({
   browserDiagnostics: [
-    async ({ baseURL, page }, use) => {
+    async ({ baseURL, context, page }, use) => {
       if (!baseURL) throw new Error('Playwright baseURL is required for browser diagnostics');
       const diagnostics = collectPageErrors(page, baseURL);
-      await diagnostics.installNetworkGuard(page);
+      await diagnostics.installNetworkGuard(context);
       await use(diagnostics);
     },
     { auto: true },

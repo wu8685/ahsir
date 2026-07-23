@@ -58,6 +58,8 @@ func TestFixtureChatRejectsMalformedOrUnexpectedPayload(t *testing.T) {
 		{name: "synchronous", body: `{"message":"E2E ping","async":false,"speaker":"console","contextId":"ctx-live-01"}`},
 		{name: "wrong speaker", body: `{"message":"E2E ping","async":true,"speaker":"operator","contextId":"ctx-live-01"}`},
 		{name: "wrong context", body: `{"message":"E2E ping","async":true,"speaker":"console","contextId":"ctx-wrong"}`},
+		{name: "wrong key case", body: `{"Message":"E2E ping","async":true,"speaker":"console","contextId":"ctx-live-01"}`},
+		{name: "duplicate key", body: `{"message":"wrong","message":"E2E ping","async":true,"speaker":"console","contextId":"ctx-live-01"}`},
 		{name: "unknown field", body: `{"message":"E2E ping","async":true,"speaker":"console","contextId":"ctx-live-01","extra":true}`},
 		{name: "trailing JSON", body: `{"message":"E2E ping","async":true,"speaker":"console","contextId":"ctx-live-01"}{}`},
 	} {
