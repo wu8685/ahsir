@@ -287,10 +287,11 @@ code.inl{font-family:var(--mono);font-size:11.5px;background:var(--panel-2);bord
 .toast .dot{background:var(--green);}
 .mob{display:none;}
 @media(max-width:980px){
-  .app{grid-template-columns:1fr;grid-template-rows:1fr auto;}
+  body{display:grid;grid-template-rows:minmax(0,1fr) auto;overflow:hidden;}
+  .app{height:auto;min-height:0;grid-template-columns:minmax(0,1fr);grid-template-rows:1fr;}
   .rail,.center{grid-column:1;grid-row:1;}
   .rail{display:none;} .rail.show{display:flex;} .center.show{display:flex;} .center.hide{display:none;}
-  .mob{display:flex;grid-row:2;border-top:1px solid var(--border);background:var(--panel);}
+  .mob{display:flex;border-top:1px solid var(--border);background:var(--panel);}
   .mob button{flex:1;display:flex;flex-direction:column;align-items:center;gap:3px;padding:9px;color:var(--muted);font-size:10px;}
   .mob button.on{color:var(--accent);}
   .mob .ic{width:18px;height:18px;}

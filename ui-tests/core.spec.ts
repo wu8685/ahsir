@@ -121,6 +121,76 @@ test('desktop left rail preserves conversations and independent scrolling', asyn
   }
 });
 
+test('narrow screen switches conversations, chat, and details without overflow', async ({
+  page,
+  request,
+}) => {
+  await resetScenario(request, 'core');
+  await page.setViewportSize({ width: 800, height: 900 });
+  await page.goto('/');
+
+  const leftButton = page.locator('#mobileLeft');
+  const chatButton = page.locator('#mobileChat');
+  const detailButton = page.locator('#mobileDetail');
+  const left = page.locator('.rail.left');
+  const center = page.locator('main.center');
+  const right = page.locator('.rail.right');
+  const expectNoHorizontalOverflow = async (surface: string) => {
+    const overflow = await page.evaluate(
+      () => document.documentElement.scrollWidth - document.documentElement.clientWidth,
+    );
+    expect(overflow, `${surface} surface horizontal overflow`).toBeLessThanOrEqual(1);
+  };
+
+  await expect(page.locator('.mob')).toBeVisible();
+  await expect(leftButton).toHaveText('会话');
+  await expect(chatButton).toHaveText('聊天');
+  await expect(detailButton).toHaveText('详情');
+  await expect(center).toBeVisible();
+  await expect(left).toBeHidden();
+  await expect(right).toBeHidden();
+  await expect(leftButton).toHaveAttribute('aria-pressed', 'false');
+  await expect(chatButton).toHaveAttribute('aria-pressed', 'true');
+  await expect(detailButton).toHaveAttribute('aria-pressed', 'false');
+  await expectNoHorizontalOverflow('chat');
+
+  await detailButton.click();
+  await expect(right).toBeVisible();
+  await expect(left).toBeHidden();
+  await expect(center).toBeHidden();
+  await expect(page.locator('#detailCard')).toBeVisible();
+  await expect(page.locator('#detailCard')).toContainText('live-codex');
+  await expect(leftButton).toHaveAttribute('aria-pressed', 'false');
+  await expect(chatButton).toHaveAttribute('aria-pressed', 'false');
+  await expect(detailButton).toHaveAttribute('aria-pressed', 'true');
+  await expectNoHorizontalOverflow('detail');
+
+  await leftButton.click();
+  await expect(left).toBeVisible();
+  await expect(center).toBeHidden();
+  await expect(right).toBeHidden();
+  await expect(leftButton).toHaveAttribute('aria-pressed', 'true');
+  await expect(chatButton).toHaveAttribute('aria-pressed', 'false');
+  await expect(detailButton).toHaveAttribute('aria-pressed', 'false');
+  await expectNoHorizontalOverflow('conversations');
+
+  await chatButton.click();
+  await expect(center).toBeVisible();
+  await expect(left).toBeHidden();
+  await expect(right).toBeHidden();
+  await expect(chatButton).toHaveAttribute('aria-pressed', 'true');
+
+  await detailButton.click();
+  await expect(right).toBeVisible();
+  await expect(detailButton).toHaveAttribute('aria-pressed', 'true');
+  await chatButton.click();
+  await expect(center).toBeVisible();
+  await expect(left).toBeHidden();
+  await expect(right).toBeHidden();
+  await expect(chatButton).toHaveAttribute('aria-pressed', 'true');
+  await expectNoHorizontalOverflow('chat after repeated switching');
+});
+
 test('empty state settles without a writable composer', async ({ page, request }) => {
   await resetScenario(request, 'empty');
   await page.goto('/');

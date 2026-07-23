@@ -191,6 +191,12 @@ select.talk{appearance:none;background:var(--panel-2);border:1px solid var(--bor
   </aside>
 </div>
 
+<nav class="mob" aria-label="移动端页面导航">
+  <button id="mobileLeft" data-surface="left" aria-pressed="false">会话</button>
+  <button id="mobileChat" data-surface="center" class="on" aria-pressed="true">聊天</button>
+  <button id="mobileDetail" data-surface="right" aria-pressed="false">详情</button>
+</nav>
+
 <div class="toast" id="toast"><span class="dot"></span><span id="toastMsg"></span></div>
 <script src="/app.js"></script>
 </body>

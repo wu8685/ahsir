@@ -1618,7 +1618,27 @@
     });
   }
 
+  function showMobileSurface(surface) {
+    const left = document.querySelector(".rail.left");
+    const center = document.querySelector("main.center");
+    const right = document.querySelector(".rail.right");
+    if (!left || !center || !right) return;
+    left.classList.toggle("show", surface === "left");
+    right.classList.toggle("show", surface === "right");
+    center.classList.toggle("hide", surface !== "center");
+    center.classList.toggle("show", surface === "center");
+    document.querySelectorAll(".mob button").forEach((button) => {
+      const active = button.dataset.surface === surface;
+      button.classList.toggle("on", active);
+      button.setAttribute("aria-pressed", String(active));
+    });
+  }
+
   function init() {
+    showMobileSurface("center");
+    document.querySelectorAll(".mob button").forEach((button) => {
+      button.addEventListener("click", () => showMobileSurface(button.dataset.surface));
+    });
     initTheme();
     initComposerDrop();
     // Notifications: set the favicon, stop the flash when the tab regains focus,
