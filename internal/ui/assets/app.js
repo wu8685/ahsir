@@ -1618,7 +1618,55 @@
     });
   }
 
+  function showMobileSurface(surface) {
+    const left = document.querySelector(".rail.left");
+    const center = document.querySelector("main.center");
+    const right = document.querySelector(".rail.right");
+    const missingSurfaces = [
+      ["left", left],
+      ["center", center],
+      ["right", right],
+    ].filter(([, element]) => !element).map(([name]) => name);
+    const buttons = Array.from(document.querySelectorAll(".mob button"));
+    const resetButtons = () => buttons.forEach((button) => {
+      button.classList.remove("on");
+      button.setAttribute("aria-pressed", "false");
+    });
+    if (missingSurfaces.length === 3 && buttons.length === 0) return [];
+    if (missingSurfaces.length > 0) {
+      resetButtons();
+      throw new Error(`mobile navigation missing layout surfaces: ${missingSurfaces.join(", ")}`);
+    }
+    const expectedButtonSurfaces = ["left", "center", "right"];
+    const invalidButtonSurfaces = expectedButtonSurfaces.filter(
+      (expected) => buttons.filter((button) => button.dataset.surface === expected).length !== 1,
+    );
+    const unexpectedButtons = buttons.filter(
+      (button) => !expectedButtonSurfaces.includes(button.dataset.surface),
+    );
+    if (invalidButtonSurfaces.length > 0 || unexpectedButtons.length > 0) {
+      resetButtons();
+      throw new Error(
+        `mobile navigation requires exactly one button for: ${invalidButtonSurfaces.join(", ") || "left, center, right"}`,
+      );
+    }
+    left.classList.toggle("show", surface === "left");
+    right.classList.toggle("show", surface === "right");
+    center.classList.toggle("hide", surface !== "center");
+    center.classList.toggle("show", surface === "center");
+    buttons.forEach((button) => {
+      const active = button.dataset.surface === surface;
+      button.classList.toggle("on", active);
+      button.setAttribute("aria-pressed", String(active));
+    });
+    return buttons;
+  }
+
   function init() {
+    const mobileButtons = showMobileSurface("center");
+    mobileButtons.forEach((button) => {
+      button.addEventListener("click", () => showMobileSurface(button.dataset.surface));
+    });
     initTheme();
     initComposerDrop();
     // Notifications: set the favicon, stop the flash when the tab regains focus,

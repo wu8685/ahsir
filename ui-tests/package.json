@@ -1,0 +1,6 @@
+{
+  "name": "ahsir-ui-tests",
+  "private": true,
+  "scripts": { "test": "env -u NO_COLOR FORCE_COLOR=0 playwright test --config playwright.config.ts" },
+  "devDependencies": { "@playwright/test": "1.61.1" }
+}

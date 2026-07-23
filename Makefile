@@ -17,7 +17,7 @@ PLUGIN_SRC := plugin/src
 VERSION := $(or $(shell sed -n 's/.*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' plugin/.claude-plugin/plugin.json | head -1),dev)
 LDFLAGS := -X github.com/wu8685/ahsir/internal/version.Version=$(VERSION)
 
-.PHONY: all build plugin plugin-src clean test
+.PHONY: all build plugin plugin-src clean test test-ui-fast ui-test-deps test-ui-browser test-ui
 
 all: build
 
@@ -46,3 +46,16 @@ clean:
 # through this target (or replicate the -race flag).
 test:
 	GO111MODULE=on $(GO) test -race -count=1 ./...
+
+test-ui-fast:
+	GO111MODULE=on $(GO) test -count=1 ./internal/ui/...
+	cd $(PLUGIN_SRC) && GO111MODULE=on $(GO) test -count=1 ./internal/ui
+
+ui-test-deps:
+	npm ci --prefix ui-tests
+	npm exec --prefix ui-tests playwright install chromium
+
+test-ui-browser:
+	npm test --prefix ui-tests
+
+test-ui: test-ui-fast test-ui-browser

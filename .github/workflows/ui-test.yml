@@ -1,0 +1,38 @@
+name: UI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  ui-regression:
+    name: ui-regression
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: ui-tests/package-lock.json
+      - run: npm ci --prefix ui-tests
+      - run: make test-ui-fast
+      - run: npm exec --prefix ui-tests playwright install --with-deps chromium
+      - run: make test-ui-browser
+      - if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ui-regression-failure
+          path: |
+            ui-tests/test-results
+            ui-tests/playwright-report
+          retention-days: 7
+          if-no-files-found: ignore
