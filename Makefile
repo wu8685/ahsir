@@ -48,7 +48,7 @@ test:
 	GO111MODULE=on $(GO) test -race -count=1 ./...
 
 test-ui-fast:
-	GO111MODULE=on $(GO) test -count=1 ./internal/ui
+	GO111MODULE=on $(GO) test -count=1 ./internal/ui/...
 	cd $(PLUGIN_SRC) && GO111MODULE=on $(GO) test -count=1 ./internal/ui
 
 ui-test-deps:

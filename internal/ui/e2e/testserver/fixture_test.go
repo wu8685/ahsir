@@ -32,7 +32,9 @@ func TestFixtureChatCompletes(t *testing.T) {
 	f := newFixture()
 	w := httptest.NewRecorder()
 	f.schedulerHandler().ServeHTTP(w, httptest.NewRequest(
-		http.MethodPost, "/agents/live-codex/chat", strings.NewReader(`{"message":"E2E ping"}`),
+		http.MethodPost,
+		"/agents/live-codex/chat",
+		strings.NewReader(`{"message":"E2E ping","async":true,"speaker":"console","contextId":"ctx-live-01"}`),
 	))
 	if w.Code != http.StatusAccepted || !strings.Contains(w.Body.String(), "task-live-01") {
 		t.Fatalf("chat = %d %s", w.Code, w.Body.String())
@@ -41,6 +43,53 @@ func TestFixtureChatCompletes(t *testing.T) {
 	f.schedulerHandler().ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/agents/live-codex/tasks/task-live-01", nil))
 	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), "E2E fixed reply") {
 		t.Fatalf("task = %d %s", w.Code, w.Body.String())
+	}
+}
+
+func TestFixtureChatRejectsMalformedOrUnexpectedPayload(t *testing.T) {
+	f := newFixture()
+	for _, tc := range []struct {
+		name string
+		body string
+	}{
+		{name: "malformed JSON", body: `{"message":`},
+		{name: "missing fields", body: `{"message":"E2E ping"}`},
+		{name: "wrong message", body: `{"message":"wrong","async":true,"speaker":"console","contextId":"ctx-live-01"}`},
+		{name: "synchronous", body: `{"message":"E2E ping","async":false,"speaker":"console","contextId":"ctx-live-01"}`},
+		{name: "wrong speaker", body: `{"message":"E2E ping","async":true,"speaker":"operator","contextId":"ctx-live-01"}`},
+		{name: "wrong context", body: `{"message":"E2E ping","async":true,"speaker":"console","contextId":"ctx-wrong"}`},
+		{name: "unknown field", body: `{"message":"E2E ping","async":true,"speaker":"console","contextId":"ctx-live-01","extra":true}`},
+		{name: "trailing JSON", body: `{"message":"E2E ping","async":true,"speaker":"console","contextId":"ctx-live-01"}{}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			w := httptest.NewRecorder()
+			f.schedulerHandler().ServeHTTP(w, httptest.NewRequest(
+				http.MethodPost, "/agents/live-codex/chat", strings.NewReader(tc.body),
+			))
+			if w.Code != http.StatusBadRequest {
+				t.Fatalf("chat status = %d, want %d; body = %s", w.Code, http.StatusBadRequest, w.Body.String())
+			}
+		})
+	}
+}
+
+func TestFixtureArchivedHistoryMatchesExactContext(t *testing.T) {
+	f := newFixture()
+
+	w := httptest.NewRecorder()
+	f.schedulerHandler().ServeHTTP(w, httptest.NewRequest(
+		http.MethodGet, "/agents/archived-kimi/history/ctx-archived-01", nil,
+	))
+	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), "Archived retained reply") {
+		t.Fatalf("retained history = %d %s", w.Code, w.Body.String())
+	}
+
+	w = httptest.NewRecorder()
+	f.schedulerHandler().ServeHTTP(w, httptest.NewRequest(
+		http.MethodGet, "/agents/archived-kimi/history/ctx-archived-02", nil,
+	))
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("unexpected archived context status = %d, want %d", w.Code, http.StatusNotFound)
 	}
 }
 

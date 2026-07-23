@@ -22,6 +22,12 @@ type RequestFailure = {
   url: string;
 };
 
+type ExternalRequest = {
+  method: string;
+  resourceType: string;
+  url: string;
+};
+
 export async function resetScenario(request: APIRequestContext, scenario: string) {
   const response = await request.post(`/__test/reset?scenario=${encodeURIComponent(scenario)}`);
   expect(response.status()).toBe(204);
@@ -30,6 +36,7 @@ export async function resetScenario(request: APIRequestContext, scenario: string
 export class BrowserDiagnostics {
   private readonly allowedFailedResponses = new Set<string>();
   private readonly consoleErrors: ConsoleError[] = [];
+  private readonly externalRequests: ExternalRequest[] = [];
   private readonly failedResponses: FailedResponse[] = [];
   private readonly pageErrors: string[] = [];
   private readonly requestFailures: RequestFailure[] = [];
@@ -59,6 +66,23 @@ export class BrowserDiagnostics {
     });
   }
 
+  async installNetworkGuard(page: Page) {
+    const allowedOrigin = new URL(this.baseURL).origin;
+    await page.route(/^https?:\/\//, async route => {
+      const request = route.request();
+      if (new URL(request.url()).origin === allowedOrigin) {
+        await route.continue();
+        return;
+      }
+      this.externalRequests.push({
+        method: request.method(),
+        resourceType: request.resourceType(),
+        url: request.url(),
+      });
+      await route.abort('blockedbyclient');
+    });
+  }
+
   allowFailedResponse(path: string, status: number) {
     this.allowedFailedResponses.add(responseKey(new URL(path, this.baseURL).href, status));
   }
@@ -67,6 +91,7 @@ export class BrowserDiagnostics {
     return {
       allowedFailedResponses: [...this.allowedFailedResponses].sort(),
       consoleErrors: this.consoleErrors,
+      externalRequests: this.externalRequests,
       failedResponses: this.failedResponses,
       pageErrors: this.pageErrors,
       requestFailures: this.requestFailures,
@@ -76,11 +101,18 @@ export class BrowserDiagnostics {
   unexpectedErrors() {
     const errors = [
       ...this.pageErrors.map(error => `pageerror: ${error}`),
-      ...this.requestFailures.map(
-        failure => `requestfailed: ${failure.url}: ${failure.errorText}`,
+      ...this.externalRequests.map(
+        request =>
+          `external HTTP(S) request blocked: ${request.method} ${request.url} (${request.resourceType})`,
       ),
+      ...this.requestFailures
+        .filter(failure => !this.isBlockedExternalURL(failure.url))
+        .map(failure => `requestfailed: ${failure.url}: ${failure.errorText}`),
       ...this.failedResponses
-        .filter(response => !this.isAllowedResponse(response))
+        .filter(
+          response =>
+            !this.isBlockedExternalURL(response.url) && !this.isAllowedResponse(response),
+        )
         .map(response => `response: ${response.status} ${response.url}`),
       ...this.consoleErrors
         .filter(error => !this.isExpectedResourceError(error))
@@ -95,11 +127,16 @@ export class BrowserDiagnostics {
 
   private isExpectedResourceError(error: ConsoleError) {
     if (!error.text.startsWith('Failed to load resource:')) return false;
+    if (this.isBlockedExternalURL(error.locationURL)) return true;
     return this.failedResponses.some(
       response =>
         response.url === error.locationURL &&
         this.isAllowedResponse(response),
     );
+  }
+
+  private isBlockedExternalURL(url: string) {
+    return this.externalRequests.some(request => request.url === url);
   }
 }
 
@@ -116,10 +153,15 @@ type DiagnosticsFixtures = {
 };
 
 export const test = base.extend<DiagnosticsFixtures>({
-  browserDiagnostics: async ({ baseURL, page }, use) => {
-    if (!baseURL) throw new Error('Playwright baseURL is required for browser diagnostics');
-    await use(collectPageErrors(page, baseURL));
-  },
+  browserDiagnostics: [
+    async ({ baseURL, page }, use) => {
+      if (!baseURL) throw new Error('Playwright baseURL is required for browser diagnostics');
+      const diagnostics = collectPageErrors(page, baseURL);
+      await diagnostics.installNetworkGuard(page);
+      await use(diagnostics);
+    },
+    { auto: true },
+  ],
 });
 
 test.afterEach(async ({ browserDiagnostics }, testInfo) => {

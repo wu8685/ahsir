@@ -48,6 +48,9 @@
 **Interfaces:**
 - Consumes: canonical files below `internal/ui/assets/`.
 - Produces: `TestPluginAssetsMatchCanonical`, which fails on missing, extra, or byte-different regular files.
+- Resolves the full checkout from canonical or copied-plugin package directories
+  using `go.mod`, `internal/ui/assets`, and `plugin/.claude-plugin/plugin.json`
+  markers; standalone plugin source modules skip explicitly.
 
 - [ ] **Step 1: Write the failing parity test**
 
@@ -80,9 +83,40 @@ func regularFiles(t *testing.T, root string) []string {
 	return names
 }
 
+func findFullRepositoryRoot(start string) (string, bool) {
+	candidate, err := filepath.Abs(start)
+	if err != nil { return "", false }
+	for {
+		if isRegularFile(filepath.Join(candidate, "go.mod")) &&
+			isDirectory(filepath.Join(candidate, "internal", "ui", "assets")) &&
+			isRegularFile(filepath.Join(candidate, "plugin", ".claude-plugin", "plugin.json")) {
+			return candidate, true
+		}
+		parent := filepath.Dir(candidate)
+		if parent == candidate { return "", false }
+		candidate = parent
+	}
+}
+
+func isRegularFile(path string) bool {
+	info, err := os.Stat(path)
+	return err == nil && info.Mode().IsRegular()
+}
+
+func isDirectory(path string) bool {
+	info, err := os.Stat(path)
+	return err == nil && info.IsDir()
+}
+
 func TestPluginAssetsMatchCanonical(t *testing.T) {
-	canonical := "assets"
-	mirror := filepath.Join("..", "..", "plugin", "src", "internal", "ui", "assets")
+	workingDirectory, err := os.Getwd()
+	if err != nil { t.Fatalf("get working directory: %v", err) }
+	repositoryRoot, ok := findFullRepositoryRoot(workingDirectory)
+	if !ok {
+		t.Skip("asset parity requires the full ahsir repository; standalone plugin source has no canonical asset tree")
+	}
+	canonical := filepath.Join(repositoryRoot, "internal", "ui", "assets")
+	mirror := filepath.Join(repositoryRoot, "plugin", "src", "internal", "ui", "assets")
 	want, got := regularFiles(t, canonical), regularFiles(t, mirror)
 	if !reflect.DeepEqual(got, want) { t.Fatalf("asset names = %v, want %v", got, want) }
 	for _, name := range want {
@@ -110,11 +144,16 @@ cp internal/ui/assets/app.css plugin/src/internal/ui/assets/app.css
 cp internal/ui/assets/index.html plugin/src/internal/ui/assets/index.html
 ```
 
-- [ ] **Step 4: Verify green in both Go modules**
+- [ ] **Step 4: Verify green in root, copied-plugin, and standalone contexts**
 
-Run: `go test ./internal/ui -count=1 && (cd plugin/src && go test ./internal/ui -count=1)`
+Run: `go test ./internal/ui -count=1 && (cd plugin/src && go test ./internal/ui -count=1)`.
+Temporarily copy only `assets_parity_test.go` into `plugin/src/internal/ui`, run
+the focused parity tests from `plugin/src`, and remove that one file. Also run a
+compiled focused test from a temporary standalone `internal/ui` tree.
 
-Expected: both packages PASS; the existing Node participant suite prints `participant selection regression tests passed` when Node is installed.
+Expected: both packages and the copied-plugin context PASS; the standalone run
+prints the explicit canonical-tree skip reason and exits successfully. No broad
+plugin bundle diff remains.
 
 - [ ] **Step 5: Commit the parity contract**
 
@@ -165,7 +204,8 @@ func TestFixtureChatCompletes(t *testing.T) {
 	f := newFixture()
 	w := httptest.NewRecorder()
 	f.schedulerHandler().ServeHTTP(w, httptest.NewRequest(
-		http.MethodPost, "/agents/live-codex/chat", strings.NewReader(`{"message":"E2E ping"}`),
+		http.MethodPost, "/agents/live-codex/chat",
+		strings.NewReader(`{"message":"E2E ping","async":true,"speaker":"console","contextId":"ctx-live-01"}`),
 	))
 	if w.Code != http.StatusAccepted || !strings.Contains(w.Body.String(), "task-live-01") {
 		t.Fatalf("chat = %d %s", w.Code, w.Body.String())
@@ -174,6 +214,33 @@ func TestFixtureChatCompletes(t *testing.T) {
 	f.schedulerHandler().ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/agents/live-codex/tasks/task-live-01", nil))
 	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), "E2E fixed reply") {
 		t.Fatalf("task = %d %s", w.Code, w.Body.String())
+	}
+}
+
+func TestFixtureChatRejectsMalformedOrUnexpectedPayload(t *testing.T) {
+	f := newFixture()
+	for _, body := range []string{
+		`{"message":`,
+		`{"message":"E2E ping"}`,
+		`{"message":"E2E ping","async":true,"speaker":"console","contextId":"ctx-wrong"}`,
+	} {
+		w := httptest.NewRecorder()
+		f.schedulerHandler().ServeHTTP(w, httptest.NewRequest(
+			http.MethodPost, "/agents/live-codex/chat", strings.NewReader(body),
+		))
+		if w.Code != http.StatusBadRequest { t.Fatalf("chat status = %d", w.Code) }
+	}
+}
+
+func TestFixtureArchivedHistoryMatchesExactContext(t *testing.T) {
+	f := newFixture()
+	for _, tc := range []struct{ path string; want int }{
+		{path: "/agents/archived-kimi/history/ctx-archived-01", want: http.StatusOK},
+		{path: "/agents/archived-kimi/history/ctx-archived-02", want: http.StatusNotFound},
+	} {
+		w := httptest.NewRecorder()
+		f.schedulerHandler().ServeHTTP(w, httptest.NewRequest(http.MethodGet, tc.path, nil))
+		if w.Code != tc.want { t.Fatalf("GET %s = %d, want %d", tc.path, w.Code, tc.want) }
 	}
 }
 
@@ -291,7 +358,7 @@ func (f *fixture) schedulerHandler() http.Handler {
 			writeFixtureJSON(w, 200, liveHistory)
 		case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/agents/live-codex/history/"):
 			writeFixtureJSON(w, 200, []any{})
-		case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/agents/archived-kimi/history/"):
+		case r.Method == http.MethodGet && r.URL.Path == "/agents/archived-kimi/history/ctx-archived-01":
 			writeFixtureJSON(w, 200, []map[string]any{{
 				"turn": 1, "speaker": "operator", "userText": "Archived retained question",
 				"reply": "Archived retained reply", "status": "completed",
@@ -300,6 +367,10 @@ func (f *fixture) schedulerHandler() http.Handler {
 		case r.Method == http.MethodGet && r.URL.Path == "/agents/live-codex/config":
 			writeFixtureJSON(w, 200, map[string]string{"path": "/tmp/e2e/agent-card.yaml", "yaml": "name: live-codex"})
 		case r.Method == http.MethodPost && r.URL.Path == "/agents/live-codex/chat":
+			if err := validateFixtureChatRequest(r); err != nil {
+				http.Error(w, "invalid fixture chat request: "+err.Error(), http.StatusBadRequest)
+				return
+			}
 			writeFixtureJSON(w, http.StatusAccepted, map[string]string{"taskId": "task-live-01", "contextId": "ctx-live-01"})
 		case r.Method == http.MethodGet && r.URL.Path == "/agents/live-codex/tasks/task-live-01":
 			writeFixtureJSON(w, 200, map[string]any{
@@ -313,6 +384,9 @@ func (f *fixture) schedulerHandler() http.Handler {
 }
 ```
 
+`validateFixtureChatRequest` uses `json.Decoder` with
+`DisallowUnknownFields`, rejects malformed or trailing JSON, and accepts only
+`{"message":"E2E ping","async":true,"speaker":"console","contextId":"ctx-live-01"}`.
 `writeFixtureJSON` sets `Content-Type: application/json`, writes the status,
 and encodes the value. `currentScenario` and `setScenario` must hold `mu.RLock`
 and `mu.Lock`, respectively. The control handler returns 405 for non-POST
@@ -451,6 +525,12 @@ type RequestFailure = {
   url: string;
 };
 
+type ExternalRequest = {
+  method: string;
+  resourceType: string;
+  url: string;
+};
+
 export async function resetScenario(request: APIRequestContext, scenario: string) {
   const response = await request.post(`/__test/reset?scenario=${encodeURIComponent(scenario)}`);
   expect(response.status()).toBe(204);
@@ -459,6 +539,7 @@ export async function resetScenario(request: APIRequestContext, scenario: string
 export class BrowserDiagnostics {
   private readonly allowedFailedResponses = new Set<string>();
   private readonly consoleErrors: ConsoleError[] = [];
+  private readonly externalRequests: ExternalRequest[] = [];
   private readonly failedResponses: FailedResponse[] = [];
   private readonly pageErrors: string[] = [];
   private readonly requestFailures: RequestFailure[] = [];
@@ -488,6 +569,21 @@ export class BrowserDiagnostics {
     });
   }
 
+  async installNetworkGuard(page: Page) {
+    const allowedOrigin = new URL(this.baseURL).origin;
+    await page.route(/^https?:\/\//, async route => {
+      const request = route.request();
+      if (new URL(request.url()).origin === allowedOrigin) {
+        await route.continue();
+        return;
+      }
+      this.externalRequests.push({
+        method: request.method(), resourceType: request.resourceType(), url: request.url(),
+      });
+      await route.abort('blockedbyclient');
+    });
+  }
+
   allowFailedResponse(path: string, status: number) {
     this.allowedFailedResponses.add(responseKey(new URL(path, this.baseURL).href, status));
   }
@@ -496,6 +592,7 @@ export class BrowserDiagnostics {
     return {
       allowedFailedResponses: [...this.allowedFailedResponses].sort(),
       consoleErrors: this.consoleErrors,
+      externalRequests: this.externalRequests,
       failedResponses: this.failedResponses,
       pageErrors: this.pageErrors,
       requestFailures: this.requestFailures,
@@ -505,11 +602,14 @@ export class BrowserDiagnostics {
   unexpectedErrors() {
     const errors = [
       ...this.pageErrors.map(error => `pageerror: ${error}`),
-      ...this.requestFailures.map(
+      ...this.externalRequests.map(
+        request => `external HTTP(S) request blocked: ${request.method} ${request.url} (${request.resourceType})`,
+      ),
+      ...this.requestFailures.filter(failure => !this.isBlockedExternalURL(failure.url)).map(
         failure => `requestfailed: ${failure.url}: ${failure.errorText}`,
       ),
       ...this.failedResponses
-        .filter(response => !this.isAllowedResponse(response))
+        .filter(response => !this.isBlockedExternalURL(response.url) && !this.isAllowedResponse(response))
         .map(response => `response: ${response.status} ${response.url}`),
       ...this.consoleErrors
         .filter(error => !this.isExpectedResourceError(error))
@@ -524,11 +624,16 @@ export class BrowserDiagnostics {
 
   private isExpectedResourceError(error: ConsoleError) {
     if (!error.text.startsWith('Failed to load resource:')) return false;
+    if (this.isBlockedExternalURL(error.locationURL)) return true;
     return this.failedResponses.some(
       response =>
         response.url === error.locationURL &&
         this.isAllowedResponse(response),
     );
+  }
+
+  private isBlockedExternalURL(url: string) {
+    return this.externalRequests.some(request => request.url === url);
   }
 }
 
@@ -545,10 +650,15 @@ type DiagnosticsFixtures = {
 };
 
 export const test = base.extend<DiagnosticsFixtures>({
-  browserDiagnostics: async ({ baseURL, page }, use) => {
-    if (!baseURL) throw new Error('Playwright baseURL is required for browser diagnostics');
-    await use(collectPageErrors(page, baseURL));
-  },
+  browserDiagnostics: [
+    async ({ baseURL, page }, use) => {
+      if (!baseURL) throw new Error('Playwright baseURL is required for browser diagnostics');
+      const diagnostics = collectPageErrors(page, baseURL);
+      await diagnostics.installNetworkGuard(page);
+      await use(diagnostics);
+    },
+    { auto: true },
+  ],
 });
 
 test.afterEach(async ({ browserDiagnostics }, testInfo) => {
@@ -567,6 +677,13 @@ test.afterEach(async ({ browserDiagnostics }, testInfo) => {
 export { expect };
 ```
 
+The automatic fixture must install both listeners and the HTTP(S) route guard
+before each test body. The guard permits only the configured `baseURL` origin,
+does not match `data:` or `blob:`, and turns every other HTTP(S) request into one
+deduplicated diagnostics failure. Prove sensitivity with temporary expected-
+failure probes for `console.error`, an asynchronous page throw, and a loopback
+cross-origin request; restore the probes before committing.
+
 - [ ] **Step 4: Write initial, empty, and error cases before installing Chromium**
 
 ```ts
@@ -580,6 +697,13 @@ test('core page settles with all primary rails', async ({ page, request }) => {
   await expect(page.locator('#rooms .sess')).toHaveCount(14);
   await expect(page.locator('#archived .sess')).toHaveCount(8);
   await expect(page.locator('#contexts')).not.toContainText('加载中…');
+  const schemes = await page.evaluate(async () => {
+    const data = await (await fetch('data:text/plain,data-ok')).text();
+    const url = URL.createObjectURL(new Blob(['blob-ok']));
+    try { return { blob: await (await fetch(url)).text(), data }; }
+    finally { URL.revokeObjectURL(url); }
+  });
+  expect(schemes).toEqual({ blob: 'blob-ok', data: 'data-ok' });
 });
 
 test('empty state settles without a writable composer', async ({ page, request }) => {
@@ -587,6 +711,12 @@ test('empty state settles without a writable composer', async ({ page, request }
   await page.goto('/');
   await expect(page.locator('#schedLabel')).toHaveText('scheduler · 0 agents');
   await expect(page.locator('#contexts')).toContainText('还没有对话');
+  await expect(page.locator('#contexts .sess')).toHaveCount(0);
+  await expect(page.locator('#rooms .sess')).toHaveCount(0);
+  await expect(page.locator('#archived .sess')).toHaveCount(0);
+  await expect(page.locator('#agentSel option')).toHaveCount(0);
+  await expect(page.locator('#ta')).toBeDisabled();
+  await expect(page.locator('#ta')).toHaveJSProperty('readOnly', true);
   await expect(page.locator('#sendBtn')).toBeDisabled();
 });
 
@@ -653,7 +783,10 @@ test('live participant details and chat remain usable', async ({ page, request }
   await page.locator('#ta').fill('E2E ping');
   const chat = page.waitForRequest(r => r.url().endsWith('/api/agents/live-codex/chat') && r.method() === 'POST');
   await page.locator('#sendBtn').click();
-  await chat;
+  const chatRequest = await chat;
+  expect(chatRequest.postDataJSON()).toEqual({
+    message: 'E2E ping', async: true, speaker: 'console', contextId: 'ctx-live-01',
+  });
   await expect(page.locator('#thread')).toContainText('E2E fixed reply');
 });
 
@@ -662,12 +795,23 @@ test('archived participant is detailed but read-only', async ({ page, request })
   await page.goto('/');
   let chatRequests = 0;
   page.on('request', r => { if (/\/api\/agents\/.*\/chat$/.test(r.url())) chatRequests++; });
+  const history = page.waitForResponse(response =>
+    response.request().method() === 'GET' &&
+    new URL(response.url()).pathname === '/api/agents/archived-kimi/history/ctx-archived-01'
+  );
   await page.locator('#archived .sess', { hasText: 'Archived core context' }).click();
+  const historyResponse = await history;
+  expect(historyResponse.status()).toBe(200);
+  expect(new URL(historyResponse.url()).pathname).toBe(
+    '/api/agents/archived-kimi/history/ctx-archived-01',
+  );
   await expect(page.locator('#detailCard')).toContainText('archived-kimi');
   await expect(page.locator('#detailCard')).toContainText('已归档 · 只读');
   await expect(page.locator('#detailCard')).not.toContainText('选择一个 agent 查看详情');
   await expect(page.locator('#thread')).toContainText('Archived retained reply');
+  await expect(page.locator('#agentSel')).toHaveValue('');
   await expect(page.locator('#ta')).toBeDisabled();
+  await expect(page.locator('#ta')).toHaveJSProperty('readOnly', true);
   await expect(page.locator('#sendBtn')).toBeDisabled();
   await page.waitForTimeout(100);
   expect(chatRequests).toBe(0);
@@ -772,16 +916,26 @@ test('narrow screen switches conversations, chat, and details without overflow',
   await resetScenario(request, 'core');
   await page.setViewportSize({ width: 800, height: 900 });
   await page.goto('/');
-  await expect(page.locator('.mob')).toBeVisible();
-  await expect(page.locator('main.center')).toBeVisible();
-  await page.locator('#mobileDetail').click();
+  const navigation = page.getByRole('navigation', { name: '移动端页面导航' });
+  const chat = page.locator('main.center');
+  await expect(navigation).toBeVisible();
+  await expect(chat).toBeVisible();
+  await expect(page.locator('#ta')).toBeEditable();
+  await expect(page.locator('#sendBtn')).toBeEnabled();
+  const [chatBox, navigationBox] = await Promise.all([chat.boundingBox(), navigation.boundingBox()]);
+  expect(chatBox).not.toBeNull();
+  expect(navigationBox).not.toBeNull();
+  if (chatBox && navigationBox) {
+    expect(chatBox.y + chatBox.height).toBeLessThanOrEqual(navigationBox.y + 1);
+  }
+  await navigation.getByRole('button', { name: '详情', exact: true }).click();
   await expect(page.locator('.rail.right')).toBeVisible();
   await expect(page.locator('#detailCard')).toBeVisible();
   await expect(page.locator('#detailCard')).toContainText('live-codex');
-  await page.locator('#mobileLeft').click();
+  await navigation.getByRole('button', { name: '会话', exact: true }).click();
   await expect(page.locator('.rail.left')).toBeVisible();
-  await page.locator('#mobileChat').click();
-  await expect(page.locator('main.center')).toBeVisible();
+  await navigation.getByRole('button', { name: '聊天', exact: true }).click();
+  await expect(chat).toBeVisible();
   const overflow = await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth);
   expect(overflow).toBeLessThanOrEqual(1);
 });
@@ -868,7 +1022,7 @@ git commit -m "fix: add narrow-screen UI navigation"
 .PHONY: all build plugin plugin-src clean test test-ui-fast ui-test-deps test-ui-browser test-ui
 
 test-ui-fast:
-	GO111MODULE=on $(GO) test -count=1 ./internal/ui
+	GO111MODULE=on $(GO) test -count=1 ./internal/ui/...
 	cd $(PLUGIN_SRC) && GO111MODULE=on $(GO) test -count=1 ./internal/ui
 
 ui-test-deps:
@@ -885,7 +1039,9 @@ test-ui: test-ui-fast test-ui-browser
 
 Run: `make test-ui-fast && make test-ui-browser`
 
-Expected: root and plugin Go packages PASS and all Chromium cases pass.
+Expected: both root UI packages (`internal/ui` and
+`internal/ui/e2e/testserver`), the plugin UI package, and all Chromium cases
+PASS.
 
 - [ ] **Step 3: Add the PR and main workflow**
 

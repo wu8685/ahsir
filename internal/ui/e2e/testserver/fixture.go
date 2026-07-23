@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"strings"
 	"sync"
@@ -26,6 +27,17 @@ var liveHistory = []map[string]any{{
 	"reply": "Existing core reply", "status": "completed",
 	"ts": "2026-07-23T02:00:01Z", "durationMs": 1000,
 }}
+
+type fixtureChatRequest struct {
+	Message   string `json:"message"`
+	Async     bool   `json:"async"`
+	Speaker   string `json:"speaker"`
+	ContextID string `json:"contextId"`
+}
+
+var expectedFixtureChatRequest = fixtureChatRequest{
+	Message: "E2E ping", Async: true, Speaker: "console", ContextID: "ctx-live-01",
+}
 
 func coreInvocations() []map[string]any {
 	rows := make([]map[string]any, 0, 18)
@@ -152,7 +164,7 @@ func (f *fixture) schedulerHandler() http.Handler {
 			writeFixtureJSON(w, http.StatusOK, liveHistory)
 		case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/agents/live-codex/history/"):
 			writeFixtureJSON(w, http.StatusOK, []any{})
-		case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/agents/archived-kimi/history/"):
+		case r.Method == http.MethodGet && r.URL.Path == "/agents/archived-kimi/history/ctx-archived-01":
 			writeFixtureJSON(w, http.StatusOK, []map[string]any{{
 				"turn": 1, "speaker": "operator", "userText": "Archived retained question",
 				"reply": "Archived retained reply", "status": "completed",
@@ -161,6 +173,10 @@ func (f *fixture) schedulerHandler() http.Handler {
 		case r.Method == http.MethodGet && r.URL.Path == "/agents/live-codex/config":
 			writeFixtureJSON(w, http.StatusOK, map[string]string{"path": "/tmp/e2e/agent-card.yaml", "yaml": "name: live-codex"})
 		case r.Method == http.MethodPost && r.URL.Path == "/agents/live-codex/chat":
+			if err := validateFixtureChatRequest(r); err != nil {
+				http.Error(w, "invalid fixture chat request: "+err.Error(), http.StatusBadRequest)
+				return
+			}
 			writeFixtureJSON(w, http.StatusAccepted, map[string]string{"taskId": "task-live-01", "contextId": "ctx-live-01"})
 		case r.Method == http.MethodGet && r.URL.Path == "/agents/live-codex/tasks/task-live-01":
 			writeFixtureJSON(w, http.StatusOK, map[string]any{
@@ -171,6 +187,26 @@ func (f *fixture) schedulerHandler() http.Handler {
 			http.NotFound(w, r)
 		}
 	})
+}
+
+func validateFixtureChatRequest(r *http.Request) error {
+	decoder := json.NewDecoder(r.Body)
+	decoder.DisallowUnknownFields()
+	var got fixtureChatRequest
+	if err := decoder.Decode(&got); err != nil {
+		return fmt.Errorf("decode JSON: %w", err)
+	}
+	var trailing any
+	if err := decoder.Decode(&trailing); err != io.EOF {
+		if err == nil {
+			return fmt.Errorf("multiple JSON values")
+		}
+		return fmt.Errorf("decode trailing JSON: %w", err)
+	}
+	if got != expectedFixtureChatRequest {
+		return fmt.Errorf("payload = %#v, want %#v", got, expectedFixtureChatRequest)
+	}
+	return nil
 }
 
 func writeFixtureJSON(w http.ResponseWriter, status int, value any) {

@@ -74,7 +74,11 @@ The fast layer remains part of the Go test surface:
   `internal/ui/assets/` with the corresponding file under
   `plugin/src/internal/ui/assets/`, and fails on missing, extra, or different
   files;
-- root and plugin UI Go packages are both executed by the fast UI target.
+- the parity test locates the full repository from either the canonical package
+  or a `make plugin-src`-copied package; a genuinely standalone plugin source
+  module skips with an explicit reason because its canonical tree is absent;
+- every root UI subpackage, including `internal/ui/e2e/testserver`, and the
+  plugin UI package are executed by the fast UI target.
 
 `internal/ui/assets/` is the canonical source. `plugin/src/internal/ui/assets/`
 is a release mirror. The parity test is the enforcement mechanism; it does not
@@ -113,8 +117,12 @@ The fixture server provides deterministic scenarios:
   scrolling in the left rail;
 - one completed live transcript and one archived transcript;
 - deterministic invocation records for the selected context;
-- a successful chat submission that transitions from accepted to completed and
-  yields a fixed reply.
+- retained archived history only at
+  `GET /agents/archived-kimi/history/ctx-archived-01`;
+- a successful chat submission whose JSON body is exactly `message: "E2E ping"`,
+  `async: true`, `speaker: "console"`, and `contextId: "ctx-live-01"`; malformed
+  or different payloads return HTTP 400 before the accepted/completed sequence
+  yields the fixed reply.
 
 ### `empty`
 
@@ -148,7 +156,8 @@ After opening the live context and selecting its participant:
 - the detail card shows the live agent's name, endpoint, version, and
   description;
 - the composer and send button are enabled;
-- submitting a fixed message calls the live-agent chat route;
+- submitting a fixed message calls the live-agent chat route with the exact
+  deterministic JSON body from Section 5;
 - the accepted/completed sequence renders the fixed reply;
 - the page emits no uncaught error.
 
@@ -158,7 +167,8 @@ After opening the archived context and selecting its participant:
 
 - the detail card contains `已归档 · 只读` and does not contain the unselected
   placeholder;
-- the archived transcript remains visible;
+- the browser requests the exact retained-history path and the archived
+  transcript remains visible;
 - the agent select has no active send target;
 - the composer is read-only or disabled and the send button is disabled;
 - no chat request is emitted for the archived agent.
@@ -181,7 +191,8 @@ Assertions use computed geometry and scroll metrics, not screenshots.
 At a narrow viewport of 800×900:
 
 - the mobile navigation is visible;
-- the initial center/chat surface is usable;
+- the initial center/chat surface, textarea, and send button are usable and
+  remain above the bottom navigation rather than being clipped or overlapped;
 - switching to the details surface reveals the selected participant and detail
   card without horizontal page overflow;
 - switching back restores the chat surface.
@@ -196,7 +207,8 @@ behavior.
 For `empty`:
 
 - counts settle at zero;
-- the composer stays disabled when no live target exists;
+- rooms, archived rows, conversation rows, and agent options remain empty;
+- the composer stays disabled and read-only when no live target exists;
 - no loading placeholder remains indefinitely;
 - no uncaught page error is emitted.
 
@@ -212,6 +224,13 @@ Tests assert semantic text, enabled/disabled state, network effects, visibility,
 computed geometry, and scrollability. They must prefer stable IDs and existing
 DOM contracts over CSS ancestry or positional selectors.
 
+An automatic Playwright fixture installs console and page-error listeners plus
+an HTTP(S) route guard before every test body. Requests to the configured
+`baseURL` origin continue normally; every other HTTP(S) request is recorded,
+blocked before network I/O, and fails diagnostics. `data:` and `blob:` URLs are
+outside that guard. Expected scheduler-error responses use exact URL/status
+allowlist entries rather than broad error suppression.
+
 The suite does not compare golden screenshots. On failure, Playwright retains:
 
 - a screenshot;
@@ -226,7 +245,8 @@ do not upload browser artifacts.
 
 The Makefile will expose:
 
-- `make test-ui-fast`: run root UI Go tests and plugin UI Go tests;
+- `make test-ui-fast`: run all root UI Go subpackages and the plugin UI Go
+  package;
 - `make ui-test-deps`: install the pinned Node dependencies and Chromium needed
   by the browser suite;
 - `make test-ui-browser`: run the Playwright core suite, assuming dependencies
@@ -261,6 +281,8 @@ exists; it is not hidden inside test code.
 - browser tests use one worker and retry once only in CI, retaining the first
   failure trace;
 - the suite must not read environment secrets or make external network calls;
+  its automatic HTTP(S) route guard must block and report every origin other
+  than the configured fixture origin before navigation or application code;
 - the fixture binds to `127.0.0.1:19809`; Playwright owns its lifecycle with
   `reuseExistingServer: false` and reports a clear startup error if the port is
   already occupied;

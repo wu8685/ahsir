@@ -39,6 +39,17 @@ test('core page settles with all primary rails', async ({ page, request }) => {
   await expect(page.locator('#rooms .sess')).toHaveCount(14);
   await expect(page.locator('#archived .sess')).toHaveCount(8);
   await expect(page.locator('#contexts')).not.toContainText('加载中…');
+  const localSchemeBodies = await page.evaluate(async () => {
+    const dataBody = await (await fetch('data:text/plain,data-ok')).text();
+    const blobURL = URL.createObjectURL(new Blob(['blob-ok'], { type: 'text/plain' }));
+    try {
+      const blobBody = await (await fetch(blobURL)).text();
+      return { blobBody, dataBody };
+    } finally {
+      URL.revokeObjectURL(blobURL);
+    }
+  });
+  expect(localSchemeBodies).toEqual({ blobBody: 'blob-ok', dataBody: 'data-ok' });
 });
 
 test('desktop left rail preserves conversations and independent scrolling', async ({ page, request }) => {
@@ -129,12 +140,31 @@ test('narrow screen switches conversations, chat, and details without overflow',
   await page.setViewportSize({ width: 800, height: 900 });
   await page.goto('/');
 
-  const leftButton = page.locator('#mobileLeft');
-  const chatButton = page.locator('#mobileChat');
-  const detailButton = page.locator('#mobileDetail');
+  const mobileNavigation = page.getByRole('navigation', { name: '移动端页面导航' });
+  const leftButton = mobileNavigation.getByRole('button', { name: '会话', exact: true });
+  const chatButton = mobileNavigation.getByRole('button', { name: '聊天', exact: true });
+  const detailButton = mobileNavigation.getByRole('button', { name: '详情', exact: true });
   const left = page.locator('.rail.left');
   const center = page.locator('main.center');
   const right = page.locator('.rail.right');
+  const textarea = page.locator('#ta');
+  const sendButton = page.locator('#sendBtn');
+  const expectSurfaceAboveNavigation = async (surface: typeof center, surfaceName: string) => {
+    const [surfaceBox, navigationBox] = await Promise.all([
+      surface.boundingBox(),
+      mobileNavigation.boundingBox(),
+    ]);
+    expect(surfaceBox, `${surfaceName} surface bounding box`).not.toBeNull();
+    expect(navigationBox, 'mobile navigation bounding box').not.toBeNull();
+    if (!surfaceBox || !navigationBox) return;
+    expect(surfaceBox.y, `${surfaceName} surface top`).toBeGreaterThanOrEqual(-1);
+    expect(surfaceBox.y + surfaceBox.height, `${surfaceName} surface bottom`).toBeLessThanOrEqual(
+      navigationBox.y + 1,
+    );
+    expect(navigationBox.y + navigationBox.height, 'mobile navigation bottom').toBeLessThanOrEqual(
+      901,
+    );
+  };
   const expectNoHorizontalOverflow = async (surface: string) => {
     const overflow = await page.evaluate(
       () => document.documentElement.scrollWidth - document.documentElement.clientWidth,
@@ -142,7 +172,7 @@ test('narrow screen switches conversations, chat, and details without overflow',
     expect(overflow, `${surface} surface horizontal overflow`).toBeLessThanOrEqual(1);
   };
 
-  await expect(page.locator('.mob')).toBeVisible();
+  await expect(mobileNavigation).toBeVisible();
   await expect(leftButton).toHaveText('会话');
   await expect(chatButton).toHaveText('聊天');
   await expect(detailButton).toHaveText('详情');
@@ -152,6 +182,25 @@ test('narrow screen switches conversations, chat, and details without overflow',
   await expect(leftButton).toHaveAttribute('aria-pressed', 'false');
   await expect(chatButton).toHaveAttribute('aria-pressed', 'true');
   await expect(detailButton).toHaveAttribute('aria-pressed', 'false');
+  await expect(textarea).toBeEditable();
+  await expect(sendButton).toBeEnabled();
+  await expectSurfaceAboveNavigation(center, 'chat');
+  const [textareaBox, sendButtonBox, navigationBox] = await Promise.all([
+    textarea.boundingBox(),
+    sendButton.boundingBox(),
+    mobileNavigation.boundingBox(),
+  ]);
+  expect(textareaBox, 'chat textarea bounding box').not.toBeNull();
+  expect(sendButtonBox, 'send button bounding box').not.toBeNull();
+  expect(navigationBox, 'mobile navigation bounding box').not.toBeNull();
+  if (textareaBox && sendButtonBox && navigationBox) {
+    expect(textareaBox.y + textareaBox.height, 'chat textarea bottom').toBeLessThanOrEqual(
+      navigationBox.y + 1,
+    );
+    expect(sendButtonBox.y + sendButtonBox.height, 'send button bottom').toBeLessThanOrEqual(
+      navigationBox.y + 1,
+    );
+  }
   await expectNoHorizontalOverflow('chat');
 
   await detailButton.click();
@@ -163,6 +212,7 @@ test('narrow screen switches conversations, chat, and details without overflow',
   await expect(leftButton).toHaveAttribute('aria-pressed', 'false');
   await expect(chatButton).toHaveAttribute('aria-pressed', 'false');
   await expect(detailButton).toHaveAttribute('aria-pressed', 'true');
+  await expectSurfaceAboveNavigation(right, 'detail');
   await expectNoHorizontalOverflow('detail');
 
   await leftButton.click();
@@ -172,6 +222,7 @@ test('narrow screen switches conversations, chat, and details without overflow',
   await expect(leftButton).toHaveAttribute('aria-pressed', 'true');
   await expect(chatButton).toHaveAttribute('aria-pressed', 'false');
   await expect(detailButton).toHaveAttribute('aria-pressed', 'false');
+  await expectSurfaceAboveNavigation(left, 'conversations');
   await expectNoHorizontalOverflow('conversations');
 
   await chatButton.click();
@@ -179,6 +230,7 @@ test('narrow screen switches conversations, chat, and details without overflow',
   await expect(left).toBeHidden();
   await expect(right).toBeHidden();
   await expect(chatButton).toHaveAttribute('aria-pressed', 'true');
+  await expectSurfaceAboveNavigation(center, 'chat after switching');
 
   await detailButton.click();
   await expect(right).toBeVisible();
@@ -188,6 +240,9 @@ test('narrow screen switches conversations, chat, and details without overflow',
   await expect(left).toBeHidden();
   await expect(right).toBeHidden();
   await expect(chatButton).toHaveAttribute('aria-pressed', 'true');
+  await expect(textarea).toBeEditable();
+  await expect(sendButton).toBeEnabled();
+  await expectSurfaceAboveNavigation(center, 'chat after repeated switching');
   await expectNoHorizontalOverflow('chat after repeated switching');
 });
 
@@ -196,6 +251,12 @@ test('empty state settles without a writable composer', async ({ page, request }
   await page.goto('/');
   await expect(page.locator('#schedLabel')).toHaveText('scheduler · 0 agents');
   await expect(page.locator('#contexts')).toContainText('还没有对话');
+  await expect(page.locator('#contexts .sess')).toHaveCount(0);
+  await expect(page.locator('#rooms .sess')).toHaveCount(0);
+  await expect(page.locator('#archived .sess')).toHaveCount(0);
+  await expect(page.locator('#agentSel option')).toHaveCount(0);
+  await expect(page.locator('#ta')).toBeDisabled();
+  await expect(page.locator('#ta')).toHaveJSProperty('readOnly', true);
   await expect(page.locator('#sendBtn')).toBeDisabled();
 });
 
@@ -229,7 +290,14 @@ test('live participant details and chat remain usable', async ({ page, request }
     r => r.url().endsWith('/api/agents/live-codex/chat') && r.method() === 'POST',
   );
   await page.locator('#sendBtn').click();
-  await chat;
+  const chatRequest = await chat;
+  expect(new URL(chatRequest.url()).pathname).toBe('/api/agents/live-codex/chat');
+  expect(chatRequest.postDataJSON()).toEqual({
+    message: 'E2E ping',
+    async: true,
+    speaker: 'console',
+    contextId: 'ctx-live-01',
+  });
   await expect(page.locator('#thread')).toContainText('E2E fixed reply');
 });
 
@@ -244,7 +312,12 @@ test('chat request detector includes query-string URLs', async ({ page, request 
     const response = await fetch('/api/agents/live-codex/chat?e2e=pathname', {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ message: 'query-string sensitivity check' }),
+      body: JSON.stringify({
+        message: 'E2E ping',
+        async: true,
+        speaker: 'console',
+        contextId: 'ctx-live-01',
+      }),
     });
     return response.status;
   });
@@ -259,12 +332,28 @@ test('archived participant is detailed but read-only', async ({ page, request })
     if (isAgentChatRequest(r.url(), r.method())) chatRequests++;
   });
   await page.goto('/');
+  const archivedHistory = page.waitForResponse(response => {
+    const request = response.request();
+    return (
+      request.method() === 'GET' &&
+      new URL(response.url()).pathname ===
+        '/api/agents/archived-kimi/history/ctx-archived-01'
+    );
+  });
   await page.locator('#archived .sess', { hasText: 'Archived core context' }).click();
+  const archivedHistoryResponse = await archivedHistory;
+  expect(archivedHistoryResponse.status()).toBe(200);
+  expect(archivedHistoryResponse.request().method()).toBe('GET');
+  expect(new URL(archivedHistoryResponse.url()).pathname).toBe(
+    '/api/agents/archived-kimi/history/ctx-archived-01',
+  );
   await expect(page.locator('#detailCard')).toContainText('archived-kimi');
   await expect(page.locator('#detailCard')).toContainText('已归档 · 只读');
   await expect(page.locator('#detailCard')).not.toContainText('选择一个 agent 查看详情');
   await expect(page.locator('#thread')).toContainText('Archived retained reply');
+  await expect(page.locator('#agentSel')).toHaveValue('');
   await expect(page.locator('#ta')).toBeDisabled();
+  await expect(page.locator('#ta')).toHaveJSProperty('readOnly', true);
   await expect(page.locator('#sendBtn')).toBeDisabled();
   await page.waitForTimeout(100);
   expect(chatRequests).toBe(0);
