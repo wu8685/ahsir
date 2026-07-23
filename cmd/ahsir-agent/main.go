@@ -414,6 +414,10 @@ func buildSessionConfig(name string, rt wrapper.RuntimeConfig, fs wrapper.Filesy
 	if err != nil {
 		return wrapper.SessionConfig{}, err
 	}
+	baseURL, err := wrapper.ResolveRuntimeBaseURL(rt)
+	if err != nil {
+		return wrapper.SessionConfig{}, err
+	}
 	provider := wrapper.RuntimeProvider(rt)
 	if provider == wrapper.ProviderCodex {
 		if extra == nil {
@@ -478,6 +482,18 @@ func buildSessionConfig(name string, rt wrapper.RuntimeConfig, fs wrapper.Filesy
 	if provider == wrapper.ProviderCodex {
 		if model != "" && !hasFlag(args, "--model", "-m") {
 			args = append(args, "--model="+model)
+		}
+		if baseURL != "" {
+			args = append(args,
+				"-c", `model_provider="ahsir_runtime"`,
+				"-c", `model_providers.ahsir_runtime.name="Ahsir runtime"`,
+				"-c", "model_providers.ahsir_runtime.base_url="+strconv.Quote(baseURL),
+				"-c", `model_providers.ahsir_runtime.wire_api="responses"`,
+				"-c", `web_search="disabled"`,
+			)
+			if extra["CODEX_API_KEY"] != "" {
+				args = append(args, "-c", `model_providers.ahsir_runtime.env_key="CODEX_API_KEY"`)
+			}
 		}
 		// Codex configures MCP servers through its own config.toml under the
 		// isolated CODEX_HOME, not through this card field. Fail loudly rather

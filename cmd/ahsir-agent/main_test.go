@@ -52,6 +52,38 @@ func TestBuildSessionConfig_CodexProvider(t *testing.T) {
 	}
 }
 
+func TestBuildSessionConfig_CodexCustomResponsesEndpoint(t *testing.T) {
+	t.Setenv("KIMI_PROXY_KEY", "local-secret")
+	workspace := t.TempDir()
+	cfg, err := buildSessionConfig("reviewer", wrapper.RuntimeConfig{
+		Provider: "codex",
+		Command:  "codex",
+		BaseURL:  "http://127.0.0.1:18793/v1",
+		APIKey:   "${KIMI_PROXY_KEY}",
+		Model:    "k3",
+	}, wrapper.FilesystemConfig{}, wrapper.MCPConfig{}, wrapper.StreamingConfig{}, workspace, workspace)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := envValue(cfg.Env, "CODEX_API_KEY"); got != "local-secret" {
+		t.Fatalf("CODEX_API_KEY = %q", got)
+	}
+	joined := strings.Join(cfg.Args, "\n")
+	for _, want := range []string{
+		`model_provider="ahsir_runtime"`,
+		`model_providers.ahsir_runtime.name="Ahsir runtime"`,
+		`model_providers.ahsir_runtime.base_url="http://127.0.0.1:18793/v1"`,
+		`model_providers.ahsir_runtime.env_key="CODEX_API_KEY"`,
+		`model_providers.ahsir_runtime.wire_api="responses"`,
+		`web_search="disabled"`,
+		"--model=k3",
+	} {
+		if !strings.Contains(joined, want) {
+			t.Fatalf("missing %q in args: %v", want, cfg.Args)
+		}
+	}
+}
+
 func TestBuildSessionConfig_CodexWriteAccessRequiresEnabledFilesystem(t *testing.T) {
 	tests := []struct {
 		name string

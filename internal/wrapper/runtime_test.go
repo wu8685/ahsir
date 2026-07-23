@@ -83,14 +83,28 @@ func TestResolveProviderEnv_CodexAPIKey(t *testing.T) {
 	}
 }
 
-func TestResolveProviderEnv_CodexRejectsBaseURL(t *testing.T) {
-	_, err := ResolveProviderEnv(RuntimeConfig{
+func TestResolveProviderEnv_CodexAllowsBaseURL(t *testing.T) {
+	got, err := ResolveProviderEnv(RuntimeConfig{
 		Provider: "codex",
 		BaseURL:  "https://example.com",
 		APIKey:   "sk-test",
 	})
-	if err == nil || !strings.Contains(err.Error(), "provider=codex") {
-		t.Fatalf("expected codex baseURL error, got %v", err)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got["CODEX_API_KEY"] != "sk-test" {
+		t.Fatalf("CODEX_API_KEY not set: %v", got)
+	}
+}
+
+func TestResolveRuntimeBaseURL_ExpandsEnv(t *testing.T) {
+	t.Setenv("CODEX_PROXY_BASE", "http://127.0.0.1:18793/v1")
+	got, err := ResolveRuntimeBaseURL(RuntimeConfig{BaseURL: "${CODEX_PROXY_BASE}"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != "http://127.0.0.1:18793/v1" {
+		t.Fatalf("baseURL = %q", got)
 	}
 }
 
