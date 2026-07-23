@@ -23,6 +23,8 @@ type RailMetrics = {
   scrolls: Record<RailListID, RailScrollMetric>;
   railTop: number;
   railBottom: number;
+  railLeft: number;
+  railRight: number;
 };
 
 function isAgentChatRequest(url: string, method: string) {
@@ -86,8 +88,19 @@ test('desktop left rail preserves conversations and independent scrolling', asyn
       list.scrollTop = 0;
     }
     const railRect = element.getBoundingClientRect();
-    return { boxes, scrolls, railTop: railRect.top, railBottom: railRect.bottom };
+    return {
+      boxes,
+      scrolls,
+      railTop: railRect.top,
+      railBottom: railRect.bottom,
+      railLeft: railRect.left,
+      railRight: railRect.right,
+    };
   });
+  expect(metrics.railTop).toBeGreaterThanOrEqual(-1);
+  expect(metrics.railBottom).toBeLessThanOrEqual(900 + 1);
+  expect(metrics.railLeft).toBeGreaterThanOrEqual(-1);
+  expect(metrics.railRight).toBeLessThanOrEqual(1440 + 1);
   expect(metrics.boxes.contexts.height).toBeGreaterThanOrEqual(120);
   expect(metrics.boxes.contexts.minHeight).toBeGreaterThanOrEqual(120);
   expect(metrics.boxes.rooms.height).toBeLessThanOrEqual(900 * 0.26 + 1);
