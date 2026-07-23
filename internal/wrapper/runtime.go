@@ -41,6 +41,14 @@ func ResolveRuntimeModel(rt RuntimeConfig) (string, error) {
 	return expandStrict("runtime.model", rt.Model)
 }
 
+// ResolveRuntimeBaseURL expands runtime.baseURL using the same strict env-var
+// semantics as ResolveProviderEnv. Codex uses the result to build a per-agent
+// custom Responses API provider without modifying the operator's global
+// config.toml.
+func ResolveRuntimeBaseURL(rt RuntimeConfig) (string, error) {
+	return expandStrict("runtime.baseURL", rt.BaseURL)
+}
+
 // ResolveProviderEnv translates the high-level provider/baseURL/apiKey/model
 // fields into the env-var shape the underlying CLI expects, then layers any
 // user-supplied Env on top (so explicit Env wins over provider defaults).
@@ -94,9 +102,6 @@ func ResolveProviderEnv(rt RuntimeConfig) (map[string]string, error) {
 			out["ANTHROPIC_MODEL"] = model
 		}
 	case ProviderCodex:
-		if baseURL != "" {
-			return nil, fmt.Errorf("runtime.baseURL is not supported with provider=codex; use runtime.env for advanced Codex CLI configuration")
-		}
 		if apiKey != "" {
 			out["CODEX_API_KEY"] = apiKey
 		}
