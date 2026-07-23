@@ -62,6 +62,22 @@ function response(value, status = 200) {
   };
 }
 
+function makeMobileFixture(surfaceNames = [], buttonSurfaceNames = []) {
+  const surfaces = new Map(surfaceNames.map((name) => [name, new FakeElement()]));
+  const buttons = buttonSurfaceNames.map((surface) => {
+    const button = new FakeElement("button");
+    button.dataset.surface = surface;
+    if (surface === "center") {
+      button.className = "on";
+      button.setAttribute("aria-pressed", "true");
+    } else {
+      button.setAttribute("aria-pressed", "false");
+    }
+    return button;
+  });
+  return { buttons, surfaces };
+}
+
 async function waitFor(check, label) {
   for (let i = 0; i < 100; i++) {
     if (check()) return;
@@ -70,7 +86,7 @@ async function waitFor(check, label) {
   throw new Error("timed out waiting for " + label);
 }
 
-function makePage({ live, archived, participant }) {
+function makePage({ live, archived, participant, mobile = makeMobileFixture() }) {
   const elements = new Map();
   const domReady = [];
   const requests = [];
@@ -92,10 +108,13 @@ function makePage({ live, archived, participant }) {
     addEventListener(type, fn) { if (type === "DOMContentLoaded") domReady.push(fn); },
     querySelector(sel) {
       if (["#detailCard .ch", "#da-stop", "#da-restart", "#da-del"].includes(sel)) return new FakeElement();
+      if (sel === ".rail.left") return mobile.surfaces.get("left") || null;
+      if (sel === "main.center") return mobile.surfaces.get("center") || null;
+      if (sel === ".rail.right") return mobile.surfaces.get("right") || null;
       if (/^#[A-Za-z0-9_-]+$/.test(sel)) return elements.get(sel.slice(1)) || null;
       return null;
     },
-    querySelectorAll() { return []; },
+    querySelectorAll(sel) { return sel === ".mob button" ? mobile.buttons : []; },
     getElementById(id) { return elements.get(id) || null; },
     createElement(tag) { return new FakeElement(tag); },
     hasFocus() { return true; },
@@ -147,6 +166,25 @@ function makePage({ live, archived, participant }) {
   assert.equal(domReady.length, 1, "app should register one DOMContentLoaded handler");
   domReady[0]();
   return { elements, requests };
+}
+
+function testRejectsPartialMobileSurfaces() {
+  const mobile = makeMobileFixture(["left", "center"], ["left", "center", "right"]);
+  assert.throws(
+    () => makePage({ live: [], archived: [], participant: "missing", mobile }),
+    /mobile navigation.*right/i,
+  );
+}
+
+function testRejectsIncompleteMobileButtons() {
+  const mobile = makeMobileFixture(["left", "center", "right"], ["left", "center"]);
+  assert.throws(
+    () => makePage({ live: [], archived: [], participant: "missing", mobile }),
+    /mobile navigation.*right/i,
+  );
+  const centerButton = mobile.buttons.find((button) => button.dataset.surface === "center");
+  assert.equal(centerButton.classList.contains("on"), false, "invalid navigation must clear static selection");
+  assert.equal(centerButton.getAttribute("aria-pressed"), "false", "invalid navigation must clear pressed state");
 }
 
 async function openParticipant(page) {
@@ -202,6 +240,8 @@ async function testUnavailableParticipant() {
 }
 
 (async () => {
+  testRejectsPartialMobileSurfaces();
+  testRejectsIncompleteMobileButtons();
   await testArchivedParticipant();
   await testLiveParticipant();
   await testUnavailableParticipant();
