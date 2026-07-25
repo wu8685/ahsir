@@ -406,6 +406,16 @@ func buildSessionConfig(name string, rt wrapper.RuntimeConfig, fs wrapper.Filesy
 		timeout = d
 	}
 
+	provider := wrapper.RuntimeProvider(rt)
+	var codexProvider wrapper.CodexProviderConfig
+	if provider == wrapper.ProviderCodex {
+		var resolveErr error
+		codexProvider, resolveErr = wrapper.ResolveCodexProvider(rt)
+		if resolveErr != nil {
+			return wrapper.SessionConfig{}, resolveErr
+		}
+	}
+
 	extra, err := wrapper.ResolveProviderEnv(rt)
 	if err != nil {
 		return wrapper.SessionConfig{}, err
@@ -414,11 +424,6 @@ func buildSessionConfig(name string, rt wrapper.RuntimeConfig, fs wrapper.Filesy
 	if err != nil {
 		return wrapper.SessionConfig{}, err
 	}
-	baseURL, err := wrapper.ResolveRuntimeBaseURL(rt)
-	if err != nil {
-		return wrapper.SessionConfig{}, err
-	}
-	provider := wrapper.RuntimeProvider(rt)
 	if provider == wrapper.ProviderCodex {
 		if extra == nil {
 			extra = make(map[string]string)
@@ -483,17 +488,16 @@ func buildSessionConfig(name string, rt wrapper.RuntimeConfig, fs wrapper.Filesy
 		if model != "" && !hasFlag(args, "--model", "-m") {
 			args = append(args, "--model="+model)
 		}
-		if baseURL != "" {
+		if codexProvider.BaseURL != "" {
 			args = append(args,
 				"-c", `model_provider="ahsir_runtime"`,
 				"-c", `model_providers.ahsir_runtime.name="Ahsir runtime"`,
-				"-c", "model_providers.ahsir_runtime.base_url="+strconv.Quote(baseURL),
-				"-c", `model_providers.ahsir_runtime.wire_api="responses"`,
+				"-c", "model_providers.ahsir_runtime.base_url="+strconv.Quote(codexProvider.BaseURL),
+				"-c", "model_providers.ahsir_runtime.wire_api="+strconv.Quote(codexProvider.WireAPI),
+				"-c", "model_providers.ahsir_runtime.env_key="+strconv.Quote(codexProvider.EnvKey),
+				"-c", `model_providers.ahsir_runtime.requires_openai_auth=false`,
 				"-c", `web_search="disabled"`,
 			)
-			if extra["CODEX_API_KEY"] != "" {
-				args = append(args, "-c", `model_providers.ahsir_runtime.env_key="CODEX_API_KEY"`)
-			}
 		}
 		// Codex configures MCP servers through its own config.toml under the
 		// isolated CODEX_HOME, not through this card field. Fail loudly rather
@@ -570,9 +574,6 @@ func mirrorCodexHomeForAgent(dst string) error {
 	src := sourceCodexHome()
 	if src == "" || samePath(src, dst) {
 		return nil
-	}
-	if err := copyFileIfExists(filepath.Join(src, "auth.json"), filepath.Join(dst, "auth.json"), 0o600); err != nil {
-		return fmt.Errorf("mirror codex auth: %w", err)
 	}
 	if err := copyFilteredCodexConfig(filepath.Join(src, "config.toml"), filepath.Join(dst, "config.toml")); err != nil {
 		return fmt.Errorf("mirror codex config: %w", err)
