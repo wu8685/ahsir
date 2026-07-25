@@ -1509,3 +1509,109 @@ func TestPoolQueueDistinctContextsStayParallel(t *testing.T) {
 	probeA.release <- struct{}{}
 	wg.Wait()
 }
+
+// TestSessionPool_OnForget_SecondaryGC verifies the onForget hook fires exactly
+// when a contextID is PERMANENTLY dropped (evictedTTL GC) — the signal
+// SessionWorkspace uses to reclaim a session's private worktree. A plain
+// eviction (still resumable) must NOT fire it.
+func TestSessionPool_OnForget_SecondaryGC(t *testing.T) {
+	factory, _, _, _ := newRecordingFactory()
+	p := NewSessionPool(factory, 30*time.Minute, 24*time.Hour)
+	defer p.Stop()
+
+	var mu sync.Mutex
+	var forgotten []string
+	p.SetOnForget(func(contextID string) {
+		mu.Lock()
+		forgotten = append(forgotten, contextID)
+		mu.Unlock()
+	})
+
+	now := time.Now()
+	p.setClock(func() time.Time { return now })
+
+	if _, err := p.LookupOrCreate(context.Background(), "ctx-forget"); err != nil {
+		t.Fatal(err)
+	}
+
+	// Plain eviction (idle past idleTTL): resumable, so onForget must NOT fire.
+	now = now.Add(31 * time.Minute)
+	p.reapOnce()
+	mu.Lock()
+	if len(forgotten) != 0 {
+		mu.Unlock()
+		t.Fatalf("onForget fired on plain eviction: %v", forgotten)
+	}
+	mu.Unlock()
+
+	// Secondary GC (past evictedTTL): permanently forgotten → onForget fires.
+	now = now.Add(25 * time.Hour)
+	p.reapOnce()
+	mu.Lock()
+	defer mu.Unlock()
+	if len(forgotten) != 1 || forgotten[0] != "ctx-forget" {
+		t.Fatalf("want onForget([ctx-forget]), got %v", forgotten)
+	}
+}
+
+// TestSessionPool_OnForget_MaxEvictedOverflow verifies onForget also fires when
+// an evicted mapping is dropped due to the max_evicted cap.
+func TestSessionPool_OnForget_MaxEvictedOverflow(t *testing.T) {
+	factory, _, _, _ := newRecordingFactory()
+	p := NewSessionPool(factory, 30*time.Minute, 24*time.Hour)
+	defer p.Stop()
+	p.SetMaxEvicted(1)
+
+	var mu sync.Mutex
+	forgotten := map[string]bool{}
+	p.SetOnForget(func(contextID string) {
+		mu.Lock()
+		forgotten[contextID] = true
+		mu.Unlock()
+	})
+
+	now := time.Now()
+	p.setClock(func() time.Time { return now })
+
+	// Create + evict two contexts; the older one overflows max_evicted=1.
+	if _, err := p.LookupOrCreate(context.Background(), "old"); err != nil {
+		t.Fatal(err)
+	}
+	// Push "old" past the 30m idle TTL so it evicts NOW, giving it a strictly
+	// earlier evictedAt than "new" (evicted a tick later). Same-tick eviction
+	// would tie evictedAt and make the max_evicted victim non-deterministic.
+	now = now.Add(31 * time.Minute)
+	p.reapOnce() // evict "old" (evictedAt = t+31m)
+
+	if _, err := p.LookupOrCreate(context.Background(), "new"); err != nil {
+		t.Fatal(err)
+	}
+	now = now.Add(31 * time.Minute)
+	p.reapOnce() // evict "new" (evictedAt = t+62m); enforceMaxEvicted drops older "old"
+
+	mu.Lock()
+	defer mu.Unlock()
+	if !forgotten["old"] {
+		t.Fatalf("want 'old' forgotten on max_evicted overflow, got %v", forgotten)
+	}
+	if forgotten["new"] {
+		t.Fatalf("'new' should still be resumable, not forgotten: %v", forgotten)
+	}
+}
+
+// TestSessionPool_OnForget_Unset ensures the GC path is safe when no hook is set.
+func TestSessionPool_OnForget_Unset(t *testing.T) {
+	factory, _, _, _ := newRecordingFactory()
+	p := NewSessionPool(factory, 30*time.Minute, 24*time.Hour)
+	defer p.Stop()
+
+	now := time.Now()
+	p.setClock(func() time.Time { return now })
+	if _, err := p.LookupOrCreate(context.Background(), "ctx"); err != nil {
+		t.Fatal(err)
+	}
+	now = now.Add(31 * time.Minute)
+	p.reapOnce()
+	now = now.Add(25 * time.Hour)
+	p.reapOnce() // must not panic with nil onForget
+}

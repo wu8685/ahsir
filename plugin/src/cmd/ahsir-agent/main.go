@@ -123,14 +123,50 @@ func main() {
 			log.Fatalf("agent %q: %v", cfg.Name, err)
 		}
 
+		// Per-session filesystem isolation (issue #19): when enabled, each A2A
+		// contextID gets its own scratch dir / git worktree so concurrent
+		// sessions in this single process don't race on a shared working tree.
+		// Off by default — sessions share the one agent workdir as before.
+		isolation, err := wrapper.ParseIsolationMode(cfg.Pool.SessionIsolation)
+		if err != nil {
+			log.Fatalf("agent %q: pool.session_isolation: %v", cfg.Name, err)
+		}
+		var sessionWS *wrapper.SessionWorkspace
+		if isolation.Enabled() && sessionCfg.Provider != wrapper.ProviderEcho {
+			sessionsBase := filepath.Join(*workspace, ".a2a", "sessions")
+			sessionWS = wrapper.NewSessionWorkspace(effectiveWorkdir, sessionsBase, isolation)
+			log.Printf("Session isolation: mode=%s base=%s (requested=%s)", sessionWS.Mode(), sessionsBase, isolation)
+		}
+
+		// sessionConfigFor derives the per-session invocation config: with
+		// isolation enabled it points the CLI cwd + --add-dir at the session's
+		// private directory; otherwise it returns the shared config unchanged.
+		sessionConfigFor := func(contextID string) (wrapper.SessionConfig, error) {
+			if sessionWS == nil {
+				return sessionCfg, nil
+			}
+			dir, err := sessionWS.Provision(contextID)
+			if err != nil {
+				return wrapper.SessionConfig{}, err
+			}
+			return wrapper.WithSessionWorkspace(sessionCfg, dir), nil
+		}
+
 		// Session per A2A contextID, pooled with sliding idle TTL.
 		// Claude uses one long-running stream-json subprocess; Codex forks
 		// `codex exec --json` per turn and resumes by thread_id.
 		factory := func(ctx context.Context, contextID, resumeID string) (wrapper.Session, error) {
-			if sessionCfg.Provider == wrapper.ProviderCodex {
-				return wrapper.NewCodexSession(ctx, sessionCfg, resumeID)
+			cfg, err := sessionConfigFor(contextID)
+			if err != nil {
+				return nil, err
 			}
-			return wrapper.NewClaudeSession(ctx, sessionCfg, resumeID)
+			if cfg.Provider == wrapper.ProviderEcho {
+				return wrapper.NewEchoSession(ctx, cfg, resumeID)
+			}
+			if cfg.Provider == wrapper.ProviderCodex {
+				return wrapper.NewCodexSession(ctx, cfg, resumeID)
+			}
+			return wrapper.NewClaudeSession(ctx, cfg, resumeID)
 		}
 		// Persist contextID → sessionID mappings so a restart of this agent
 		// process can `--resume` prior conversations instead of starting
@@ -141,8 +177,19 @@ func main() {
 		persist := wrapper.NewFilePersistence(persistPath)
 		pool := wrapper.NewSessionPoolWithPersistence(factory, retention.idleTTL, retention.evictedTTL, persist)
 		pool.SetMaxEvicted(retention.maxEvicted)
-		defer pool.Stop()
 		stopPool = pool.Stop
+		defer pool.Stop()
+
+		// Reclaim a session's private worktree once its mapping is permanently
+		// forgotten (evicted past evictedTTL / max_evicted), so isolated
+		// worktrees don't outlive the conversations they belonged to.
+		if sessionWS != nil {
+			pool.SetOnForget(func(contextID string) {
+				if err := sessionWS.Remove(contextID); err != nil {
+					log.Printf("session isolation: cleanup for contextID=%s failed: %v", contextID, err)
+				}
+			})
+		}
 
 		// Apply pool capacity from agent-card.yaml's `pool:` block if set.
 		// Default (max_active=0) keeps the pool unbounded — historical
@@ -359,6 +406,16 @@ func buildSessionConfig(name string, rt wrapper.RuntimeConfig, fs wrapper.Filesy
 		timeout = d
 	}
 
+	provider := wrapper.RuntimeProvider(rt)
+	var codexProvider wrapper.CodexProviderConfig
+	if provider == wrapper.ProviderCodex {
+		var resolveErr error
+		codexProvider, resolveErr = wrapper.ResolveCodexProvider(rt)
+		if resolveErr != nil {
+			return wrapper.SessionConfig{}, resolveErr
+		}
+	}
+
 	extra, err := wrapper.ResolveProviderEnv(rt)
 	if err != nil {
 		return wrapper.SessionConfig{}, err
@@ -367,7 +424,6 @@ func buildSessionConfig(name string, rt wrapper.RuntimeConfig, fs wrapper.Filesy
 	if err != nil {
 		return wrapper.SessionConfig{}, err
 	}
-	provider := wrapper.RuntimeProvider(rt)
 	if provider == wrapper.ProviderCodex {
 		if extra == nil {
 			extra = make(map[string]string)
@@ -411,12 +467,19 @@ func buildSessionConfig(name string, rt wrapper.RuntimeConfig, fs wrapper.Filesy
 		if provider != wrapper.ProviderCodex {
 			// Default to a read-only whitelist: model can inspect files but not
 			// modify them or run arbitrary shell. write_access widens this to the
-			// built-in edit/write tools without granting bash.
+			// built-in edit/write tools without granting bash; shell_access is the
+			// separate, explicit opt-in that adds Bash (arbitrary command
+			// execution). Both are owned by the card schema, not raw CLI args —
+			// stripClaudePermissionBypassArgs blocks the --dangerously-skip-permissions
+			// escalation vector precisely so widening must come through here.
 			// --allowedTools is variadic too — same trap as --add-dir; use the
 			// = form so it cannot consume the trailing prompt positional.
 			allowedTools := "Read,LS,Glob,Grep"
 			if fs.WriteAccess {
 				allowedTools = "Read,LS,Glob,Grep,Edit,MultiEdit,Write"
+			}
+			if fs.ShellAccess {
+				allowedTools += ",Bash"
 			}
 			args = append(args, "--allowedTools="+allowedTools)
 		}
@@ -424,6 +487,17 @@ func buildSessionConfig(name string, rt wrapper.RuntimeConfig, fs wrapper.Filesy
 	if provider == wrapper.ProviderCodex {
 		if model != "" && !hasFlag(args, "--model", "-m") {
 			args = append(args, "--model="+model)
+		}
+		if codexProvider.BaseURL != "" {
+			args = append(args,
+				"-c", `model_provider="ahsir_runtime"`,
+				"-c", `model_providers.ahsir_runtime.name="Ahsir runtime"`,
+				"-c", "model_providers.ahsir_runtime.base_url="+strconv.Quote(codexProvider.BaseURL),
+				"-c", "model_providers.ahsir_runtime.wire_api="+strconv.Quote(codexProvider.WireAPI),
+				"-c", "model_providers.ahsir_runtime.env_key="+strconv.Quote(codexProvider.EnvKey),
+				"-c", `model_providers.ahsir_runtime.requires_openai_auth=false`,
+				"-c", `web_search="disabled"`,
+			)
 		}
 		// Codex configures MCP servers through its own config.toml under the
 		// isolated CODEX_HOME, not through this card field. Fail loudly rather
@@ -500,9 +574,6 @@ func mirrorCodexHomeForAgent(dst string) error {
 	src := sourceCodexHome()
 	if src == "" || samePath(src, dst) {
 		return nil
-	}
-	if err := copyFileIfExists(filepath.Join(src, "auth.json"), filepath.Join(dst, "auth.json"), 0o600); err != nil {
-		return fmt.Errorf("mirror codex auth: %w", err)
 	}
 	if err := copyFilteredCodexConfig(filepath.Join(src, "config.toml"), filepath.Join(dst, "config.toml")); err != nil {
 		return fmt.Errorf("mirror codex config: %w", err)

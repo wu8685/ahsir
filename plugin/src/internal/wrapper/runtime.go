@@ -3,6 +3,7 @@ package wrapper
 import (
 	"fmt"
 	"os"
+	"regexp"
 	"sort"
 	"strings"
 )
@@ -13,6 +14,9 @@ const (
 	ProviderZhipu     = "zhipu"
 	ProviderDeepSeek  = "deepseek"
 	ProviderCodex     = "codex"
+	// ProviderEcho is a deterministic in-memory provider (tests + CMA-facade
+	// e2e). It runs no CLI and needs no LLM env.
+	ProviderEcho = "echo"
 )
 
 // zhipuDefaultBaseURL is the Anthropic-compatible endpoint published by
@@ -22,6 +26,20 @@ const zhipuDefaultBaseURL = "https://open.bigmodel.cn/api/anthropic"
 // deepseekDefaultBaseURL is the Anthropic-compatible endpoint published by
 // DeepSeek (parallel to zhipu — same ANTHROPIC_* env wiring).
 const deepseekDefaultBaseURL = "https://api.deepseek.com/anthropic"
+
+var (
+	envKeyNameRE      = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
+	legacyEnvAPIKeyRE = regexp.MustCompile(`^\$([A-Za-z_][A-Za-z0-9_]*)$`)
+	legacyBraceKeyRE  = regexp.MustCompile(`^\$\{([A-Za-z_][A-Za-z0-9_]*)\}$`)
+)
+
+// CodexProviderConfig is the non-secret custom-provider configuration passed
+// to Codex CLI overrides.
+type CodexProviderConfig struct {
+	BaseURL string
+	WireAPI string
+	EnvKey  string
+}
 
 // RuntimeProvider returns the canonical provider for a RuntimeConfig.
 func RuntimeProvider(rt RuntimeConfig) string {
@@ -38,6 +56,60 @@ func ResolveRuntimeModel(rt RuntimeConfig) (string, error) {
 	return expandStrict("runtime.model", rt.Model)
 }
 
+// ResolveRuntimeBaseURL expands runtime.baseURL using the same strict env-var
+// semantics as ResolveProviderEnv. Codex uses the result to build a per-agent
+// custom Responses API provider without modifying the operator's global
+// config.toml.
+func ResolveRuntimeBaseURL(rt RuntimeConfig) (string, error) {
+	return expandStrict("runtime.baseURL", rt.BaseURL)
+}
+
+// ResolveCodexProvider validates the env-only credential contract without
+// reading or returning the secret value.
+func ResolveCodexProvider(rt RuntimeConfig) (CodexProviderConfig, error) {
+	if rt.APIKey != "" {
+		if name := legacyAPIKeyEnvName(rt.APIKey); name != "" {
+			return CodexProviderConfig{}, fmt.Errorf("runtime.apiKey is no longer supported for provider=codex; use runtime.credential.envKey: %s", name)
+		}
+		return CodexProviderConfig{}, fmt.Errorf("runtime.apiKey must not contain a Codex provider secret; use runtime.credential.envKey")
+	}
+
+	baseURL, err := expandStrict("runtime.baseURL", rt.BaseURL)
+	if err != nil {
+		return CodexProviderConfig{}, err
+	}
+	envKey := strings.TrimSpace(rt.Credential.EnvKey)
+	if envKey != "" && !envKeyNameRE.MatchString(envKey) {
+		return CodexProviderConfig{}, fmt.Errorf("runtime.credential.envKey %q is not a valid environment variable name", envKey)
+	}
+	if baseURL != "" && envKey == "" {
+		return CodexProviderConfig{}, fmt.Errorf("runtime.credential.envKey is required when runtime.baseURL is set (provider=codex)")
+	}
+	if envKey != "" {
+		value, ok := os.LookupEnv(envKey)
+		if !ok || value == "" {
+			return CodexProviderConfig{}, fmt.Errorf("runtime.credential.envKey references missing or empty environment variable %s", envKey)
+		}
+	}
+	wireAPI := strings.ToLower(strings.TrimSpace(rt.WireAPI))
+	if wireAPI == "" {
+		wireAPI = "responses"
+	}
+	if wireAPI != "responses" && wireAPI != "chat" {
+		return CodexProviderConfig{}, fmt.Errorf("runtime.wireAPI %q is not supported for provider=codex; use responses or chat", rt.WireAPI)
+	}
+	return CodexProviderConfig{BaseURL: baseURL, WireAPI: wireAPI, EnvKey: envKey}, nil
+}
+
+func legacyAPIKeyEnvName(value string) string {
+	for _, re := range []*regexp.Regexp{legacyEnvAPIKeyRE, legacyBraceKeyRE} {
+		if match := re.FindStringSubmatch(value); len(match) == 2 {
+			return match[1]
+		}
+	}
+	return ""
+}
+
 // ResolveProviderEnv translates the high-level provider/baseURL/apiKey/model
 // fields into the env-var shape the underlying CLI expects, then layers any
 // user-supplied Env on top (so explicit Env wins over provider defaults).
@@ -51,6 +123,21 @@ func ResolveRuntimeModel(rt RuntimeConfig) (string, error) {
 // responsible for merging it with os.Environ() when building exec.Cmd.Env.
 func ResolveProviderEnv(rt RuntimeConfig) (map[string]string, error) {
 	provider := RuntimeProvider(rt)
+
+	if provider == ProviderCodex {
+		if _, err := ResolveCodexProvider(rt); err != nil {
+			return nil, err
+		}
+		out := map[string]string{}
+		for k, v := range rt.Env {
+			expanded, err := expandStrict("runtime.env."+k, v)
+			if err != nil {
+				return nil, err
+			}
+			out[k] = expanded
+		}
+		return out, nil
+	}
 
 	baseURL, err := expandStrict("runtime.baseURL", rt.BaseURL)
 	if err != nil {
@@ -90,13 +177,10 @@ func ResolveProviderEnv(rt RuntimeConfig) (map[string]string, error) {
 		if model != "" {
 			out["ANTHROPIC_MODEL"] = model
 		}
-	case ProviderCodex:
-		if baseURL != "" {
-			return nil, fmt.Errorf("runtime.baseURL is not supported with provider=codex; use runtime.env for advanced Codex CLI configuration")
-		}
-		if apiKey != "" {
-			out["CODEX_API_KEY"] = apiKey
-		}
+	case ProviderEcho:
+		// Deterministic in-memory echo provider (tests + CMA-facade e2e). Runs
+		// no CLI, so baseURL/apiKey/model are irrelevant and intentionally
+		// ignored — leave out empty and skip the anthropic auth check below.
 	default:
 		// Unknown provider — refuse silently translating high-level fields,
 		// but tolerate the case where the user only set Env explicitly.
