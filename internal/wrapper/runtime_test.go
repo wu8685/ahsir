@@ -203,6 +203,34 @@ func TestResolveProviderEnv_CodexDoesNotSynthesizeAPIKey(t *testing.T) {
 	}
 }
 
+func TestResolveProviderEnv_CodexRejectsCredentialValuesInRuntimeEnv(t *testing.T) {
+	t.Setenv("MOONSHOT_API_KEY_TESTONLY", "inherited-secret")
+
+	for _, key := range []string{
+		"OPENAI_API_KEY",
+		"CODEX_API_KEY",
+		"MOONSHOT_API_KEY_TESTONLY",
+	} {
+		t.Run(key, func(t *testing.T) {
+			const literalSecret = "literal-secret-must-not-appear"
+			_, err := ResolveProviderEnv(RuntimeConfig{
+				Provider:   "codex",
+				Credential: RuntimeCredentialConfig{EnvKey: "MOONSHOT_API_KEY_TESTONLY"},
+				Env:        map[string]string{key: literalSecret},
+			})
+			if err == nil {
+				t.Fatalf("expected runtime.env.%s to be rejected", key)
+			}
+			if !strings.Contains(err.Error(), "runtime.env."+key) {
+				t.Fatalf("error must identify rejected field, got: %v", err)
+			}
+			if strings.Contains(err.Error(), literalSecret) {
+				t.Fatalf("error leaked credential value: %v", err)
+			}
+		})
+	}
+}
+
 func TestResolveRuntimeBaseURL_ExpandsEnv(t *testing.T) {
 	t.Setenv("CODEX_PROXY_BASE", "http://127.0.0.1:18793/v1")
 	got, err := ResolveRuntimeBaseURL(RuntimeConfig{BaseURL: "${CODEX_PROXY_BASE}"})

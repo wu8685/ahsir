@@ -71,6 +71,10 @@ func TestBuildSessionConfig_CodexCustomResponsesEndpoint(t *testing.T) {
 		t.Fatalf("CODEX_API_KEY must not be synthesized, got %q", got)
 	}
 	joined := strings.Join(cfg.Args, "\n")
+	trustedJoined := strings.Join(cfg.CodexProviderArgs, "\n")
+	if strings.Contains(joined, "model_providers.ahsir_runtime") {
+		t.Fatalf("trusted provider args mixed into raw runtime args: %v", cfg.Args)
+	}
 	for _, want := range []string{
 		`model_provider="ahsir_runtime"`,
 		`model_providers.ahsir_runtime.name="Ahsir runtime"`,
@@ -81,11 +85,15 @@ func TestBuildSessionConfig_CodexCustomResponsesEndpoint(t *testing.T) {
 		`web_search="disabled"`,
 		"--model=k3",
 	} {
-		if !strings.Contains(joined, want) {
-			t.Fatalf("missing %q in args: %v", want, cfg.Args)
+		target := trustedJoined
+		if want == "--model=k3" {
+			target = joined
+		}
+		if !strings.Contains(target, want) {
+			t.Fatalf("missing %q in raw=%v trusted=%v", want, cfg.Args, cfg.CodexProviderArgs)
 		}
 	}
-	if strings.Contains(joined, "secret-must-not-escape") {
+	if strings.Contains(joined, "secret-must-not-escape") || strings.Contains(trustedJoined, "secret-must-not-escape") {
 		t.Fatal("secret leaked into Codex arguments")
 	}
 }

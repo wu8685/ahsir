@@ -446,6 +446,7 @@ func buildSessionConfig(name string, rt wrapper.RuntimeConfig, fs wrapper.Filesy
 	}
 
 	args := append([]string(nil), rt.Args...)
+	var codexProviderArgs []string
 	if fs.Enabled {
 		for _, p := range fs.AllowedPaths {
 			abs := p
@@ -489,7 +490,7 @@ func buildSessionConfig(name string, rt wrapper.RuntimeConfig, fs wrapper.Filesy
 			args = append(args, "--model="+model)
 		}
 		if codexProvider.BaseURL != "" {
-			args = append(args,
+			codexProviderArgs = append(codexProviderArgs,
 				"-c", `model_provider="ahsir_runtime"`,
 				"-c", `model_providers.ahsir_runtime.name="Ahsir runtime"`,
 				"-c", "model_providers.ahsir_runtime.base_url="+strconv.Quote(codexProvider.BaseURL),
@@ -541,15 +542,16 @@ func buildSessionConfig(name string, rt wrapper.RuntimeConfig, fs wrapper.Filesy
 	}
 
 	return wrapper.SessionConfig{
-		Name:          name,
-		Provider:      provider,
-		Command:       rt.Command,
-		Args:          args,
-		Env:           env,
-		WorkDir:       workdir,
-		Timeout:       timeout,
-		WriteAccess:   fs.Enabled && fs.WriteAccess,
-		NetworkAccess: networkAccess,
+		Name:              name,
+		Provider:          provider,
+		Command:           rt.Command,
+		Args:              args,
+		CodexProviderArgs: codexProviderArgs,
+		Env:               env,
+		WorkDir:           workdir,
+		Timeout:           timeout,
+		WriteAccess:       fs.Enabled && fs.WriteAccess,
+		NetworkAccess:     networkAccess,
 	}, nil
 }
 
