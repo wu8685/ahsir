@@ -55,7 +55,7 @@ func TestAgentToCard_RuntimeOverrides(t *testing.T) {
 			metadata:     map[string]string{"runtime_provider": "codex"},
 			wantProvider: "codex",
 			wantBaseURL:  "https://global.example/",
-			wantAPIKey:   "${GLOBAL_API_KEY}",
+			wantAPIKey:   "",
 		},
 		{
 			name:  "kimi full override",
@@ -140,6 +140,22 @@ func TestAgentToCard_RuntimeAPIKeyEnvAcceptsShellNames(t *testing.T) {
 				t.Fatalf("Runtime.APIKey = %q, want %q", card.Runtime.APIKey, want)
 			}
 		})
+	}
+}
+
+func TestAgentToCard_CodexCredentialPreservesEnvName(t *testing.T) {
+	a := baseAgent()
+	a.Model.ID = "k3"
+	a.Metadata["runtime_provider"] = "codex"
+	a.Metadata["runtime_base_url"] = "http://127.0.0.1:18793/v1"
+	a.Metadata["runtime_api_key_env"] = "MOONSHOT_API_KEY"
+
+	card := mustAgentCard(t, a, RuntimeDefaults{})
+	if card.Runtime.Credential.EnvKey != "MOONSHOT_API_KEY" {
+		t.Fatalf("Runtime.Credential = %#v", card.Runtime.Credential)
+	}
+	if card.Runtime.APIKey != "" {
+		t.Fatalf("legacy Runtime.APIKey populated: %q", card.Runtime.APIKey)
 	}
 }
 
