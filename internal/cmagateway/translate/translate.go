@@ -22,6 +22,7 @@ const (
 	metadataRuntimeProvider  = "runtime_provider"
 	metadataRuntimeBaseURL   = "runtime_base_url"
 	metadataRuntimeAPIKeyEnv = "runtime_api_key_env"
+	metadataRuntimeWireAPI   = "runtime_wire_api"
 	metadataNetworkAccess    = "network_access"
 )
 
@@ -59,6 +60,7 @@ func AhsirAgentName(agentID string, version int64) string {
 //   - streaming.partial_messages -> true so deltas flow once A2A is wired
 func AgentToCard(name string, a *cma.Agent, d RuntimeDefaults) (*ahsir.AgentCard, error) {
 	provider, baseURL, apiKey := d.Provider, d.BaseURL, d.APIKey
+	var credential ahsir.RuntimeCredentialConfig
 	if value := strings.TrimSpace(a.Metadata[metadataRuntimeProvider]); value != "" {
 		provider = value
 	}
@@ -69,7 +71,14 @@ func AgentToCard(name string, a *cma.Agent, d RuntimeDefaults) (*ahsir.AgentCard
 		if !shellEnvNameRE.MatchString(envName) {
 			return nil, fmt.Errorf("invalid %s %q: must be a shell environment variable name", metadataRuntimeAPIKeyEnv, envName)
 		}
-		apiKey = "${" + envName + "}"
+		if strings.EqualFold(provider, "codex") {
+			credential.EnvKey = envName
+		} else {
+			apiKey = "${" + envName + "}"
+		}
+	}
+	if strings.EqualFold(provider, "codex") {
+		apiKey = ""
 	}
 
 	card := &ahsir.AgentCard{
@@ -80,10 +89,12 @@ func AgentToCard(name string, a *cma.Agent, d RuntimeDefaults) (*ahsir.AgentCard
 			SystemPrompt: a.System,
 		},
 		Runtime: ahsir.RuntimeConfig{
-			Provider: provider,
-			BaseURL:  baseURL,
-			APIKey:   apiKey,
-			Model:    a.Model.ID,
+			Provider:   provider,
+			BaseURL:    baseURL,
+			APIKey:     apiKey,
+			Model:      a.Model.ID,
+			WireAPI:    strings.TrimSpace(a.Metadata[metadataRuntimeWireAPI]),
+			Credential: credential,
 			// Optional per-agent override of ahsir's 120s runtime timeout, for
 			// long-running tool-driven turns (e.g. an event agent that shells
 			// out repeatedly). Empty -> ahsir default.

@@ -34,20 +34,26 @@ type ClaudeConfig struct {
 }
 
 type RuntimeConfig struct {
-	Provider string            `json:"provider,omitempty"`
-	BaseURL  string            `json:"baseURL,omitempty"`
-	APIKey   string            `json:"apiKey,omitempty"`
-	Model    string            `json:"model,omitempty"`
-	Command  string            `json:"command,omitempty"`
-	Args     []string          `json:"args,omitempty"`
-	Env      map[string]string `json:"env,omitempty"`
-	Timeout  string            `json:"timeout,omitempty"`
+	Provider   string                  `json:"provider,omitempty"`
+	BaseURL    string                  `json:"baseURL,omitempty"`
+	APIKey     string                  `json:"apiKey,omitempty"`
+	Model      string                  `json:"model,omitempty"`
+	WireAPI    string                  `json:"wireAPI,omitempty"`
+	Credential RuntimeCredentialConfig `json:"credential,omitempty"`
+	Command    string                  `json:"command,omitempty"`
+	Args       []string                `json:"args,omitempty"`
+	Env        map[string]string       `json:"env,omitempty"`
+	Timeout    string                  `json:"timeout,omitempty"`
 	// AgentIdleTimeout maps to ahsir's runtime.agent_idle_timeout — the
 	// scale-to-zero idle-reap window (issue #6). Empty -> ahsir default (10m).
 	// An explicit "0" pins the agent resident (never idle-reaped), the only way
 	// to keep a facade-created always-hot agent from being scaled to zero and
 	// then hit with a cold-start wake on the next event (issue #17).
 	AgentIdleTimeout string `json:"agent_idle_timeout,omitempty"`
+}
+
+type RuntimeCredentialConfig struct {
+	EnvKey string `json:"envKey,omitempty"`
 }
 
 type FilesystemConfig struct {
