@@ -304,15 +304,17 @@ func sanitizeCodexExecArgs(in []string) []string {
 }
 
 // codexOverrideBypassesPolicy reports whether a `-c key=value` generic config
-// override targets the sandbox/approval policy — the config-file backdoor to
-// the same flags sanitizeCodexExecArgs strips.
+// override targets security policy or provider authentication owned by ahsir.
 func codexOverrideBypassesPolicy(kv string) bool {
 	key, _, _ := strings.Cut(kv, "=")
 	key = strings.TrimSpace(key)
 	switch {
-	case key == "sandbox_mode", key == "approval_policy":
+	case key == "sandbox_mode", key == "approval_policy",
+		key == "model_provider", key == "openai_base_url",
+		key == "preferred_auth_method", key == "cli_auth_credentials_store":
 		return true
-	case strings.HasPrefix(key, "sandbox_workspace_write"):
+	case strings.HasPrefix(key, "sandbox_workspace_write"),
+		strings.HasPrefix(key, "model_providers."):
 		return true
 	}
 	return false
