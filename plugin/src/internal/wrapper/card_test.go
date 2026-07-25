@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestResolveUploadDir(t *testing.T) {
@@ -164,16 +165,102 @@ runtime:
 	}
 }
 
-func TestLoadAgentCardInvalidYAML(t *testing.T) {
+// TestLoadAgentCardAgentIdleTimeout verifies the scale-to-zero
+// runtime.agent_idle_timeout field parses from YAML and that an unset value
+// stays empty (so the agent applies the global DefaultAgentIdleTimeout, not a
+// literal zero that would pin it resident).
+func TestLoadAgentCardAgentIdleTimeout(t *testing.T) {
 	dir := t.TempDir()
+	yamlContent := `
+name: A
+version: "1.0.0"
+skills: []
+runtime:
+  command: claude
+  agent_idle_timeout: 15m
+`
 	a2aDir := filepath.Join(dir, ".a2a")
 	os.MkdirAll(a2aDir, 0755)
-	os.WriteFile(filepath.Join(a2aDir, "agent-card.yaml"), []byte("invalid: [yaml"), 0644)
+	os.WriteFile(filepath.Join(a2aDir, "agent-card.yaml"), []byte(yamlContent), 0644)
 
-	builder := NewAgentCardBuilder(dir)
-	_, err := builder.Load()
-	if err == nil {
-		t.Error("expected error for invalid YAML")
+	cfg, err := NewAgentCardBuilder(dir).Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Runtime.AgentIdleTimeout != "15m" {
+		t.Errorf("expected agent_idle_timeout '15m', got %q", cfg.Runtime.AgentIdleTimeout)
+	}
+	d, enabled, err := ParseAgentIdleTimeout(cfg.Runtime.AgentIdleTimeout)
+	if err != nil || !enabled || d != 15*time.Minute {
+		t.Errorf("ParseAgentIdleTimeout(%q) = (%v,%v,%v)", cfg.Runtime.AgentIdleTimeout, d, enabled, err)
+	}
+
+	// Unset case: field stays empty, so the default applies.
+	dir2 := t.TempDir()
+	a2aDir2 := filepath.Join(dir2, ".a2a")
+	os.MkdirAll(a2aDir2, 0755)
+	os.WriteFile(filepath.Join(a2aDir2, "agent-card.yaml"), []byte("name: B\nversion: \"1.0.0\"\nskills: []\n"), 0644)
+	cfg2, err := NewAgentCardBuilder(dir2).Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg2.Runtime.AgentIdleTimeout != "" {
+		t.Errorf("expected unset agent_idle_timeout to stay empty, got %q", cfg2.Runtime.AgentIdleTimeout)
+	}
+	if d, enabled, _ := ParseAgentIdleTimeout(cfg2.Runtime.AgentIdleTimeout); !enabled || d != DefaultAgentIdleTimeout {
+		t.Errorf("unset agent_idle_timeout should resolve to DefaultAgentIdleTimeout, got (%v,%v)", d, enabled)
+	}
+}
+
+// TestLoadAgentCardSessionIdleTTL verifies the renamed pool.session_idle_ttl
+// key parses into the SessionIdleTTL field.
+func TestLoadAgentCardSessionIdleTTL(t *testing.T) {
+	dir := t.TempDir()
+	yamlContent := `
+name: A
+version: "1.0.0"
+skills: []
+pool:
+  session_idle_ttl: 45m
+`
+	a2aDir := filepath.Join(dir, ".a2a")
+	os.MkdirAll(a2aDir, 0755)
+	os.WriteFile(filepath.Join(a2aDir, "agent-card.yaml"), []byte(yamlContent), 0644)
+
+	cfg, err := NewAgentCardBuilder(dir).Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Pool.SessionIdleTTL != "45m" {
+		t.Errorf("expected session_idle_ttl '45m', got %q", cfg.Pool.SessionIdleTTL)
+	}
+}
+
+// TestLoadAgentCardSessionIsolation verifies the pool.session_isolation key
+// parses into the SessionIsolation field and through ParseIsolationMode.
+func TestLoadAgentCardSessionIsolation(t *testing.T) {
+	dir := t.TempDir()
+	yamlContent := `
+name: A
+version: "1.0.0"
+skills: []
+pool:
+  session_isolation: worktree
+`
+	a2aDir := filepath.Join(dir, ".a2a")
+	os.MkdirAll(a2aDir, 0755)
+	os.WriteFile(filepath.Join(a2aDir, "agent-card.yaml"), []byte(yamlContent), 0644)
+
+	cfg, err := NewAgentCardBuilder(dir).Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Pool.SessionIsolation != "worktree" {
+		t.Errorf("expected session_isolation 'worktree', got %q", cfg.Pool.SessionIsolation)
+	}
+	mode, err := ParseIsolationMode(cfg.Pool.SessionIsolation)
+	if err != nil || mode != IsolationWorktree {
+		t.Errorf("ParseIsolationMode(%q)=%v err=%v", cfg.Pool.SessionIsolation, mode, err)
 	}
 }
 
@@ -214,5 +301,18 @@ func TestLoadAgentCardRejectsRenamedKeys(t *testing.T) {
 				t.Errorf("error %q should mention new key %q", err.Error(), c.wantSub)
 			}
 		})
+	}
+}
+
+func TestLoadAgentCardInvalidYAML(t *testing.T) {
+	dir := t.TempDir()
+	a2aDir := filepath.Join(dir, ".a2a")
+	os.MkdirAll(a2aDir, 0755)
+	os.WriteFile(filepath.Join(a2aDir, "agent-card.yaml"), []byte("invalid: [yaml"), 0644)
+
+	builder := NewAgentCardBuilder(dir)
+	_, err := builder.Load()
+	if err == nil {
+		t.Error("expected error for invalid YAML")
 	}
 }

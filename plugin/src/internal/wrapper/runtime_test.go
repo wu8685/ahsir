@@ -66,31 +66,179 @@ func TestResolveProviderEnv_DeepSeekDefaultsBaseURL(t *testing.T) {
 	}
 }
 
-func TestResolveProviderEnv_CodexAPIKey(t *testing.T) {
-	got, err := ResolveProviderEnv(RuntimeConfig{
+func TestResolveCodexProviderAcceptsEnvCredential(t *testing.T) {
+	t.Setenv("MOONSHOT_API_KEY_TESTONLY", "secret-must-not-escape")
+	got, err := ResolveCodexProvider(RuntimeConfig{
 		Provider: "codex",
-		APIKey:   "sk-test",
-		Model:    "gpt-5.4",
+		BaseURL:  "http://127.0.0.1:18793/v1",
+		Model:    "k3",
+		Credential: RuntimeCredentialConfig{
+			EnvKey: "MOONSHOT_API_KEY_TESTONLY",
+		},
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got["CODEX_API_KEY"] != "sk-test" {
-		t.Errorf("CODEX_API_KEY not set: %v", got)
+	if got.EnvKey != "MOONSHOT_API_KEY_TESTONLY" {
+		t.Fatalf("EnvKey = %q", got.EnvKey)
 	}
-	if _, ok := got["ANTHROPIC_AUTH_TOKEN"]; ok {
-		t.Errorf("codex provider should not set Anthropic env: %v", got)
+	if got.WireAPI != "responses" {
+		t.Fatalf("WireAPI = %q, want responses", got.WireAPI)
 	}
 }
 
-func TestResolveProviderEnv_CodexRejectsBaseURL(t *testing.T) {
-	_, err := ResolveProviderEnv(RuntimeConfig{
+func TestResolveCodexProviderRejectsLiteralAPIKeyWithoutEcho(t *testing.T) {
+	const secret = "sk-secret-must-not-appear"
+	_, err := ResolveCodexProvider(RuntimeConfig{
 		Provider: "codex",
-		BaseURL:  "https://example.com",
-		APIKey:   "sk-test",
+		APIKey:   secret,
 	})
-	if err == nil || !strings.Contains(err.Error(), "provider=codex") {
-		t.Fatalf("expected codex baseURL error, got %v", err)
+	if err == nil {
+		t.Fatal("expected literal apiKey rejection")
+	}
+	if strings.Contains(err.Error(), secret) {
+		t.Fatalf("error leaked secret: %v", err)
+	}
+}
+
+func TestResolveCodexProviderRejectsLegacyEnvReferenceWithHint(t *testing.T) {
+	_, err := ResolveCodexProvider(RuntimeConfig{
+		Provider: "codex",
+		APIKey:   "${MOONSHOT_API_KEY}",
+	})
+	if err == nil || !strings.Contains(err.Error(), "credential.envKey: MOONSHOT_API_KEY") {
+		t.Fatalf("expected migration hint, got %v", err)
+	}
+}
+
+func TestResolveCodexProviderValidatesEnvCredentialAndWireAPI(t *testing.T) {
+	os.Unsetenv("MISSING_CODEX_KEY_TESTONLY")
+	t.Setenv("EMPTY_CODEX_KEY_TESTONLY", "")
+	t.Setenv("PRESENT_CODEX_KEY_TESTONLY", "secret")
+
+	tests := []struct {
+		name string
+		rt   RuntimeConfig
+		want string
+	}{
+		{
+			name: "malformed env name",
+			rt: RuntimeConfig{
+				Provider:   "codex",
+				Credential: RuntimeCredentialConfig{EnvKey: "NOT-AN-ENV"},
+			},
+			want: "valid environment variable name",
+		},
+		{
+			name: "missing env",
+			rt: RuntimeConfig{
+				Provider:   "codex",
+				Credential: RuntimeCredentialConfig{EnvKey: "MISSING_CODEX_KEY_TESTONLY"},
+			},
+			want: "MISSING_CODEX_KEY_TESTONLY",
+		},
+		{
+			name: "empty env",
+			rt: RuntimeConfig{
+				Provider:   "codex",
+				Credential: RuntimeCredentialConfig{EnvKey: "EMPTY_CODEX_KEY_TESTONLY"},
+			},
+			want: "EMPTY_CODEX_KEY_TESTONLY",
+		},
+		{
+			name: "base URL requires credential",
+			rt: RuntimeConfig{
+				Provider: "codex",
+				BaseURL:  "https://example.test/v1",
+			},
+			want: "credential.envKey is required",
+		},
+		{
+			name: "unsupported wire API",
+			rt: RuntimeConfig{
+				Provider:   "codex",
+				WireAPI:    "completions",
+				Credential: RuntimeCredentialConfig{EnvKey: "PRESENT_CODEX_KEY_TESTONLY"},
+			},
+			want: "use responses or chat",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := ResolveCodexProvider(tt.rt)
+			if err == nil || !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("error = %v, want substring %q", err, tt.want)
+			}
+		})
+	}
+
+	got, err := ResolveCodexProvider(RuntimeConfig{
+		Provider:   "codex",
+		WireAPI:    "chat",
+		Credential: RuntimeCredentialConfig{EnvKey: "PRESENT_CODEX_KEY_TESTONLY"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.WireAPI != "chat" {
+		t.Fatalf("WireAPI = %q, want chat", got.WireAPI)
+	}
+}
+
+func TestResolveProviderEnv_CodexDoesNotSynthesizeAPIKey(t *testing.T) {
+	t.Setenv("MOONSHOT_API_KEY_TESTONLY", "secret-must-not-escape")
+	got, err := ResolveProviderEnv(RuntimeConfig{
+		Provider:   "codex",
+		Credential: RuntimeCredentialConfig{EnvKey: "MOONSHOT_API_KEY_TESTONLY"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := got["CODEX_API_KEY"]; ok {
+		t.Fatalf("CODEX_API_KEY must not be synthesized: %v", got)
+	}
+	if _, ok := got["OPENAI_API_KEY"]; ok {
+		t.Fatalf("OPENAI_API_KEY must not be synthesized: %v", got)
+	}
+}
+
+func TestResolveProviderEnv_CodexRejectsCredentialValuesInRuntimeEnv(t *testing.T) {
+	t.Setenv("MOONSHOT_API_KEY_TESTONLY", "inherited-secret")
+
+	for _, key := range []string{
+		"OPENAI_API_KEY",
+		"CODEX_API_KEY",
+		"MOONSHOT_API_KEY_TESTONLY",
+	} {
+		t.Run(key, func(t *testing.T) {
+			const literalSecret = "literal-secret-must-not-appear"
+			_, err := ResolveProviderEnv(RuntimeConfig{
+				Provider:   "codex",
+				Credential: RuntimeCredentialConfig{EnvKey: "MOONSHOT_API_KEY_TESTONLY"},
+				Env:        map[string]string{key: literalSecret},
+			})
+			if err == nil {
+				t.Fatalf("expected runtime.env.%s to be rejected", key)
+			}
+			if !strings.Contains(err.Error(), "runtime.env."+key) {
+				t.Fatalf("error must identify rejected field, got: %v", err)
+			}
+			if strings.Contains(err.Error(), literalSecret) {
+				t.Fatalf("error leaked credential value: %v", err)
+			}
+		})
+	}
+}
+
+func TestResolveRuntimeBaseURL_ExpandsEnv(t *testing.T) {
+	t.Setenv("CODEX_PROXY_BASE", "http://127.0.0.1:18793/v1")
+	got, err := ResolveRuntimeBaseURL(RuntimeConfig{BaseURL: "${CODEX_PROXY_BASE}"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != "http://127.0.0.1:18793/v1" {
+		t.Fatalf("baseURL = %q", got)
 	}
 }
 

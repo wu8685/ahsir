@@ -178,7 +178,7 @@ func (s *CodexSession) Close() error {
 }
 
 func runCodexExec(ctx context.Context, cfg SessionConfig, resumeID, prompt string) (codexRunResult, error) {
-	args := buildCodexExecArgs(cfg.Args, resumeID, prompt, cfg.WriteAccess, cfg.NetworkAccess)
+	args := buildCodexExecArgs(cfg.Args, resumeID, prompt, cfg.WriteAccess, cfg.NetworkAccess, cfg.CodexProviderArgs)
 	cmd := exec.CommandContext(ctx, cfg.Command, args...)
 	ahprocess.PrepareCommand(cmd)
 	if cfg.WorkDir != "" {
@@ -227,7 +227,7 @@ func runCodexExec(ctx context.Context, cfg SessionConfig, resumeID, prompt strin
 // buildCodexExecArgs returns arguments for the Codex CLI binary. Runtime args
 // are treated as `codex exec` flags; the provider owns --json so the parser can
 // consume a stable JSONL event stream.
-func buildCodexExecArgs(runtimeArgs []string, resumeID, prompt string, writeAccess, networkAccess bool) []string {
+func buildCodexExecArgs(runtimeArgs []string, resumeID, prompt string, writeAccess, networkAccess bool, trustedProviderArgs ...[]string) []string {
 	args := []string{"exec"}
 	args = append(args, sanitizeCodexExecArgs(runtimeArgs)...)
 	args = ensureCodexFlag(args, "--json")
@@ -238,6 +238,9 @@ func buildCodexExecArgs(runtimeArgs []string, resumeID, prompt string, writeAcce
 	args = ensureCodexFlagValue(args, "--sandbox", "-s", sandbox)
 	if writeAccess && networkAccess {
 		args = append(args, "-c", "sandbox_workspace_write.network_access=true")
+	}
+	if len(trustedProviderArgs) > 0 {
+		args = append(args, trustedProviderArgs[0]...)
 	}
 	args = ensureCodexFlag(args, "--skip-git-repo-check")
 	if resumeID != "" {
@@ -304,15 +307,17 @@ func sanitizeCodexExecArgs(in []string) []string {
 }
 
 // codexOverrideBypassesPolicy reports whether a `-c key=value` generic config
-// override targets the sandbox/approval policy — the config-file backdoor to
-// the same flags sanitizeCodexExecArgs strips.
+// override targets security policy or provider authentication owned by ahsir.
 func codexOverrideBypassesPolicy(kv string) bool {
 	key, _, _ := strings.Cut(kv, "=")
 	key = strings.TrimSpace(key)
 	switch {
-	case key == "sandbox_mode", key == "approval_policy":
+	case key == "sandbox_mode", key == "approval_policy",
+		key == "model_provider", key == "openai_base_url",
+		key == "preferred_auth_method", key == "cli_auth_credentials_store":
 		return true
-	case strings.HasPrefix(key, "sandbox_workspace_write"):
+	case strings.HasPrefix(key, "sandbox_workspace_write"),
+		strings.HasPrefix(key, "model_providers."):
 		return true
 	}
 	return false

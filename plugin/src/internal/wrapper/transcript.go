@@ -23,6 +23,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"sync"
 	"time"
 )
@@ -32,6 +33,16 @@ import (
 // its transcript file + index entry are pruned at agent startup (see
 // CompactForRetention) — mirroring the scheduler ledger's retention policy.
 const transcriptRetention = 30 * 24 * time.Hour
+
+// TranscriptExpired reports whether a context whose most recent turn is at
+// lastTurn has aged past the retention window as of now — i.e. it would be
+// pruned at the next agent startup (see CompactForRetention). Read-only
+// consumers (the archived/offline history views) use this to avoid resurrecting
+// transcripts the retention policy has effectively dropped, without mutating the
+// workspace of an agent that is no longer running.
+func TranscriptExpired(lastTurn, now time.Time) bool {
+	return lastTurn.Before(now.Add(-transcriptRetention))
+}
 
 // TranscriptTurn is one completed (or failed) turn in a context's transcript.
 type TranscriptTurn struct {
@@ -161,6 +172,69 @@ func (s *TranscriptStore) Contexts() (map[string]string, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.readIndexLocked()
+}
+
+// ContextSummary describes one on-disk context transcript for read-only
+// listing (the archived/offline agent view). It carries just enough to render a
+// left-rail row and open the full transcript via Read.
+type ContextSummary struct {
+	ContextID    string
+	Title        string // first non-empty userText — the conversation's anchor
+	Turns        int
+	LastActivity time.Time
+	LastStatus   string
+}
+
+// ListContexts summarises every context transcript still within the retention
+// window (most recent turn newer than the cutoff as of now), newest first.
+// Contexts past retention are omitted — they would be pruned at the next agent
+// startup (see CompactForRetention), so surfacing them would defeat the policy.
+// Read-only: it never mutates the workspace, so a deleted agent's history stays
+// viewable without resurrecting the process.
+func (s *TranscriptStore) ListContexts(now time.Time) ([]ContextSummary, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	index, err := s.readIndexLocked()
+	if err != nil {
+		return nil, err
+	}
+	out := make([]ContextSummary, 0, len(index))
+	for contextID := range index {
+		turns, err := s.readLocked(contextID)
+		if err != nil {
+			return nil, err
+		}
+		if len(turns) == 0 {
+			continue
+		}
+		last := turns[len(turns)-1]
+		if TranscriptExpired(last.TS, now) {
+			continue
+		}
+		out = append(out, ContextSummary{
+			ContextID:    contextID,
+			Title:        firstUserText(turns),
+			Turns:        len(turns),
+			LastActivity: last.TS,
+			LastStatus:   last.Status,
+		})
+	}
+	sort.Slice(out, func(i, j int) bool {
+		return out[i].LastActivity.After(out[j].LastActivity)
+	})
+	return out, nil
+}
+
+// firstUserText returns the first non-empty user message in a transcript — used
+// as a human-readable title, mirroring the console's context-title rule.
+func firstUserText(turns []TranscriptTurn) string {
+	for _, t := range turns {
+		if t.UserText != "" {
+			return t.UserText
+		}
+	}
+	return ""
 }
 
 func (s *TranscriptStore) indexPath() string {

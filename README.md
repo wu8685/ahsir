@@ -600,7 +600,7 @@ Runtime provider choices:
 | `anthropic` or empty | `ClaudeSession` via `claude -p --input-format=stream-json` | Uses local Claude auth unless `apiKey` / env are supplied. |
 | `deepseek` | `ClaudeSession` against DeepSeek's Anthropic-compatible endpoint | Defaults `baseURL` to `https://api.deepseek.com/anthropic`; `apiKey` maps to `ANTHROPIC_AUTH_TOKEN`. |
 | `zhipu` | `ClaudeSession` against Zhipu's Anthropic-compatible endpoint | Defaults `baseURL` to `https://open.bigmodel.cn/api/anthropic`. |
-| `codex` | `CodexSession` via `codex exec --json` | `apiKey` maps to `CODEX_API_KEY`; `model` maps to `--model`; resume uses Codex `thread_id`. |
+| `codex` | `CodexSession` via `codex exec --json` | Custom providers use `credential.envKey`; `model` maps to `--model`; resume uses Codex `thread_id`. `runtime.apiKey` is rejected. |
 
 `ahsir agent new` scaffolds `provider: anthropic` with `model: claude-opus-4-8`,
 no `baseURL` (official `api.anthropic.com`), and `apiKey: "${ANTHROPIC_AUTH_TOKEN}"`
@@ -645,6 +645,39 @@ filesystem:
   enabled: true
   allowed_paths:
     - "."
+```
+
+Codex custom-provider example:
+
+```yaml
+name: kimi-reviewer
+runtime:
+  command: codex
+  timeout: 300s
+  provider: codex
+  model: k3
+  baseURL: http://127.0.0.1:18793/v1
+  wireAPI: responses
+  credential:
+    envKey: MOONSHOT_API_KEY
+```
+
+`credential.envKey` is an environment-variable **name**, never a key value or
+`${VAR}` expression. The named variable must be present and non-empty in the
+`ahsir-agent` process environment. Ahsir passes the name to Codex's custom
+provider `env_key`; it does not expand the secret, rename it to
+`CODEX_API_KEY`, or store it in the Agent card. For Codex, both a literal
+`runtime.apiKey` and the old `runtime.apiKey: "${MOONSHOT_API_KEY}"` form fail
+at startup with a migration hint.
+
+Every Codex agent still gets an isolated `<workspace>/.a2a/codex-home`, but
+Ahsir no longer copies the operator's `~/.codex/auth.json` into it. Existing
+copies are not deleted automatically because they may contain a valid ChatGPT
+login. Discover cleanup candidates explicitly, inspect their purpose, and
+remove only those you have confirmed are obsolete:
+
+```bash
+find <agent-workspace-root> -path '*/.a2a/codex-home/auth.json' -print
 ```
 
 Agents can mix providers freely. The e2e suite includes a real mixed run where

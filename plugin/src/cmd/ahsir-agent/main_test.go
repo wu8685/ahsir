@@ -52,6 +52,52 @@ func TestBuildSessionConfig_CodexProvider(t *testing.T) {
 	}
 }
 
+func TestBuildSessionConfig_CodexCustomResponsesEndpoint(t *testing.T) {
+	t.Setenv("KIMI_PROXY_KEY", "secret-must-not-escape")
+	workspace := t.TempDir()
+	cfg, err := buildSessionConfig("reviewer", wrapper.RuntimeConfig{
+		Provider: "codex",
+		Command:  "codex",
+		BaseURL:  "http://127.0.0.1:18793/v1",
+		Model:    "k3",
+		Credential: wrapper.RuntimeCredentialConfig{
+			EnvKey: "KIMI_PROXY_KEY",
+		},
+	}, wrapper.FilesystemConfig{}, wrapper.MCPConfig{}, wrapper.StreamingConfig{}, workspace, workspace)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := envValue(cfg.Env, "CODEX_API_KEY"); got != "" {
+		t.Fatalf("CODEX_API_KEY must not be synthesized, got %q", got)
+	}
+	joined := strings.Join(cfg.Args, "\n")
+	trustedJoined := strings.Join(cfg.CodexProviderArgs, "\n")
+	if strings.Contains(joined, "model_providers.ahsir_runtime") {
+		t.Fatalf("trusted provider args mixed into raw runtime args: %v", cfg.Args)
+	}
+	for _, want := range []string{
+		`model_provider="ahsir_runtime"`,
+		`model_providers.ahsir_runtime.name="Ahsir runtime"`,
+		`model_providers.ahsir_runtime.base_url="http://127.0.0.1:18793/v1"`,
+		`model_providers.ahsir_runtime.env_key="KIMI_PROXY_KEY"`,
+		`model_providers.ahsir_runtime.wire_api="responses"`,
+		`model_providers.ahsir_runtime.requires_openai_auth=false`,
+		`web_search="disabled"`,
+		"--model=k3",
+	} {
+		target := trustedJoined
+		if want == "--model=k3" {
+			target = joined
+		}
+		if !strings.Contains(target, want) {
+			t.Fatalf("missing %q in raw=%v trusted=%v", want, cfg.Args, cfg.CodexProviderArgs)
+		}
+	}
+	if strings.Contains(joined, "secret-must-not-escape") || strings.Contains(trustedJoined, "secret-must-not-escape") {
+		t.Fatal("secret leaked into Codex arguments")
+	}
+}
+
 func TestBuildSessionConfig_CodexWriteAccessRequiresEnabledFilesystem(t *testing.T) {
 	tests := []struct {
 		name string
@@ -168,8 +214,8 @@ func TestBuildSessionConfig_CodexInjectsIsolatedCodexHome(t *testing.T) {
 	if info, err := os.Stat(want); err != nil || !info.IsDir() {
 		t.Fatalf("CODEX_HOME directory not created: info=%v err=%v", info, err)
 	}
-	if data, err := os.ReadFile(filepath.Join(want, "auth.json")); err != nil || string(data) != `{"token":"test"}` {
-		t.Fatalf("auth.json not mirrored: data=%q err=%v", data, err)
+	if _, err := os.Stat(filepath.Join(want, "auth.json")); !os.IsNotExist(err) {
+		t.Fatalf("auth.json must not be mirrored, err=%v", err)
 	}
 	filteredConfig, err := os.ReadFile(filepath.Join(want, "config.toml"))
 	if err != nil {
@@ -249,6 +295,42 @@ func TestBuildSessionConfig_ClaudeWriteAccessExpandsAllowedTools(t *testing.T) {
 	joined := strings.Join(cfg.Args, " ")
 	if !strings.Contains(joined, "--allowedTools=Read,LS,Glob,Grep,Edit,MultiEdit,Write") {
 		t.Fatalf("missing claude write-capable allowedTools in %v", cfg.Args)
+	}
+}
+
+func TestBuildSessionConfig_ClaudeShellAccessAddsBash(t *testing.T) {
+	cfg, err := buildSessionConfig("sheller", wrapper.RuntimeConfig{
+		Provider: "anthropic",
+		Command:  "claude",
+	}, wrapper.FilesystemConfig{
+		Enabled:      true,
+		WriteAccess:  true,
+		ShellAccess:  true,
+		AllowedPaths: []string{"."},
+	}, wrapper.MCPConfig{}, wrapper.StreamingConfig{}, "/tmp/workspace", "/tmp/workspace")
+	if err != nil {
+		t.Fatal(err)
+	}
+	joined := strings.Join(cfg.Args, " ")
+	if !strings.Contains(joined, "--allowedTools=Read,LS,Glob,Grep,Edit,MultiEdit,Write,Bash") {
+		t.Fatalf("missing Bash in shell-access allowedTools: %v", cfg.Args)
+	}
+}
+
+func TestBuildSessionConfig_ClaudeNoShellAccessOmitsBash(t *testing.T) {
+	cfg, err := buildSessionConfig("noshell", wrapper.RuntimeConfig{
+		Provider: "anthropic",
+		Command:  "claude",
+	}, wrapper.FilesystemConfig{
+		Enabled:      true,
+		WriteAccess:  true,
+		AllowedPaths: []string{"."},
+	}, wrapper.MCPConfig{}, wrapper.StreamingConfig{}, "/tmp/workspace", "/tmp/workspace")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(strings.Join(cfg.Args, " "), "Bash") {
+		t.Fatalf("Bash must not be granted without shell_access: %v", cfg.Args)
 	}
 }
 

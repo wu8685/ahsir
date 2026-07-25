@@ -2,6 +2,7 @@ package scheduler
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -15,6 +16,8 @@ import (
 
 	"github.com/a2aproject/a2a-go/a2a"
 	"github.com/google/uuid"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
+	"github.com/wu8685/ahsir/internal/obs"
 	"github.com/wu8685/ahsir/internal/wrapper"
 )
 
@@ -113,6 +116,15 @@ type asyncChatResponse struct {
 }
 
 func (g *gatewayHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	// Read-only Prometheus scrape endpoint (§6.B lock-in item 2: each process
+	// exposes its own /metrics; the scheduler does not proxy-aggregate).
+	if r.URL.Path == "/metrics" && r.Method == http.MethodGet {
+		promhttp.HandlerFor(g.sch.MetricsGatherer(), promhttp.HandlerOpts{
+			EnableOpenMetrics: true, // required for exemplar exposition
+		}).ServeHTTP(w, r)
+		return
+	}
+
 	if strings.HasPrefix(r.URL.Path, a2aProxyPrefix) {
 		g.handleA2AProxy(w, r)
 		return
@@ -142,6 +154,15 @@ func (g *gatewayHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// ledger file itself holds.
 	if r.URL.Path == "/invocations" && r.Method == http.MethodGet {
 		g.handleInvocations(w, r)
+		return
+	}
+
+	// /archived-agents: read-only view of offline agents (deleted/stopped) whose
+	// managed workspaces still hold transcripts under .ahsir/agents/*. Backs the
+	// console's "归档" section. No admin token — it exposes no more than the
+	// transcript files themselves, same posture as /invocations and /history.
+	if r.URL.Path == "/archived-agents" && r.Method == http.MethodGet {
+		g.handleArchivedAgents(w, r)
 		return
 	}
 
@@ -269,12 +290,18 @@ func (g *gatewayHandler) handlePublicAgents(w http.ResponseWriter, r *http.Reque
 		*a2a.AgentCard
 		Status string `json:"status"`
 	}
-	result := make([]cardWithStatus, len(cards))
-	for i, card := range cards {
-		result[i] = cardWithStatus{
+	result := make([]cardWithStatus, 0, len(cards))
+	for _, card := range cards {
+		// Hide pooled instance children (base#n): a card that backs a worker pool
+		// still presents as a single agent to users and to peer-agent discovery
+		// (issue #18). Callers chat the base name; the scheduler fans out.
+		if isInstanceChild(card.Name) {
+			continue
+		}
+		result = append(result, cardWithStatus{
 			AgentCard: g.publicAgentCard(r, card),
 			Status:    g.sch.registry.GetStatus(card.Name),
-		}
+		})
 	}
 	writeJSON(w, http.StatusOK, result)
 }
@@ -339,6 +366,21 @@ func (g *gatewayHandler) handleA2AProxy(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
+	// Activator: transparently wake an idle-stopped agent BEFORE resolving its
+	// dial target, so an A2A dispatch after a scale-to-zero re-spawns the
+	// runtime on a fresh process/port instead of dialing the dead cached
+	// endpoint (issue #20). The CLI chat path already does this via
+	// ChatWithAgentAs; the public /a2a/{agent} proxy — the path Hetairoi's
+	// autonomous loop dispatches through — was the one entrypoint that skipped
+	// it, so the first dispatch after any idle period reliably hit
+	// "connection refused" and the session went terminal. ensureAwake is a
+	// no-op when the agent is already up or was explicitly stopped/never
+	// existed; the agentDialTarget lookup below still decides genuine not-found.
+	if err := g.sch.ensureAwake(decodedName); err != nil {
+		writeJSONError(w, http.StatusBadGateway, "wake "+decodedName+": "+err.Error())
+		return
+	}
+
 	// Resolve via agentDialTarget so a scheduler-managed agent is reached at
 	// its recorded local address (not the registry card URL, which an
 	// unauthenticated registration can overwrite) and only such agents
@@ -369,7 +411,9 @@ func (g *gatewayHandler) handleA2AProxy(w http.ResponseWriter, r *http.Request) 
 
 	upstreamReq, err := http.NewRequestWithContext(r.Context(), r.Method, target.String(), bytes.NewReader(body))
 	if err != nil {
-		g.sch.ledger.Fail(inv.ID, err)
+		// Constructing our own request failed — an internal fault, not the
+		// upstream's. Label at the site (§6 red line: never parse it back out).
+		g.sch.ledger.FailResult(inv.ID, obs.ResultInternalError, err)
 		writeJSONError(w, http.StatusBadGateway, "create upstream request: "+err.Error())
 		return
 	}
@@ -381,7 +425,9 @@ func (g *gatewayHandler) handleA2AProxy(w http.ResponseWriter, r *http.Request) 
 
 	upstreamResp, err := http.DefaultTransport.RoundTrip(upstreamReq)
 	if err != nil {
-		g.sch.ledger.Fail(inv.ID, err)
+		// Reaching the agent failed (connection refused / caller ctx gone).
+		// Cancellation is the caller giving up, not an upstream fault.
+		g.sch.ledger.FailResult(inv.ID, classifyProxyError(err), err)
 		writeJSONError(w, http.StatusBadGateway, "proxy "+decodedName+": "+err.Error())
 		return
 	}
@@ -398,11 +444,46 @@ func (g *gatewayHandler) handleA2AProxy(w http.ResponseWriter, r *http.Request) 
 	// as successes — recovery and `trace` views would then lie.
 	switch {
 	case upstreamResp.StatusCode >= 500:
-		g.sch.ledger.FailMessage(inv.ID, fmt.Sprintf("upstream status %d", upstreamResp.StatusCode))
+		g.sch.ledger.FailMessageResult(inv.ID, obs.ResultUpstreamError, fmt.Sprintf("upstream status %d", upstreamResp.StatusCode))
 	case copyErr != nil:
-		g.sch.ledger.FailMessage(inv.ID, fmt.Sprintf("response stream interrupted: %v", copyErr))
+		g.sch.ledger.FailMessageResult(inv.ID, obs.ResultUpstreamError, fmt.Sprintf("response stream interrupted: %v", copyErr))
 	default:
 		g.sch.ledger.Complete(inv.ID)
+	}
+}
+
+// classifyProxyError buckets a transport-level failure reaching an agent into
+// the §7 taxonomy at the site it occurs. Caller cancellation/timeout is the
+// caller's own doing (not an upstream fault); everything else is upstream.
+func classifyProxyError(err error) obs.Result {
+	switch {
+	case errors.Is(err, context.Canceled):
+		return obs.ResultCancel
+	case errors.Is(err, context.DeadlineExceeded):
+		return obs.ResultTimeout
+	default:
+		return obs.ResultUpstreamError
+	}
+}
+
+// classifyChatError buckets a chat-path error into the §7 taxonomy at the
+// gateway. Turn-level types (wrapper.ErrTurnInFlight) don't survive the A2A
+// process boundary, so the "agent busy:" wire marker — the same signal
+// writeChatError uses for its 409 — is how the gateway recognizes backpressure
+// here. This is NOT the forbidden "parse the ledger's free-text error" (§6):
+// it is the established cross-process wire contract, evaluated at the site.
+func classifyChatError(err error) obs.Result {
+	switch {
+	case err == nil:
+		return obs.ResultDone
+	case errors.Is(err, context.Canceled):
+		return obs.ResultCancel
+	case errors.Is(err, context.DeadlineExceeded):
+		return obs.ResultTimeout
+	case strings.Contains(err.Error(), "agent busy:"):
+		return obs.ResultBusy
+	default:
+		return obs.ResultUpstreamError
 	}
 }
 
@@ -447,14 +528,16 @@ func (g *gatewayHandler) handleChat(w http.ResponseWriter, r *http.Request, name
 	// Async: submit, mark queued, settle in the background, answer 202 with
 	// the task handle. The error mapping below is shared with the sync path.
 	if req.Async {
-		task, err := g.sch.ChatWithAgentAsync(name, req.ContextID, req.Speaker, req.Message)
+		task, release, err := g.sch.ChatWithAgentAsync(name, req.ContextID, req.Speaker, req.Message)
 		if err != nil {
-			g.sch.ledger.Fail(inv.ID, err)
+			g.sch.ledger.FailResult(inv.ID, classifyChatError(err), err)
 			g.writeChatError(w, name, req.ContextID, err)
 			return
 		}
 		g.sch.ledger.Queued(inv.ID)
-		go g.sch.settleAsyncInvocation(inv.ID, name, string(task.ID))
+		// release holds the instance pool's in-flight count until the async turn
+		// settles (issue #18) — hand it to the settler.
+		go g.sch.settleAsyncInvocation(inv.ID, name, string(task.ID), release)
 		writeJSON(w, http.StatusAccepted, asyncChatResponse{
 			TaskID:    string(task.ID),
 			ContextID: task.ContextID,
@@ -464,7 +547,7 @@ func (g *gatewayHandler) handleChat(w http.ResponseWriter, r *http.Request, name
 
 	reply, err := g.sch.ChatWithAgentAs(name, req.ContextID, req.Speaker, req.Message)
 	if err != nil {
-		g.sch.ledger.Fail(inv.ID, err)
+		g.sch.ledger.FailResult(inv.ID, classifyChatError(err), err)
 		g.writeChatError(w, name, req.ContextID, err)
 		return
 	}
@@ -514,18 +597,41 @@ func (g *gatewayHandler) handleAgentConfig(w http.ResponseWriter, r *http.Reques
 	writeJSON(w, http.StatusOK, map[string]string{"path": path, "yaml": string(data)})
 }
 
+func (g *gatewayHandler) handleArchivedAgents(w http.ResponseWriter, r *http.Request) {
+	agents, err := g.sch.ArchivedAgents()
+	if err != nil {
+		writeJSONError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if agents == nil {
+		agents = []ArchivedAgent{}
+	}
+	writeJSON(w, http.StatusOK, agents)
+}
+
 func (g *gatewayHandler) handleHistory(w http.ResponseWriter, r *http.Request, name, rawContextID string) {
 	contextID, err := url.PathUnescape(rawContextID)
 	if err != nil || contextID == "" {
 		writeJSONError(w, http.StatusBadRequest, "invalid contextId")
 		return
 	}
-	turns, err := g.sch.AgentHistory(name, contextID)
-	if err != nil {
-		if _, ok := g.sch.registry.Get(name); !ok {
+	// An agent that isn't registered can't be proxied — but if it's an
+	// archived/offline agent its transcripts persist on disk, so serve those
+	// read-only. This is what keeps a deleted agent's history viewable.
+	if _, ok := g.sch.registry.Get(name); !ok {
+		turns, err := g.sch.ArchivedAgentHistory(name, contextID)
+		if err != nil {
 			writeJSONError(w, http.StatusNotFound, err.Error())
 			return
 		}
+		if turns == nil {
+			turns = []wrapper.TranscriptTurn{}
+		}
+		writeJSON(w, http.StatusOK, turns)
+		return
+	}
+	turns, err := g.sch.AgentHistory(name, contextID)
+	if err != nil {
 		writeJSONError(w, http.StatusBadGateway, err.Error())
 		return
 	}
@@ -565,10 +671,14 @@ func (g *gatewayHandler) handleTask(w http.ResponseWriter, r *http.Request, name
 // CMA agent version) need not pre-stage anything on disk. When Card is set and
 // Workspace is empty, a managed workspace is allocated under .ahsir/agents/.
 type startAgentRequest struct {
-	Name      string                   `json:"name"`
-	Workspace string                   `json:"workspace"`
-	Workdir   string                   `json:"workdir,omitempty"`
-	Port      int                      `json:"port,omitempty"`
+	Name      string `json:"name"`
+	Workspace string `json:"workspace"`
+	Workdir   string `json:"workdir,omitempty"`
+	Port      int    `json:"port,omitempty"`
+	// Instances caps how many concurrent runtime instances this card may back
+	// (issue #18). Zero/1 = single instance (unchanged). >1 lets the scheduler
+	// pool isolated-workspace instances on demand for safe parallel dispatch.
+	Instances int                      `json:"instances,omitempty"`
 	Card      *wrapper.AgentCardConfig `json:"card,omitempty"`
 }
 
@@ -661,6 +771,7 @@ func (g *gatewayHandler) handleAdminStart(w http.ResponseWriter, r *http.Request
 		Workspace: workspace,
 		Workdir:   req.Workdir,
 		Port:      req.Port,
+		Instances: req.Instances,
 	})
 	if err != nil {
 		log.Printf("admin: start agent %q failed: %v", req.Name, err)

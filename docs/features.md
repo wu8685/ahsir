@@ -426,15 +426,23 @@ runtime:
   model: deepseek-v4-pro
 ```
 
-**D. Codex.** Uses an isolated per-agent `CODEX_HOME` and Codex's own
-config/login; `baseURL` is not supported here.
+**D. Codex custom provider.** Uses an isolated per-agent `CODEX_HOME`.
+Authentication is env-only: declare the environment-variable name and make
+that variable available to the `ahsir-agent` process.
 
 ```yaml
 runtime:
   command: codex
   provider: codex
-  model: ""                     # optional; Codex picks its default otherwise
+  model: k3
+  baseURL: http://127.0.0.1:18793/v1
+  wireAPI: responses
+  credential:
+    envKey: MOONSHOT_API_KEY
 ```
+
+Codex rejects `runtime.apiKey`; it never copies the operator's
+`~/.codex/auth.json` into the isolated home.
 
 `ahsir agent new` scaffolds Anthropic defaults — recipe **B** (`provider: anthropic`,
 no `baseURL` → official `api.anthropic.com`, `apiKey: ${ANTHROPIC_AUTH_TOKEN}`,
