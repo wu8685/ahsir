@@ -363,6 +363,16 @@ func (e *Executor) ExecuteStream(ctx context.Context, msg *a2a.Message) iter.Seq
 		}
 
 		task.Status = a2a.TaskStatus{State: a2a.TaskStateCompleted}
+		// Mirror the final agent reply into Status.Message. Real providers
+		// stream text deltas that fill the consumer's buffer directly, but a
+		// delta-less runtime's reply lives only in History — and the A2A
+		// "terminal message" fallback (e.g. the gateway's ChatStream no-delta
+		// path) reads Status.Message. Setting it here keeps the aggregated
+		// reply non-empty over message/stream regardless of whether deltas
+		// were emitted. See issue #15.
+		if final := finalAgentMessage(task); final != nil {
+			task.Status.Message = final
+		}
 		log.Printf("[%s] executor done contextID=%s msgID=%s history=%d took=%v", selfTag, task.ContextID, msg.ID, len(task.History), time.Since(started))
 		e.appendTranscript(task, msg, finalAgentText(task), started, nil)
 		yield(task, nil)
@@ -373,15 +383,27 @@ func (e *Executor) ExecuteStream(ctx context.Context, msg *a2a.Message) iter.Seq
 // the canonical "reply" of a streaming round, mirroring what taskToString
 // returns for the blocking path.
 func finalAgentText(task *a2a.Task) string {
+	if msg := finalAgentMessage(task); msg != nil {
+		return messageText(msg)
+	}
+	return ""
+}
+
+// finalAgentMessage returns the last agent-authored message that carries text,
+// or nil when the task has none. This is the message form of finalAgentText:
+// ExecuteStream mirrors it into the terminal task's Status.Message so streaming
+// consumers relying on the A2A "terminal message" fallback still see the reply
+// when the runtime emitted no text deltas (see issue #15).
+func finalAgentMessage(task *a2a.Task) *a2a.Message {
 	for i := len(task.History) - 1; i >= 0; i-- {
 		if task.History[i].Role != a2a.MessageRoleAgent {
 			continue
 		}
-		if txt := messageText(task.History[i]); txt != "" {
-			return txt
+		if messageText(task.History[i]) != "" {
+			return task.History[i]
 		}
 	}
-	return ""
+	return nil
 }
 
 // interactStream is the streaming sibling of interact(). Per-delta events are

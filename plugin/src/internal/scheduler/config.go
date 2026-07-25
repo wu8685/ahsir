@@ -81,13 +81,30 @@ type AgentConfig struct {
 	// empty. Decoupling it lets several agents — each with its own private
 	// Workspace (where .a2a/ card+sessions+transcripts live) — share one cwd,
 	// e.g. a common project/knowledge directory.
-	Workdir       string `yaml:"workdir,omitempty"`
-	Port          int    `yaml:"port"`
+	Workdir string `yaml:"workdir,omitempty"`
+	Port    int    `yaml:"port"`
+	// Instances caps how many concurrent runtime instances this one agent card
+	// may back (issue #18). Each instance beyond the first is a separate
+	// ahsir-agent process with its own isolated workspace (inst-<n>), so
+	// concurrent sessions dispatched to the same card no longer clobber a shared
+	// working tree. Zero or 1 means the historical "one card = one worker"
+	// behavior — a single instance, byte-identical to before.
+	Instances     int    `yaml:"instances,omitempty"`
 	Remote        string `yaml:"remote,omitempty"`
 	InternalToken string `yaml:"-"`
 	// AdminToken is the scheduler's control-plane token, handed to the agent
 	// so its registry heartbeat authenticates. Runtime-only, never persisted.
 	AdminToken string `yaml:"-"`
+}
+
+// InstanceCap returns the effective concurrent-instance cap for this agent:
+// at least 1. Zero/negative Instances (the unset default) collapses to a single
+// instance, preserving the historical one-card-one-worker behavior.
+func (c AgentConfig) InstanceCap() int {
+	if c.Instances < 1 {
+		return 1
+	}
+	return c.Instances
 }
 
 // RegistryConfig configures the registry.
@@ -186,10 +203,22 @@ func (c *Config) RoomsDir() string {
 // config is in-memory (no file path), in which case the caller must require an
 // explicit workspace.
 func (c *Config) ManagedAgentWorkspace(name string) string {
+	dir := c.ManagedAgentsDir()
+	if dir == "" {
+		return ""
+	}
+	return filepath.Join(dir, name)
+}
+
+// ManagedAgentsDir is the root under which managed agent workspaces live —
+// .ahsir/agents/<name>. It is the discovery surface for archived/offline agents:
+// a workspace here whose agent is no longer registered still holds replayable
+// transcripts. Empty when the config is in-memory (no file path).
+func (c *Config) ManagedAgentsDir() string {
 	if c == nil || c.path == "" {
 		return ""
 	}
-	return filepath.Join(filepath.Dir(c.path), ".ahsir", "agents", name)
+	return filepath.Join(filepath.Dir(c.path), ".ahsir", "agents")
 }
 
 // AllocatePort allocates the next available port from the range.

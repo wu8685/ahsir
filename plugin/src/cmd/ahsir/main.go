@@ -118,6 +118,9 @@ func usage() {
 
 func startCmd(args []string) {
 	fs := flag.NewFlagSet("start", flag.ExitOnError)
+	cmaListen := fs.String("cma-listen", "", "if set, also serve the CMA-compatible HTTP API on this addr (e.g. 127.0.0.1:18790), driving this scheduler over loopback")
+	cmaScheduler := fs.String("cma-scheduler", "http://127.0.0.1:9800", "scheduler URL the CMA facade drives over loopback (used with --cma-listen)")
+	cmaState := fs.String("cma-state", "", "state file for the CMA facade session store (default ~/.ahsir/cma-state.json)")
 	if err := fs.Parse(args); err != nil {
 		os.Exit(1)
 	}
@@ -145,6 +148,21 @@ func startCmd(args []string) {
 	if err := sch.Start(ctx); err != nil {
 		fmt.Fprintf(os.Stderr, "Error starting scheduler: %v\n", err)
 		os.Exit(1)
+	}
+
+	// Optional CMA-compatible facade (migration P1): a second listener that
+	// speaks the CMA wire and drives this scheduler over loopback. Off unless
+	// --cma-listen is given, so default `ahsir start` is unchanged.
+	if *cmaListen != "" {
+		statePath := *cmaState
+		if statePath == "" {
+			home, _ := os.UserHomeDir()
+			statePath = filepath.Join(home, ".ahsir", "cma-state.json")
+		}
+		if err := startCMAFacade(*cmaListen, *cmaScheduler, resolveAdminToken(configPath), statePath); err != nil {
+			fmt.Fprintf(os.Stderr, "Error starting CMA facade: %v\n", err)
+			os.Exit(1)
+		}
 	}
 
 	sigCh := make(chan os.Signal, 1)

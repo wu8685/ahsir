@@ -128,6 +128,16 @@ type PoolConfig struct {
 	// zero value is distinguishable: unset → default (4), explicit 0 →
 	// no queueing, restore fail-fast busy.
 	QueueDepth *int `yaml:"queue_depth" json:"queue_depth"`
+
+	// SessionIsolation gives each A2A contextID (session) its own filesystem
+	// working directory so concurrent sessions in one agent process don't race
+	// on a shared working tree (issue #19). Values:
+	//   - "" / "off" (default): all sessions share the one agent workdir.
+	//   - "scratch": each session gets an empty private dir as its cwd.
+	//   - "worktree": each session gets a `git worktree` checkout of the
+	//     workdir (falls back to "scratch" when the workdir isn't a git repo).
+	// Parsed via ParseIsolationMode at startup so a typo fails loud.
+	SessionIsolation string `yaml:"session_isolation" json:"session_isolation"`
 }
 
 // ProviderConfig maps to a2a.AgentProvider.
@@ -164,7 +174,8 @@ type ClaudeConfig struct {
 //     Anthropic-compatible endpoint), with BaseURL defaulting to
 //     https://open.bigmodel.cn/api/anthropic.
 //   - "codex": drives `codex exec --json`, maps APIKey to CODEX_API_KEY and
-//     Model to --model.
+//     Model to --model. When BaseURL is set, ahsir injects a per-agent custom
+//     Responses API provider through Codex CLI config overrides.
 //   - any other value: provider mapping is skipped; user must populate Env
 //     (and likely Command) directly.
 //
@@ -174,14 +185,16 @@ type ClaudeConfig struct {
 //
 // Timeout has the form accepted by time.ParseDuration (e.g. "120s", "2m").
 type RuntimeConfig struct {
-	Provider string            `yaml:"provider" json:"provider"`
-	BaseURL  string            `yaml:"baseURL" json:"baseURL"`
-	APIKey   string            `yaml:"apiKey" json:"apiKey"`
-	Model    string            `yaml:"model" json:"model"`
-	Command  string            `yaml:"command" json:"command"`
-	Args     []string          `yaml:"args" json:"args"`
-	Env      map[string]string `yaml:"env" json:"env"`
-	Timeout  string            `yaml:"timeout" json:"timeout"`
+	Provider   string                  `yaml:"provider" json:"provider"`
+	BaseURL    string                  `yaml:"baseURL" json:"baseURL"`
+	APIKey     string                  `yaml:"apiKey" json:"apiKey"`
+	Model      string                  `yaml:"model" json:"model"`
+	WireAPI    string                  `yaml:"wireAPI" json:"wireAPI"`
+	Credential RuntimeCredentialConfig `yaml:"credential" json:"credential"`
+	Command    string                  `yaml:"command" json:"command"`
+	Args       []string                `yaml:"args" json:"args"`
+	Env        map[string]string       `yaml:"env" json:"env"`
+	Timeout    string                  `yaml:"timeout" json:"timeout"`
 	// AgentIdleTimeout is the scale-to-zero idle-reap window (issue #6): after
 	// all turns end and no new turn starts for this long, the agent PROCESS
 	// exits on its own and the scheduler marks it idle-stopped, waking it again
@@ -198,10 +211,23 @@ type RuntimeConfig struct {
 	AgentIdleTimeout string `yaml:"agent_idle_timeout" json:"agent_idle_timeout"`
 }
 
+// RuntimeCredentialConfig identifies the environment variable Codex should
+// read for a custom provider. It stores a variable name, never a secret value.
+type RuntimeCredentialConfig struct {
+	EnvKey string `yaml:"envKey" json:"envKey"`
+}
+
 // FilesystemConfig holds filesystem tool configuration from agent-card.yaml.
 type FilesystemConfig struct {
-	Enabled      bool     `yaml:"enabled" json:"enabled"`
-	WriteAccess  bool     `yaml:"write_access" json:"write_access"`
+	Enabled     bool `yaml:"enabled" json:"enabled"`
+	WriteAccess bool `yaml:"write_access" json:"write_access"`
+	// ShellAccess is the explicit opt-in that adds the Bash tool to the
+	// claude allowedTools whitelist. It is deliberately separate from
+	// WriteAccess: granting file edits must not implicitly grant arbitrary
+	// command execution. This is the card-schema knob that stripClaudePermissionBypassArgs
+	// points to — the sanctioned way to widen a claude agent to shell, rather
+	// than smuggling --dangerously-skip-permissions through runtime.args.
+	ShellAccess  bool     `yaml:"shell_access" json:"shell_access"`
 	AllowedPaths []string `yaml:"allowed_paths" json:"allowed_paths"`
 }
 
@@ -288,10 +314,12 @@ var renamedCardKeys = []renamedCardKey{
 // checkRenamedCardKeys scans the raw agent-card YAML for keys that were renamed
 // in a breaking change and returns an error naming the replacement. Without
 // this, yaml.Unmarshal would drop the stale key silently and the field would
-// take its default.
+// take its default — see the call site in Load for why that is dangerous.
 func checkRenamedCardKeys(data []byte) error {
 	var raw map[string]any
 	if err := yaml.Unmarshal(data, &raw); err != nil {
+		// A genuinely malformed document is reported by the real Unmarshal in
+		// Load; don't shadow that error here.
 		return nil
 	}
 	for _, rk := range renamedCardKeys {
@@ -316,9 +344,12 @@ func (b *AgentCardBuilder) Load() (*AgentCardConfig, error) {
 		return nil, fmt.Errorf("read agent-card.yaml: %w", err)
 	}
 
-	// Fail loud on renamed keys — Go's yaml silently drops unknown fields, so a
-	// stale idle_ttl / idle_timeout would be discarded and the new field left
-	// at its default. Reject with the new name instead. See issue #11.
+	// Fail loud on renamed keys. Go's yaml silently drops unknown fields, so a
+	// card still carrying the pre-#11 names (idle_ttl / idle_timeout) would be
+	// parsed with those values discarded and the new fields left at their
+	// defaults — a dangerous, invisible behaviour flip (e.g. idle_timeout: 0,
+	// meant to pin the agent resident, would silently become the 10m default).
+	// Reject them explicitly with the new name instead.
 	if err := checkRenamedCardKeys(data); err != nil {
 		return nil, err
 	}

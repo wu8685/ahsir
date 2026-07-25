@@ -585,6 +585,102 @@ func TestExecutor_ExecuteStream_YieldsDeltas(t *testing.T) {
 	}
 }
 
+// TestExecutor_ExecuteStream_NoDeltasSetsTerminalStatusMessage reproduces
+// issue #15: a delta-less runtime (only a final EventText, no EventTextDelta)
+// must still surface its reply to a streaming consumer. Such consumers (the
+// gateway's ChatStream) aggregate status-update deltas into a buffer and, when
+// that buffer stays empty, fall back to the terminal task's Status.Message.
+// The reply lives in History, so unless ExecuteStream mirrors it into
+// Status.Message the aggregated reply is empty. This test drives a session
+// that emits no deltas and asserts the terminal Status.Message carries the
+// text — and that replaying the documented consumer fallback yields a
+// non-empty reply.
+func TestExecutor_ExecuteStream_NoDeltasSetsTerminalStatusMessage(t *testing.T) {
+	const reply = "echo: say hi"
+	// No delta chunks for the single turn, only the final EventText — exactly
+	// what a delta-less runtime (the echo provider) emits.
+	fake := newFakeStreamSession([][]string{{}}, []string{reply})
+	openSession := func(ctx context.Context, contextID string) (Session, error) {
+		return fake, nil
+	}
+
+	executor := NewExecutor(ExecutorConfig{
+		OpenSession: openSession,
+		ListAgents:  func() []*a2a.AgentCard { return nil },
+		MaxDepth:    5,
+		BasePrompt:  "You are a helper.",
+	})
+
+	ctx := context.Background()
+	msg := a2a.NewMessage(a2a.MessageRoleUser, a2a.TextPart{Text: "say hi"})
+
+	// Mirror the consumer (ChatStream) contract: accumulate text parts from
+	// status-update deltas; the terminal task supplies the fallback.
+	var buf strings.Builder
+	var deltaCount int
+	var finalTask *a2a.Task
+	for ev, err := range executor.ExecuteStream(ctx, msg) {
+		if err != nil {
+			t.Fatalf("yield err: %v", err)
+		}
+		switch e := ev.(type) {
+		case *a2a.TaskStatusUpdateEvent:
+			if e.Status.Message == nil {
+				continue
+			}
+			for _, p := range e.Status.Message.Parts {
+				if tp, ok := p.(a2a.TextPart); ok {
+					buf.WriteString(tp.Text)
+					deltaCount++
+				}
+			}
+		case *a2a.Task:
+			finalTask = e
+		}
+	}
+
+	if deltaCount != 0 {
+		t.Fatalf("precondition: want no streamed deltas for a delta-less runtime, got %d", deltaCount)
+	}
+	if finalTask == nil {
+		t.Fatal("ExecuteStream did not yield a final *a2a.Task")
+	}
+	if finalTask.Status.State != a2a.TaskStateCompleted {
+		t.Errorf("want completed state, got %s", finalTask.Status.State)
+	}
+
+	// The core regression: the terminal task carries the reply in Status.Message
+	// so the no-delta consumer fallback can find it.
+	if finalTask.Status.Message == nil {
+		t.Fatal("terminal Status.Message is nil; no-delta consumers see an empty reply (issue #15)")
+	}
+	var terminalText strings.Builder
+	for _, p := range finalTask.Status.Message.Parts {
+		if tp, ok := p.(a2a.TextPart); ok {
+			terminalText.WriteString(tp.Text)
+		}
+	}
+	if terminalText.String() != reply {
+		t.Errorf("want terminal Status.Message text %q, got %q", reply, terminalText.String())
+	}
+	if finalTask.Status.Message.Role != a2a.MessageRoleAgent {
+		t.Errorf("want terminal Status.Message role agent, got %s", finalTask.Status.Message.Role)
+	}
+
+	// Replay the documented consumer fallback: buf is empty, so adopt the
+	// terminal Status.Message. The aggregated reply must be non-empty.
+	if buf.Len() == 0 && finalTask.Status.Message != nil {
+		for _, p := range finalTask.Status.Message.Parts {
+			if tp, ok := p.(a2a.TextPart); ok {
+				buf.WriteString(tp.Text)
+			}
+		}
+	}
+	if buf.String() != reply {
+		t.Errorf("aggregated reply: want %q, got %q", reply, buf.String())
+	}
+}
+
 // TestExecutor_ExecuteStream_A2ACallRecurses ensures that an A2A_CALL marker
 // in the first turn dispatches to callAgent, then resumes streaming for the
 // second turn. Deltas from both turns are visible in order.

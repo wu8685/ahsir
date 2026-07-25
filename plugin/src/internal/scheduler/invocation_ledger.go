@@ -11,6 +11,8 @@ import (
 	"sync"
 	"time"
 	"unicode/utf8"
+
+	"github.com/wu8685/ahsir/internal/obs"
 )
 
 const (
@@ -103,6 +105,19 @@ type InvocationLedger struct {
 	path    string
 	records map[string]InvocationRecord
 	order   []string
+	// metrics is the Gateway A-group sink (§6). Optional: nil disables metric
+	// emission so a bare ledger (tests, no registry) still works. The ledger is
+	// the single begin/finish汇聚点, so exporting from here avoids a second set
+	// of probes.
+	metrics *GatewayMetrics
+}
+
+// SetGatewayMetrics attaches the Gateway A-group metrics sink. Call once at
+// construction, before the ledger takes traffic.
+func (l *InvocationLedger) SetGatewayMetrics(m *GatewayMetrics) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.metrics = m
 }
 
 func NewInvocationLedger() *InvocationLedger {
@@ -248,37 +263,60 @@ func (l *InvocationLedger) Begin(meta InvocationMetadata) InvocationRecord {
 		Speaker:   rec.Speaker,
 		TS:        rec.StartedAt,
 	})
+	// Count this invocation as in-flight; the paired settle() fires on the
+	// first terminal transition (see updateStatus). Queued stays in-flight.
+	l.metrics.begin(rec.AgentName, string(rec.Source))
 	return rec
 }
 
 func (l *InvocationLedger) Complete(id string) {
-	l.finish(id, InvocationStatusCompleted, "")
+	l.finish(id, InvocationStatusCompleted, obs.ResultDone, "")
 }
 
+// Fail settles the invocation as failed with the catch-all internal_error
+// result. Call sites that know the specific failure class should use
+// FailResult instead — the result label must be chosen at the error-production
+// site, never parsed back out of the error string (§6 red line).
 func (l *InvocationLedger) Fail(id string, err error) {
 	msg := ""
 	if err != nil {
 		msg = err.Error()
 	}
-	l.finish(id, InvocationStatusFailed, msg)
+	l.finish(id, InvocationStatusFailed, obs.ResultInternalError, msg)
+}
+
+// FailResult settles the invocation as failed and records result as the
+// metric label. result is decided by the caller at the failure site.
+func (l *InvocationLedger) FailResult(id string, result obs.Result, err error) {
+	msg := ""
+	if err != nil {
+		msg = err.Error()
+	}
+	l.finish(id, InvocationStatusFailed, result, msg)
 }
 
 func (l *InvocationLedger) FailMessage(id, msg string) {
-	l.finish(id, InvocationStatusFailed, msg)
+	l.finish(id, InvocationStatusFailed, obs.ResultInternalError, msg)
+}
+
+// FailMessageResult is FailMessage with an explicit result label.
+func (l *InvocationLedger) FailMessageResult(id string, result obs.Result, msg string) {
+	l.finish(id, InvocationStatusFailed, result, msg)
 }
 
 // Queued marks an async invocation as accepted-but-not-finished. Non-terminal:
-// FinishedAt stays zero until the background poll settles it.
+// FinishedAt stays zero until the background poll settles it. It stays counted
+// as in-flight (no settle) until Complete/Fail fires.
 func (l *InvocationLedger) Queued(id string) {
-	l.updateStatus(id, InvocationStatusQueued, "", false)
+	l.updateStatus(id, InvocationStatusQueued, "", "", false)
 }
 
 func (l *InvocationLedger) Recovering(id string) {
-	l.updateStatus(id, InvocationStatusRecovering, "", false)
+	l.updateStatus(id, InvocationStatusRecovering, "", "", false)
 }
 
 func (l *InvocationLedger) Recovered(id string) {
-	l.updateStatus(id, InvocationStatusRecovered, "", true)
+	l.updateStatus(id, InvocationStatusRecovered, "", "", true)
 }
 
 func (l *InvocationLedger) RecoveryFailed(id string, err error) {
@@ -286,20 +324,21 @@ func (l *InvocationLedger) RecoveryFailed(id string, err error) {
 	if err != nil {
 		msg = err.Error()
 	}
-	l.updateStatus(id, InvocationStatusRecoveryFailed, msg, true)
+	l.updateStatus(id, InvocationStatusRecoveryFailed, "", msg, true)
 }
 
-func (l *InvocationLedger) finish(id string, status InvocationStatus, errMsg string) {
-	l.updateStatus(id, status, errMsg, true)
+func (l *InvocationLedger) finish(id string, status InvocationStatus, result obs.Result, errMsg string) {
+	l.updateStatus(id, status, result, errMsg, true)
 }
 
-func (l *InvocationLedger) updateStatus(id string, status InvocationStatus, errMsg string, finish bool) {
+func (l *InvocationLedger) updateStatus(id string, status InvocationStatus, result obs.Result, errMsg string, finish bool) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	rec, ok := l.records[id]
 	if !ok {
 		return
 	}
+	prev := rec.Status
 	rec.Status = status
 	rec.Error = errMsg
 	ts := time.Now()
@@ -313,6 +352,13 @@ func (l *InvocationLedger) updateStatus(id string, status InvocationStatus, errM
 		Error: errMsg,
 		TS:    ts,
 	})
+	// Emit the Gateway A-group settle exactly once, on the FIRST terminal
+	// transition out of a live state (in_flight, or queued for the async
+	// path). Recovery transitions (failed→recovering→recovered) start from a
+	// non-live prior status, so they never double-count.
+	if finish && (prev == InvocationStatusInFlight || prev == InvocationStatusQueued) {
+		l.metrics.settle(rec.AgentName, string(rec.Source), result, rec.FinishedAt.Sub(rec.StartedAt), rec.ContextID, "")
+	}
 }
 
 func (l *InvocationLedger) Snapshot() []InvocationRecord {
