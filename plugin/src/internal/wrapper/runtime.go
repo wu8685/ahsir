@@ -125,11 +125,15 @@ func ResolveProviderEnv(rt RuntimeConfig) (map[string]string, error) {
 	provider := RuntimeProvider(rt)
 
 	if provider == ProviderCodex {
-		if _, err := ResolveCodexProvider(rt); err != nil {
+		resolved, err := ResolveCodexProvider(rt)
+		if err != nil {
 			return nil, err
 		}
 		out := map[string]string{}
 		for k, v := range rt.Env {
+			if k == "OPENAI_API_KEY" || k == "CODEX_API_KEY" || k == resolved.EnvKey {
+				return nil, fmt.Errorf("runtime.env.%s is reserved for Codex authentication; set credential.envKey and export the credential in the parent process environment", k)
+			}
 			expanded, err := expandStrict("runtime.env."+k, v)
 			if err != nil {
 				return nil, err

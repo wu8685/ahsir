@@ -173,9 +173,9 @@ type ClaudeConfig struct {
 //   - "zhipu": same env mapping as anthropic (Zhipu/智谱 GLM exposes an
 //     Anthropic-compatible endpoint), with BaseURL defaulting to
 //     https://open.bigmodel.cn/api/anthropic.
-//   - "codex": drives `codex exec --json`, maps APIKey to CODEX_API_KEY and
-//     Model to --model. When BaseURL is set, ahsir injects a per-agent custom
-//     Responses API provider through Codex CLI config overrides.
+//   - "codex": drives `codex exec --json`; custom providers use
+//     Credential.EnvKey and Model maps to --model. When BaseURL is set, ahsir
+//     injects a per-agent provider through Codex CLI config overrides.
 //   - any other value: provider mapping is skipped; user must populate Env
 //     (and likely Command) directly.
 //

@@ -67,6 +67,30 @@ func TestBuildCodexExecArgs_NetworkAccessCannotWidenReadOnly(t *testing.T) {
 	}
 }
 
+func TestBuildCodexExecArgs_AppendsTrustedProviderArgsAfterSanitizingRuntimeArgs(t *testing.T) {
+	trusted := []string{
+		"-c", `model_provider="ahsir_runtime"`,
+		"-c", `model_providers.ahsir_runtime.env_key="MOONSHOT_API_KEY"`,
+	}
+	got := buildCodexExecArgs(
+		[]string{"-c", `model_provider="evil"`},
+		"",
+		"hello",
+		false,
+		false,
+		trusted,
+	)
+	joined := strings.Join(got, "\n")
+	if strings.Contains(joined, `model_provider="evil"`) {
+		t.Fatalf("untrusted provider override survived: %v", got)
+	}
+	for _, want := range trusted {
+		if !strings.Contains(joined, want) {
+			t.Fatalf("trusted provider arg %q missing: %v", want, got)
+		}
+	}
+}
+
 func TestSanitizeCodexExecArgs_StripsSandboxBypassVectors(t *testing.T) {
 	tests := []struct {
 		name string
