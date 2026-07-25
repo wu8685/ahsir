@@ -185,14 +185,16 @@ type ClaudeConfig struct {
 //
 // Timeout has the form accepted by time.ParseDuration (e.g. "120s", "2m").
 type RuntimeConfig struct {
-	Provider string            `yaml:"provider" json:"provider"`
-	BaseURL  string            `yaml:"baseURL" json:"baseURL"`
-	APIKey   string            `yaml:"apiKey" json:"apiKey"`
-	Model    string            `yaml:"model" json:"model"`
-	Command  string            `yaml:"command" json:"command"`
-	Args     []string          `yaml:"args" json:"args"`
-	Env      map[string]string `yaml:"env" json:"env"`
-	Timeout  string            `yaml:"timeout" json:"timeout"`
+	Provider   string                  `yaml:"provider" json:"provider"`
+	BaseURL    string                  `yaml:"baseURL" json:"baseURL"`
+	APIKey     string                  `yaml:"apiKey" json:"apiKey"`
+	Model      string                  `yaml:"model" json:"model"`
+	WireAPI    string                  `yaml:"wireAPI" json:"wireAPI"`
+	Credential RuntimeCredentialConfig `yaml:"credential" json:"credential"`
+	Command    string                  `yaml:"command" json:"command"`
+	Args       []string                `yaml:"args" json:"args"`
+	Env        map[string]string       `yaml:"env" json:"env"`
+	Timeout    string                  `yaml:"timeout" json:"timeout"`
 	// AgentIdleTimeout is the scale-to-zero idle-reap window (issue #6): after
 	// all turns end and no new turn starts for this long, the agent PROCESS
 	// exits on its own and the scheduler marks it idle-stopped, waking it again
@@ -207,6 +209,12 @@ type RuntimeConfig struct {
 	// resident — byte-for-byte the historical always-on behaviour. Parsed via
 	// ParseAgentIdleTimeout.
 	AgentIdleTimeout string `yaml:"agent_idle_timeout" json:"agent_idle_timeout"`
+}
+
+// RuntimeCredentialConfig identifies the environment variable Codex should
+// read for a custom provider. It stores a variable name, never a secret value.
+type RuntimeCredentialConfig struct {
+	EnvKey string `yaml:"envKey" json:"envKey"`
 }
 
 // FilesystemConfig holds filesystem tool configuration from agent-card.yaml.
