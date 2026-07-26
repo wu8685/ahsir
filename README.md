@@ -1,5 +1,10 @@
 # ahsir — A Multi-Agent Scheduler over A2A
 
+[![UI tests](https://github.com/wu8685/ahsir/actions/workflows/ui-test.yml/badge.svg)](https://github.com/wu8685/ahsir/actions/workflows/ui-test.yml)
+[![Docs](https://github.com/wu8685/ahsir/actions/workflows/pages.yml/badge.svg)](https://github.com/wu8685/ahsir/actions/workflows/pages.yml)
+[![Go version](https://img.shields.io/github/go-mod/go-version/wu8685/ahsir)](https://github.com/wu8685/ahsir/blob/main/go.mod)
+[![Last commit](https://img.shields.io/github/last-commit/wu8685/ahsir)](https://github.com/wu8685/ahsir/commits/main)
+
 `ahsir` is a small Go scheduler that runs multiple LLM-backed agents as local
 processes, lets them talk to each other over the
 [A2A protocol](https://google.github.io/A2A/), and lets Claude Code or Codex
