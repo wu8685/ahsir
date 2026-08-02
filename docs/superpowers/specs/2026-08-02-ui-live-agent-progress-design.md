@@ -181,6 +181,27 @@ history 属于受管工作区的只读文件，不需要为了读取它唤醒 LL
 - 同一 tool use/result 合并成一项；
 - 自动滚动仅在用户已经接近底部时发生，用户向上阅读时不得抢滚动位置。
 
+#### 6.2.1 Streaming delta 合并（现场验证修订，2026-08-02）
+
+现场验证发现 provider 的 `text_delta` 通常只有一个 token 或短语。前端不得把每个
+delta 渲染成独立块，否则 Markdown、空白和自然段会被拆成“一词一行”。
+
+UI 在展示前先把 live event 归一化为稳定的 display blocks：
+
+1. 连续的 `text_delta` 按到达顺序拼接到同一个 text block，保留原始空白；
+2. 遇到 `tool_use`、`tool_result`、status/span 或 terminal 时结束当前 text block；
+3. 增量到达时更新该 text block 的既有 DOM 节点，并对累计文本重新执行安全 Markdown
+   渲染；不得为每个 delta 新建 `<div>`，也不得重建整个 thread；
+4. Markdown 尚未闭合时允许暂时按当前累计文本展示，后续 delta 到达后自然修正；
+5. `tool_use` 与相同 `toolUseId` 的 `tool_result` 合并为同一个可折叠步骤，result 到达前
+   显示运行态，到达后更新为成功或失败；没有 ID 的旧事件按顺序独立展示；
+6. `thinking` 只维持单个“Agent 正在思考”状态，不按事件数重复追加；
+7. 仅当更新前滚动位置接近底部时跟随新内容；用户主动向上阅读时保持当前位置；
+8. terminal 后仍以最终 transcript 原子替换 provisional 内容，最终历史不重复 user/reply。
+
+归一化只属于 UI display state，不修改 scheduler live-event wire，也不把增量事件写入
+transcript。
+
 ### 6.3 错误与重连
 
 - history 失败：显示独立错误态和“重试”，不调用 `renderThread([])`；
@@ -235,6 +256,11 @@ history 属于受管工作区的只读文件，不需要为了读取它唤醒 LL
 7. history 故障显示错误而不是“还没有对话”；
 8. hidden reasoning、认证 header 和环境变量未出现在 live-event API/UI；
 9. root/plugin parity、UI 快测、Chromium E2E、全量 Go test/build 全部通过。
+10. 将 `**Step`、` 3`、`:**`、` done` 等碎片化 delta 连续发送时，运行中页面只产生
+    一个 text block，累计结果等价于 `**Step 3:** done`，不得一词一行；
+11. 同一 `toolUseId` 的 use/result 在运行中只占一个步骤卡片，result 到达后原位更新；
+12. Browser E2E 在 terminal 前截图/读取 DOM，验证流式 Markdown、自然段和滚动行为，
+    不能只检查最终 history。
 
 ## 10. 交付边界
 

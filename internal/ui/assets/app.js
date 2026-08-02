@@ -36,6 +36,7 @@
     contextTurns: [],
     liveEvents: [],
     liveSource: null,
+    liveView: null,
     historyError: null,
   };
 
@@ -657,6 +658,7 @@
 
   function renderThread(turns) {
     const t = $("#thread");
+    state.liveView = null;
     t.classList.remove("has-chat-empty");
     t.innerHTML = "";
     if (!turns || !turns.length) {
@@ -918,7 +920,15 @@
     const body = el("div", "amsg live-progress");
     const status = liveStatusLabel(summary.lastStatus);
     body.appendChild(el("div", "elapsed mono", `<span class="dot ${isActiveInvocation(summary) ? "s-run" : "s-wait"}"></span>${esc(state.agent)} · ${esc(status)}`));
-    events.forEach((ev) => body.appendChild(renderLiveStep(ev)));
+    state.liveView = {
+      contextId: state.contextId,
+      body,
+      lastKind: "",
+      openText: null,
+      thinkingNode: null,
+      tools: new Map(),
+    };
+    events.forEach((ev) => applyLiveEvent(ev, false));
     if (summary.error) body.appendChild(el("div", "live-error", `✗ ${esc(summary.error)}`));
     ab.appendChild(body);
     wrap.appendChild(ab);
@@ -928,6 +938,83 @@
   function liveStatusLabel(status) {
     return ({ queued: "排队中", in_flight: "执行中", recovering: "恢复中", completed: "已完成",
       recovered: "已恢复", failed: "执行失败", recovery_failed: "恢复失败", canceled: "已取消" })[status] || status || "执行中";
+  }
+
+  function nearThreadBottom() {
+    const thread = $("#thread");
+    return !thread || thread.scrollHeight - thread.scrollTop - thread.clientHeight < 80;
+  }
+
+  function liveEventDetail(ev) {
+    if (ev.input != null) {
+      try { return JSON.stringify(ev.input, null, 2); } catch (_) { return String(ev.input); }
+    }
+    return ev.content || "";
+  }
+
+  function updateLiveTool(block) {
+    const use = block.use || {};
+    const result = block.result || null;
+    const failed = !!(result && result.isError);
+    const label = use.name || (result && result.name) || "tool";
+    const stateLabel = result ? (failed ? "失败" : "完成") : "运行中";
+    const dot = result ? (failed ? "s-wait" : "s-ok") : "s-run";
+    let html = `<summary><span class="dot ${dot}"></span><code>${esc(label)}</code><span class="live-tool-state">${stateLabel}</span></summary>`;
+    const input = liveEventDetail(use);
+    if (input) html += `<pre>${esc(input)}</pre>`;
+    if (result && result.content) html += `<pre class="live-result">${esc(result.content)}</pre>`;
+    block.node.className = "live-step" + (failed ? " failed" : "");
+    block.node.innerHTML = html;
+  }
+
+  // Apply one provider-neutral event to the existing live DOM. Text chunks
+  // are cumulative deltas: keeping one node per contiguous text run prevents
+  // token-sized chunks from becoming one visual row each.
+  function applyLiveEvent(ev, follow = true) {
+    const view = state.liveView;
+    if (!view || view.contextId !== state.contextId || !ev) return false;
+    const shouldFollow = follow && nearThreadBottom();
+
+    if (ev.type === "text_delta") {
+      if (!view.openText || view.lastKind !== "text_delta") {
+        const node = el("div", "live-step live-text");
+        view.openText = { node, text: "" };
+        view.body.appendChild(node);
+      }
+      view.openText.text += ev.content || "";
+      view.openText.node.innerHTML = mdToHtml(view.openText.text);
+      view.lastKind = "text_delta";
+    } else if (ev.type === "thinking") {
+      view.openText = null;
+      view.lastKind = "thinking";
+      if (!view.thinkingNode) {
+        view.thinkingNode = el("div", "live-step thinking", "Agent 正在思考");
+        view.body.appendChild(view.thinkingNode);
+      }
+    } else if (ev.type === "tool_use" || ev.type === "tool_result") {
+      view.openText = null;
+      view.lastKind = ev.type;
+      const key = ev.toolUseId || "";
+      let block = key ? view.tools.get(key) : null;
+      if (!block) {
+        block = { node: el("details", "live-step"), use: null, result: null };
+        view.body.appendChild(block.node);
+        if (key) view.tools.set(key, block);
+      }
+      if (ev.type === "tool_use") block.use = ev;
+      else block.result = ev;
+      updateLiveTool(block);
+    } else {
+      view.openText = null;
+      view.lastKind = ev.type || "event";
+      view.body.appendChild(renderLiveStep(ev));
+    }
+
+    if (shouldFollow) {
+      const thread = $("#thread");
+      thread.scrollTop = thread.scrollHeight;
+    }
+    return true;
   }
 
   function renderLiveStep(ev) {
@@ -972,7 +1059,7 @@
         setTimeout(() => refreshContextViews(), 50);
         return;
       }
-      renderCurrentContext();
+      if (!applyLiveEvent(ev)) renderCurrentContext();
     }));
   }
 

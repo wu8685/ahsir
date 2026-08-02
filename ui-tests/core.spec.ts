@@ -414,8 +414,13 @@ test('external invocation renders progress before the turn completes', async ({ 
   await page.locator('#contexts .sess', { hasText: 'Build live progress fixture' }).click();
   await expect(page.locator('#thread')).toContainText('Build live progress fixture');
   await expect(page.locator('#thread')).toContainText('执行中');
+  await expect(page.locator('#thread .live-text')).toHaveCount(1);
+  await expect(page.locator('#thread .live-text strong')).toHaveText('Step 3:');
+  await expect(page.locator('#thread .live-text')).toContainText('ready');
   await expect(page.locator('#thread')).toContainText('command_execution');
   await expect(page.locator('#thread')).toContainText('go test ./...');
+  await expect(page.locator('#thread details.live-step')).toHaveCount(1);
+  await expect(page.locator('#thread details.live-step')).toContainText('完成');
 });
 
 test('chat request detector includes query-string URLs', async ({ page, request }) => {

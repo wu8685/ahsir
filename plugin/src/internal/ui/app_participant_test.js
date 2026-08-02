@@ -193,6 +193,17 @@ function treeText(node) {
   return [node.textContent || "", node.innerHTML || "", ...(node.children || []).map(treeText)].join(" ");
 }
 
+function findAll(node, predicate, found = []) {
+  if (!node) return found;
+  if (predicate(node)) found.push(node);
+  (node.children || []).forEach((child) => findAll(child, predicate, found));
+  return found;
+}
+
+function hasClass(node, name) {
+  return !!node && node.classList && node.classList.contains(name);
+}
+
 function testRejectsPartialMobileSurfaces() {
   const mobile = makeMobileFixture(["left", "center"], ["left", "center", "right"]);
   assert.throws(
@@ -283,6 +294,46 @@ async function testExternalInvocationShowsLiveProgress() {
   assert.match(text, /go test \.\/\.\.\./);
   assert.match(text, /执行中|处理中/);
   assert.equal(page.eventSources.length, 1, "active invocation should subscribe to SSE");
+}
+
+async function testLiveProgressCoalescesStreamingDisplayBlocks() {
+  const page = makePage({
+    participant: "coder", archived: [], historyValue: [],
+    live: [{ name: "coder", status: "online" }],
+    context: {
+      contextId: "ctx-1", title: "stream it", agents: ["coder"], turns: 1,
+      lastActivity: "2026-08-02T00:00:00Z", lastStatus: "in_flight",
+      invocationId: "inv-1", userText: "stream it", speaker: "hetairoi",
+    },
+    liveEvents: [
+      { id: "delta-1", type: "text_delta", content: "**Step" },
+      { id: "delta-2", type: "text_delta", content: " 3" },
+      { id: "delta-3", type: "text_delta", content: ":** done" },
+      { id: "tool-1", type: "tool_use", toolUseId: "cmd-1", name: "Bash", input: { command: "go version" } },
+      { id: "tool-2", type: "tool_result", toolUseId: "cmd-1", content: "go1.26.4" },
+      { id: "think-1", type: "thinking" },
+      { id: "think-2", type: "thinking" },
+    ],
+  });
+  await openParticipant(page);
+
+  const thread = page.elements.get("thread");
+  const textBlocks = findAll(thread, (node) => hasClass(node, "live-text"));
+  assert.equal(textBlocks.length, 1, "consecutive text deltas must share one display block");
+  assert.match(textBlocks[0].innerHTML, /<strong>Step 3:<\/strong> done/);
+
+  const toolSteps = findAll(thread, (node) => node.nodeName === "DETAILS" && hasClass(node, "live-step"));
+  assert.equal(toolSteps.length, 1, "tool use/result with one id must share one card");
+  assert.match(toolSteps[0].innerHTML, /go version/);
+  assert.match(toolSteps[0].innerHTML, /go1\.26\.4/);
+
+  const thinking = findAll(thread, (node) => hasClass(node, "thinking"));
+  assert.equal(thinking.length, 1, "repeated thinking events must not add duplicate rows");
+
+  const liveBody = findAll(thread, (node) => hasClass(node, "live-progress"))[0];
+  page.eventSources[0].emit("text_delta", { id: "delta-4", type: "text_delta", content: "\nnext" });
+  const updatedBody = findAll(thread, (node) => hasClass(node, "live-progress"))[0];
+  assert.equal(updatedBody, liveBody, "a live delta must update the existing progress DOM");
 }
 
 async function testHistoryFailureIsNotRenderedAsEmptyConversation() {
@@ -381,6 +432,7 @@ async function testNoAgentDraftRecoversWhenPollingFindsAgent() {
   await testArchivedParticipant();
   await testLiveParticipant();
   await testExternalInvocationShowsLiveProgress();
+  await testLiveProgressCoalescesStreamingDisplayBlocks();
   await testHistoryFailureIsNotRenderedAsEmptyConversation();
   await testUnavailableParticipant();
   await testActiveButUnselectedAgent();

@@ -186,8 +186,18 @@ func (f *fixture) schedulerHandler() http.Handler {
 				return
 			case <-time.After(150 * time.Millisecond):
 			}
-			_, _ = io.WriteString(w, "id: live-progress-1\nevent: tool_use\ndata: {\"id\":\"live-progress-1\",\"contextId\":\"ctx-progress\",\"agentName\":\"live-codex\",\"type\":\"tool_use\",\"name\":\"command_execution\",\"input\":{\"command\":\"go test ./...\"}}\n\n")
-			flusher.Flush()
+			frames := []string{
+				"id: live-progress-1\nevent: text_delta\ndata: {\"id\":\"live-progress-1\",\"contextId\":\"ctx-progress\",\"agentName\":\"live-codex\",\"type\":\"text_delta\",\"content\":\"**Step\"}\n\n",
+				"id: live-progress-2\nevent: text_delta\ndata: {\"id\":\"live-progress-2\",\"contextId\":\"ctx-progress\",\"agentName\":\"live-codex\",\"type\":\"text_delta\",\"content\":\" 3\"}\n\n",
+				"id: live-progress-3\nevent: text_delta\ndata: {\"id\":\"live-progress-3\",\"contextId\":\"ctx-progress\",\"agentName\":\"live-codex\",\"type\":\"text_delta\",\"content\":\":** ready\"}\n\n",
+				"id: live-progress-4\nevent: tool_use\ndata: {\"id\":\"live-progress-4\",\"contextId\":\"ctx-progress\",\"agentName\":\"live-codex\",\"type\":\"tool_use\",\"toolUseId\":\"cmd-1\",\"name\":\"command_execution\",\"input\":{\"command\":\"go test ./...\"}}\n\n",
+				"id: live-progress-5\nevent: tool_result\ndata: {\"id\":\"live-progress-5\",\"contextId\":\"ctx-progress\",\"agentName\":\"live-codex\",\"type\":\"tool_result\",\"toolUseId\":\"cmd-1\",\"content\":\"ok\"}\n\n",
+			}
+			for _, frame := range frames {
+				_, _ = io.WriteString(w, frame)
+				flusher.Flush()
+				time.Sleep(40 * time.Millisecond)
+			}
 			<-r.Context().Done()
 		case r.Method == http.MethodGet && r.URL.Path == "/agents/live-codex/history/ctx-live-01":
 			writeFixtureJSON(w, http.StatusOK, liveHistory)
