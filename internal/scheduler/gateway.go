@@ -1,6 +1,7 @@
 package scheduler
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -154,6 +155,14 @@ func (g *gatewayHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// ledger file itself holds.
 	if r.URL.Path == "/invocations" && r.Method == http.MethodGet {
 		g.handleInvocations(w, r)
+		return
+	}
+	if r.URL.Path == "/context-events" && r.Method == http.MethodGet {
+		g.handleContextEvents(w, r)
+		return
+	}
+	if r.URL.Path == "/context-events/stream" && r.Method == http.MethodGet {
+		g.handleContextEventsStream(w, r)
 		return
 	}
 
@@ -436,7 +445,14 @@ func (g *gatewayHandler) handleA2AProxy(w http.ResponseWriter, r *http.Request) 
 	copyHeader(w.Header(), upstreamResp.Header)
 	removeHopByHopHeaders(w.Header())
 	w.WriteHeader(upstreamResp.StatusCode)
-	_, copyErr := io.Copy(flushWriter{ResponseWriter: w}, upstreamResp.Body)
+	var copyErr error
+	if strings.Contains(upstreamResp.Header.Get("Content-Type"), "text/event-stream") {
+		copyErr = copyObservedSSE(flushWriter{ResponseWriter: w}, upstreamResp.Body, func(payload []byte) {
+			g.observeA2AFrame(inv, payload)
+		})
+	} else {
+		_, copyErr = io.Copy(flushWriter{ResponseWriter: w}, upstreamResp.Body)
+	}
 
 	// Settle the ledger only AFTER the body has been relayed: for SSE
 	// streams the interesting failures happen mid-copy, and marking the
@@ -449,6 +465,88 @@ func (g *gatewayHandler) handleA2AProxy(w http.ResponseWriter, r *http.Request) 
 		g.sch.ledger.FailMessageResult(inv.ID, obs.ResultUpstreamError, fmt.Sprintf("response stream interrupted: %v", copyErr))
 	default:
 		g.sch.ledger.Complete(inv.ID)
+	}
+}
+
+func copyObservedSSE(w io.Writer, r io.Reader, onData func([]byte)) error {
+	reader := bufio.NewReader(r)
+	for {
+		line, err := reader.ReadBytes('\n')
+		if len(line) > 0 {
+			if _, writeErr := w.Write(line); writeErr != nil {
+				return writeErr
+			}
+			trimmed := bytes.TrimSpace(line)
+			if bytes.HasPrefix(trimmed, []byte("data:")) && onData != nil {
+				onData(bytes.TrimSpace(trimmed[len("data:"):]))
+			}
+		}
+		if err != nil {
+			if errors.Is(err, io.EOF) {
+				return nil
+			}
+			return err
+		}
+	}
+}
+
+func (g *gatewayHandler) observeA2AFrame(inv InvocationRecord, payload []byte) {
+	var frame struct {
+		Result struct {
+			Kind   string `json:"kind"`
+			ID     string `json:"id"`
+			TaskID string `json:"taskId"`
+			Status struct {
+				State   string `json:"state"`
+				Message *struct {
+					Parts []struct {
+						Kind string                     `json:"kind"`
+						Text string                     `json:"text"`
+						Data map[string]json.RawMessage `json:"data"`
+					} `json:"parts"`
+				} `json:"message"`
+			} `json:"status"`
+		} `json:"result"`
+	}
+	if json.Unmarshal(payload, &frame) != nil {
+		return
+	}
+	base := LiveEvent{InvocationID: inv.ID, ContextID: inv.ContextID, AgentName: inv.AgentName}
+	if frame.Result.Kind == "task" {
+		base.Type, base.State = "terminal", frame.Result.Status.State
+		g.sch.liveEvents.Publish(base)
+		return
+	}
+	if frame.Result.Kind != "status-update" {
+		return
+	}
+	if frame.Result.Status.Message == nil || len(frame.Result.Status.Message.Parts) == 0 {
+		base.Type, base.State = "status", frame.Result.Status.State
+		g.sch.liveEvents.Publish(base)
+		return
+	}
+	for _, part := range frame.Result.Status.Message.Parts {
+		ev := base
+		if part.Kind == "text" {
+			ev.Type, ev.Content = "text_delta", part.Text
+			g.sch.liveEvents.Publish(ev)
+			continue
+		}
+		if part.Kind != "data" {
+			continue
+		}
+		_ = json.Unmarshal(part.Data["ev"], &ev.Type)
+		_ = json.Unmarshal(part.Data["id"], &ev.ToolUseID)
+		_ = json.Unmarshal(part.Data["tool_use_id"], &ev.ToolUseID)
+		_ = json.Unmarshal(part.Data["name"], &ev.Name)
+		_ = json.Unmarshal(part.Data["content"], &ev.Content)
+		_ = json.Unmarshal(part.Data["is_error"], &ev.IsError)
+		if raw := part.Data["input"]; len(raw) > 0 {
+			ev.Input = append(json.RawMessage(nil), raw...)
+		}
+		if ev.Type != "" {
+			g.sch.liveEvents.Publish(ev)
+		}
 	}
 }
 

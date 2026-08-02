@@ -129,6 +129,13 @@ func (s *Scheduler) ArchivedAgents() ([]ArchivedAgent, error) {
 // reported as not found, mirroring what startup compaction would have pruned)
 // and never mutates the workspace.
 func (s *Scheduler) ArchivedAgentHistory(name, contextID string) ([]wrapper.TranscriptTurn, error) {
+	return s.managedAgentHistory(name, contextID)
+}
+
+// managedAgentHistory reads a retained transcript from a scheduler-managed
+// workspace regardless of whether the agent is archived, desired, or currently
+// idle-stopped. It is deliberately read-only and never wakes the runtime.
+func (s *Scheduler) managedAgentHistory(name, contextID string) ([]wrapper.TranscriptTurn, error) {
 	dir := s.cfg.ManagedAgentsDir()
 	if dir == "" {
 		return nil, fmt.Errorf("no managed workspace directory")

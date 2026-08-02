@@ -30,12 +30,13 @@ import (
 
 // Scheduler manages the lifecycle of all agents.
 type Scheduler struct {
-	cfg      *Config
-	registry *registry.Registry
-	agents   map[string]*agentProcess
-	desired  map[string]AgentConfig
-	ledger   *InvocationLedger
-	httpSrv  *http.Server
+	cfg        *Config
+	registry   *registry.Registry
+	agents     map[string]*agentProcess
+	desired    map[string]AgentConfig
+	ledger     *InvocationLedger
+	liveEvents *liveEventHub
+	httpSrv    *http.Server
 	// obsReg is this process's single, explicitly-injected metric registerer
 	// (§4.3). Never prometheus.DefaultRegisterer. Served read-only at /metrics.
 	obsReg         *obs.Registry
@@ -155,6 +156,7 @@ func New(cfg *Config) *Scheduler {
 		agents:               make(map[string]*agentProcess),
 		desired:              make(map[string]AgentConfig),
 		ledger:               ledger,
+		liveEvents:           newLiveEventHub(),
 		obsReg:               obsReg,
 		gatewayMetrics:       gatewayMetrics,
 		supervisor:           defaultSupervisorConfig(),
@@ -1446,6 +1448,14 @@ func (s *Scheduler) settleAsyncInvocation(invID, agentName string, taskID string
 // Uses the TaskStatus timeout: this is a file read on the agent side, no LLM
 // round-trip.
 func (s *Scheduler) AgentHistory(agentName, contextID string) ([]wrapper.TranscriptTurn, error) {
+	s.mu.Lock()
+	_, idleStopped := s.idleStopped[agentName]
+	_, managed := s.desired[agentName]
+	s.mu.Unlock()
+	if idleStopped {
+		return s.managedAgentHistory(agentName, contextID)
+	}
+
 	card, internalToken, ok := s.agentDialTarget(agentName)
 	if !ok {
 		return nil, fmt.Errorf("agent %s not found", agentName)
@@ -1463,6 +1473,14 @@ func (s *Scheduler) AgentHistory(agentName, contextID string) ([]wrapper.Transcr
 	}
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
+		// A managed runtime may have exited between registry lookup and this
+		// read (most commonly scale-to-zero). The transcript is already on disk;
+		// prefer it over waking an LLM process just to serve history.
+		if managed {
+			if turns, diskErr := s.managedAgentHistory(agentName, contextID); diskErr == nil {
+				return turns, nil
+			}
+		}
 		return nil, fmt.Errorf("fetch history from %s: %w", agentName, err)
 	}
 	defer resp.Body.Close()

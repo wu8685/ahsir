@@ -3,6 +3,7 @@ package wrapper
 import (
 	"context"
 	"errors"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -11,6 +12,44 @@ import (
 	"testing"
 	"time"
 )
+
+func TestParseCodexJSONLStreamsCommandBeforeTurnCompleted(t *testing.T) {
+	r, w := io.Pipe()
+	events := make(chan Event, 4)
+	done := make(chan error, 1)
+	go func() {
+		_, err := parseCodexJSONLStream(r, func(ev Event) { events <- ev }, nil)
+		done <- err
+	}()
+
+	_, _ = io.WriteString(w, `{"type":"item.started","item":{"id":"cmd-1","type":"command_execution","command":"go test ./...","status":"in_progress"}}`+"\n")
+	select {
+	case ev := <-events:
+		tool, ok := ev.(EventToolUse)
+		if !ok || tool.Id != "cmd-1" || tool.Name != "command_execution" {
+			t.Fatalf("first live event = %#v", ev)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("command event was buffered until turn completion")
+	}
+
+	_, _ = io.WriteString(w, `{"type":"item.completed","item":{"id":"cmd-1","type":"command_execution","command":"go test ./...","status":"completed","aggregated_output":"ok","exit_code":0}}`+"\n")
+	_, _ = io.WriteString(w, `{"type":"turn.completed","usage":{"input_tokens":1,"output_tokens":1}}`+"\n")
+	_ = w.Close()
+
+	select {
+	case ev := <-events:
+		result, ok := ev.(EventToolResult)
+		if !ok || result.ToolUseID != "cmd-1" || result.Content != "ok" || result.IsError {
+			t.Fatalf("command result = %#v", ev)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("missing command result")
+	}
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+}
 
 func TestBuildCodexExecArgs_NewThread(t *testing.T) {
 	// User-supplied --sandbox is stripped: the wrapper owns the sandbox

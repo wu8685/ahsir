@@ -30,7 +30,7 @@ class FakeElement {
     this.style = {};
     this.className = "";
     this.classList = new FakeClassList(this);
-    this.innerHTML = "";
+    this._innerHTML = "";
     this.textContent = "";
     this.value = "";
     this.disabled = false;
@@ -39,6 +39,8 @@ class FakeElement {
     this.scrollTop = 0;
     this.clientHeight = 0;
   }
+  set innerHTML(value) { this._innerHTML = String(value); this.children = []; }
+  get innerHTML() { return this._innerHTML; }
   appendChild(child) { this.children.push(child); child.parentNode = this; return child; }
   after() {}
   addEventListener(type, fn) { this.listeners.set(type, fn); }
@@ -86,10 +88,12 @@ async function waitFor(check, label) {
   throw new Error("timed out waiting for " + label);
 }
 
-function makePage({ live, archived, participant, mobile = makeMobileFixture() }) {
+function makePage({ live, liveSequence, archived, participant, mobile = makeMobileFixture(), context, historyValue, historyError, liveEvents = [], agentsError }) {
   const elements = new Map();
   const domReady = [];
   const requests = [];
+  const intervals = [];
+  let agentFetches = 0;
   const ids = [
     "themeBtn", "thread", "jumpBtn", "ta", "sendBtn", "newConvo", "newRoom",
     "newRoundtable", "newAgent", "agentSel", "schedLabel", "contexts", "archived",
@@ -120,19 +124,28 @@ function makePage({ live, archived, participant, mobile = makeMobileFixture() })
     hasFocus() { return true; },
   };
 
-  const history = [{ turn: 1, speaker: "console", userText: "hello", reply: "world", status: "completed" }];
+  const history = historyValue === undefined
+    ? [{ turn: 1, speaker: "console", userText: "hello", reply: "world", status: "completed" }]
+    : historyValue;
   async function fetch(url, options = {}) {
     const path = String(url).replace(/^\/api/, "");
     requests.push({ path, options });
-    if (path === "/agents") return response(live);
+    if (path === "/agents") {
+      if (agentsError) return response({ error: agentsError }, 503);
+      const sequence = liveSequence || [live];
+      const value = sequence[Math.min(agentFetches, sequence.length - 1)];
+      agentFetches++;
+      return response(value);
+    }
     if (path === "/archived-agents") return response(archived);
-    if (path === "/contexts") return response([{
+    if (path === "/contexts") return response([context || {
       contextId: "ctx-1", title: "historical context", agents: [participant],
       turns: 1, lastActivity: "2026-07-01T00:00:00Z", lastStatus: "completed",
     }]);
     if (path === "/rooms") return response([]);
     if (path.startsWith("/invocations")) return response([]);
-    if (path.includes("/history/")) return response(history);
+    if (path.includes("/history/")) return historyError ? response({ error: historyError }, 502) : response(history);
+    if (path.startsWith("/context-events")) return response(liveEvents);
     if (path.endsWith("/config")) return response({ path: "/tmp/agent-card.yaml", yaml: "name: " + participant });
     if (path.endsWith("/chat")) return response({ taskId: "task-1", contextId: "ctx-1" }, 202);
     if (path.includes("/tasks/")) return response({
@@ -142,11 +155,18 @@ function makePage({ live, archived, participant, mobile = makeMobileFixture() })
     throw new Error("unexpected fetch " + path);
   }
 
+  const eventSources = [];
+  class FakeEventSource {
+    constructor(url) { this.url = url; this.listeners = new Map(); this.closed = false; eventSources.push(this); }
+    addEventListener(type, fn) { this.listeners.set(type, fn); }
+    close() { this.closed = true; }
+    emit(type, value) { const fn = this.listeners.get(type); if (fn) fn({ data: JSON.stringify(value), lastEventId: value.id || "" }); }
+  }
   const window = {
     document,
     crypto: { randomUUID: () => "ctx-new" },
     addEventListener() {},
-    removeEventListener() {},
+    removeEventListener() {}, EventSource: FakeEventSource,
   };
   const sandbox = {
     console, document, window, fetch, navigator: { clipboard: { writeText: async () => {} } },
@@ -156,16 +176,21 @@ function makePage({ live, archived, participant, mobile = makeMobileFixture() })
     crypto: window.crypto,
     setTimeout: (fn) => { setImmediate(fn); return 1; },
     clearTimeout() {},
-    setInterval: () => 1,
+    setInterval: (fn) => { intervals.push(fn); return intervals.length; },
     clearInterval() {},
-    encodeURIComponent,
+    encodeURIComponent, EventSource: FakeEventSource,
   };
   sandbox.globalThis = sandbox;
   vm.createContext(sandbox);
   vm.runInContext(appSource, sandbox, { filename: appPath });
   assert.equal(domReady.length, 1, "app should register one DOMContentLoaded handler");
   domReady[0]();
-  return { elements, requests };
+  return { elements, requests, eventSources, intervals };
+}
+
+function treeText(node) {
+  if (!node) return "";
+  return [node.textContent || "", node.innerHTML || "", ...(node.children || []).map(treeText)].join(" ");
 }
 
 function testRejectsPartialMobileSurfaces() {
@@ -240,6 +265,38 @@ async function testLiveParticipant() {
   await waitFor(() => page.requests.some((r) => r.path.endsWith("/teacher/chat")), "live chat dispatch");
 }
 
+async function testExternalInvocationShowsLiveProgress() {
+  const page = makePage({
+    participant: "coder", archived: [], historyValue: [],
+    live: [{ name: "coder", status: "online" }],
+    context: {
+      contextId: "ctx-1", title: "build it", agents: ["coder"], turns: 1,
+      lastActivity: "2026-08-02T00:00:00Z", lastStatus: "in_flight",
+      invocationId: "inv-1", userText: "build it", speaker: "hetairoi",
+    },
+    liveEvents: [{ id: "live-1", type: "tool_use", name: "command_execution", input: { command: "go test ./..." } }],
+  });
+  await openParticipant(page);
+  await waitFor(() => treeText(page.elements.get("thread")).includes("command_execution"), "live progress");
+  const text = treeText(page.elements.get("thread"));
+  assert.match(text, /build it/);
+  assert.match(text, /go test \.\/\.\.\./);
+  assert.match(text, /执行中|处理中/);
+  assert.equal(page.eventSources.length, 1, "active invocation should subscribe to SSE");
+}
+
+async function testHistoryFailureIsNotRenderedAsEmptyConversation() {
+  const page = makePage({
+    participant: "coder", archived: [], historyError: "connection refused",
+    live: [{ name: "coder", status: "online" }],
+  });
+  await openParticipant(page);
+  await waitFor(() => treeText(page.elements.get("thread")).includes("connection refused"), "history error");
+  const text = treeText(page.elements.get("thread"));
+  assert.match(text, /无法读取会话记录/);
+  assert.doesNotMatch(text, /还没有对话/);
+}
+
 async function testUnavailableParticipant() {
   const page = makePage({ live: [], archived: [], participant: "missing" });
   await openParticipant(page);
@@ -273,15 +330,64 @@ async function testNoActiveAgentDetail() {
   assert.doesNotMatch(detail, /选择一个 agent 查看详情/);
 }
 
+async function testNoAgentNewConversationShowsRecoveryState() {
+  const page = makePage({ live: [], archived: [], participant: "missing" });
+  await waitFor(() => page.elements.get("schedLabel").textContent === "scheduler · 0 agents", "empty agents");
+  await page.elements.get("newConvo").click();
+  const text = treeText(page.elements.get("thread"));
+  assert.match(text, /当前没有可用 Agent/);
+  assert.match(text, /配置新 Agent/);
+  assert.match(text, /重新检查/);
+  assert.equal(page.elements.get("ctxId").textContent, "等待 Agent", "must not expose a phantom context id");
+  assert.equal(page.elements.get("ta").placeholder, "启动 Agent 后可开始对话");
+  assert.equal(page.elements.get("ta").disabled, true);
+  assert.equal(page.elements.get("sendBtn").disabled, true);
+}
+
+async function testSchedulerFailureNewConversationShowsReconnectState() {
+  const page = makePage({ live: [], archived: [], participant: "missing", agentsError: "fixture scheduler unavailable" });
+  await waitFor(() => page.elements.get("schedLabel").textContent === "scheduler 不可达", "scheduler error");
+  await page.elements.get("newConvo").click();
+  const text = treeText(page.elements.get("thread"));
+  assert.match(text, /无法连接 scheduler/);
+  assert.match(text, /重新连接/);
+  assert.doesNotMatch(text, /当前没有可用 Agent/);
+  assert.equal(page.elements.get("ctxId").textContent, "等待连接");
+}
+
+async function testNoAgentDraftRecoversWhenPollingFindsAgent() {
+  const teacher = { name: "teacher", url: "http://127.0.0.1:9802", status: "online" };
+  const page = makePage({
+    live: [], liveSequence: [[], [teacher]], archived: [], participant: "teacher",
+  });
+  await waitFor(() => page.elements.get("schedLabel").textContent === "scheduler · 0 agents", "empty agents");
+  await page.elements.get("newConvo").click();
+  assert.match(treeText(page.elements.get("thread")), /当前没有可用 Agent/);
+  assert.equal(page.intervals.length, 1, "chat rail polling interval");
+
+  await page.intervals[0]();
+  assert.equal(page.elements.get("schedLabel").textContent, "scheduler · 1 agents");
+  assert.equal(page.elements.get("agentSel").value, "teacher");
+  assert.equal(page.elements.get("ta").disabled, false);
+  assert.equal(page.elements.get("sendBtn").disabled, false);
+  assert.equal(page.elements.get("ctxId").textContent, "ctx · ctx-ne");
+  assert.match(treeText(page.elements.get("thread")), /与 teacher 还没有对话/);
+}
+
 (async () => {
   testRejectsPartialMobileSurfaces();
   testRejectsIncompleteMobileButtons();
   testRejectsMobileButtonsWithoutSurfaces();
   await testArchivedParticipant();
   await testLiveParticipant();
+  await testExternalInvocationShowsLiveProgress();
+  await testHistoryFailureIsNotRenderedAsEmptyConversation();
   await testUnavailableParticipant();
   await testActiveButUnselectedAgent();
   await testNoActiveAgentDetail();
+  await testNoAgentNewConversationShowsRecoveryState();
+  await testSchedulerFailureNewConversationShowsReconnectState();
+  await testNoAgentDraftRecoversWhenPollingFindsAgent();
   console.log("participant selection regression tests passed");
 })().catch((err) => {
   console.error(err.stack || err);

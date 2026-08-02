@@ -19,7 +19,7 @@
 // Routing:
 //   - /api/contexts            → aggregated from the scheduler's /invocations
 //   - /api/*                   → reverse-proxied to the scheduler (admin routes
-//                                get the control-plane token injected)
+//     get the control-plane token injected)
 //   - everything else          → embedded static assets (the SPA)
 package ui
 
@@ -219,17 +219,27 @@ type contextSummary struct {
 	Turns        int      `json:"turns"`
 	LastActivity string   `json:"lastActivity"`
 	LastStatus   string   `json:"lastStatus"`
+	InvocationID string   `json:"invocationId,omitempty"`
+	UserText     string   `json:"userText,omitempty"`
+	Speaker      string   `json:"speaker,omitempty"`
+	StartedAt    string   `json:"startedAt,omitempty"`
+	DurationMS   int64    `json:"durationMs,omitempty"`
+	Error        string   `json:"error,omitempty"`
 }
 
 // invocation mirrors the fields the scheduler's /invocations endpoint emits
 // (see scheduler.invocationView). Only the fields the console needs are kept.
 type invocation struct {
-	AgentName string `json:"agentName"`
-	ContextID string `json:"contextId"`
-	UserText  string `json:"userText"`
-	Status    string `json:"status"`
-	StartedAt string `json:"startedAt"`
-	Source    string `json:"source"`
+	ID         string `json:"id"`
+	AgentName  string `json:"agentName"`
+	ContextID  string `json:"contextId"`
+	UserText   string `json:"userText"`
+	Status     string `json:"status"`
+	StartedAt  string `json:"startedAt"`
+	Source     string `json:"source"`
+	Speaker    string `json:"speaker"`
+	DurationMS int64  `json:"durationMs"`
+	Error      string `json:"error"`
 }
 
 // handleContexts fetches the scheduler's invocation ledger and folds it into
@@ -294,6 +304,12 @@ func (s *Server) handleContexts(w http.ResponseWriter, r *http.Request) {
 		if rec.StartedAt > a.summary.LastActivity {
 			a.summary.LastActivity = rec.StartedAt
 			a.summary.LastStatus = rec.Status
+			a.summary.InvocationID = rec.ID
+			a.summary.UserText = rec.UserText
+			a.summary.Speaker = rec.Speaker
+			a.summary.StartedAt = rec.StartedAt
+			a.summary.DurationMS = rec.DurationMS
+			a.summary.Error = rec.Error
 		}
 	}
 

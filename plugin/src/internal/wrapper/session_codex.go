@@ -26,8 +26,9 @@ var _ Session = (*CodexSession)(nil)
 // thread_id, the next turn resumes that thread with `codex exec resume <id>`,
 // so conversation continuity is owned by Codex's local transcript store.
 type CodexSession struct {
-	cfg    SessionConfig
-	runner codexRunner
+	cfg          SessionConfig
+	runner       codexRunner
+	streamRunner codexStreamRunner
 
 	mu               sync.Mutex
 	closed           bool
@@ -37,6 +38,7 @@ type CodexSession struct {
 }
 
 type codexRunner func(ctx context.Context, cfg SessionConfig, resumeID, prompt string) (codexRunResult, error)
+type codexStreamRunner func(ctx context.Context, cfg SessionConfig, resumeID, prompt string, emit func(Event), onThreadID func(string)) (codexRunResult, error)
 
 type codexRunResult struct {
 	ThreadID   string
@@ -52,7 +54,7 @@ func NewCodexSession(_ context.Context, cfg SessionConfig, resumeID string) (*Co
 	if err := cfg.Validate(); err != nil {
 		return nil, err
 	}
-	return newCodexSessionWithRunner(cfg, resumeID, runCodexExec), nil
+	return &CodexSession{cfg: cfg, streamRunner: runCodexExecStream, sessionID: resumeID}, nil
 }
 
 func newCodexSessionWithRunner(cfg SessionConfig, resumeID string, runner codexRunner) *CodexSession {
@@ -125,29 +127,45 @@ func (s *CodexSession) Stream(ctx context.Context, userText string) (<-chan Even
 			defer cancel()
 		}
 
-		result, err := s.runner(runCtx, s.cfg, resumeID, userText)
-		for _, tool := range result.Tools {
-			ch <- tool
-		}
-		for _, call := range result.AgentCalls {
-			ch <- call
+		var result codexRunResult
+		var err error
+		if s.streamRunner != nil {
+			result, err = s.streamRunner(runCtx, s.cfg, resumeID, userText, func(ev Event) { ch <- ev }, s.noteThreadID)
+		} else {
+			result, err = s.runner(runCtx, s.cfg, resumeID, userText)
+			for _, tool := range result.Tools {
+				ch <- tool
+			}
+			for _, call := range result.AgentCalls {
+				ch <- call
+			}
 		}
 		if result.Text != "" {
 			ch <- EventText{Text: result.Text}
 		}
-		var cb func(string)
 		if result.ThreadID != "" {
-			s.mu.Lock()
-			s.sessionID = result.ThreadID
-			cb = s.onSessionIDKnown
-			s.mu.Unlock()
-		}
-		if cb != nil {
-			cb(result.ThreadID)
+			s.noteThreadID(result.ThreadID)
 		}
 		ch <- EventTurnDone{Err: err, Stats: result.Stats}
 	}()
 	return ch, nil
+}
+
+func (s *CodexSession) noteThreadID(id string) {
+	if id == "" {
+		return
+	}
+	s.mu.Lock()
+	if s.sessionID == id {
+		s.mu.Unlock()
+		return
+	}
+	s.sessionID = id
+	cb := s.onSessionIDKnown
+	s.mu.Unlock()
+	if cb != nil {
+		cb(id)
+	}
 }
 
 // Turn drains Stream and aggregates final assistant text.
@@ -178,6 +196,21 @@ func (s *CodexSession) Close() error {
 }
 
 func runCodexExec(ctx context.Context, cfg SessionConfig, resumeID, prompt string) (codexRunResult, error) {
+	var collected codexRunResult
+	result, err := runCodexExecStream(ctx, cfg, resumeID, prompt, func(ev Event) {
+		switch x := ev.(type) {
+		case EventToolUse:
+			collected.Tools = append(collected.Tools, x)
+		case EventAgentCall:
+			collected.AgentCalls = append(collected.AgentCalls, x)
+		}
+	}, nil)
+	result.Tools = collected.Tools
+	result.AgentCalls = collected.AgentCalls
+	return result, err
+}
+
+func runCodexExecStream(ctx context.Context, cfg SessionConfig, resumeID, prompt string, emit func(Event), onThreadID func(string)) (codexRunResult, error) {
 	args := buildCodexExecArgs(cfg.Args, resumeID, prompt, cfg.WriteAccess, cfg.NetworkAccess, cfg.CodexProviderArgs)
 	cmd := exec.CommandContext(ctx, cfg.Command, args...)
 	ahprocess.PrepareCommand(cmd)
@@ -208,7 +241,7 @@ func runCodexExec(ctx context.Context, cfg SessionConfig, resumeID, prompt strin
 		}
 	}()
 
-	result, parseErr := parseCodexJSONL(stdout)
+	result, parseErr := parseCodexJSONLStream(stdout, emit, onThreadID)
 	waitErr := cmd.Wait()
 	close(done)
 	if parseErr != nil {
@@ -347,8 +380,25 @@ func ensureCodexFlagValue(args []string, long, short, value string) []string {
 }
 
 func parseCodexJSONL(r io.Reader) (codexRunResult, error) {
+	var tools []EventToolUse
+	var calls []EventAgentCall
+	result, err := parseCodexJSONLStream(r, func(ev Event) {
+		switch x := ev.(type) {
+		case EventToolUse:
+			tools = append(tools, x)
+		case EventAgentCall:
+			calls = append(calls, x)
+		}
+	}, nil)
+	result.Tools = tools
+	result.AgentCalls = calls
+	return result, err
+}
+
+func parseCodexJSONLStream(r io.Reader, emit func(Event), onThreadID func(string)) (codexRunResult, error) {
 	var result codexRunResult
 	var protocolErr error
+	started := map[string]bool{}
 	scanner := bufio.NewScanner(r)
 	scanner.Buffer(make([]byte, 64*1024), 16*1024*1024)
 
@@ -373,6 +423,9 @@ func parseCodexJSONL(r io.Reader) (codexRunResult, error) {
 		switch env.Type {
 		case "thread.started":
 			result.ThreadID = env.ThreadID
+			if onThreadID != nil {
+				onThreadID(env.ThreadID)
+			}
 		case "turn.completed":
 			result.Stats.InputTokens = env.Usage.InputTokens
 			result.Stats.OutputTokens = env.Usage.OutputTokens
@@ -385,8 +438,8 @@ func parseCodexJSONL(r io.Reader) (codexRunResult, error) {
 				msg = env.Type
 			}
 			protocolErr = errors.New(msg)
-		case "item.completed":
-			applyCodexCompletedItem(&result, env.Item)
+		case "item.started", "item.completed":
+			applyCodexItem(&result, env.Type, env.Item, started, emit)
 		}
 	}
 	if err := scanner.Err(); err != nil {
@@ -395,28 +448,46 @@ func parseCodexJSONL(r io.Reader) (codexRunResult, error) {
 	return result, protocolErr
 }
 
-func applyCodexCompletedItem(result *codexRunResult, raw json.RawMessage) {
+func applyCodexItem(result *codexRunResult, phase string, raw json.RawMessage, started map[string]bool, emit func(Event)) {
 	var head struct {
-		Type    string          `json:"type"`
-		Text    string          `json:"text"`
-		Command string          `json:"command"`
-		Name    string          `json:"name"`
-		Input   json.RawMessage `json:"input"`
+		ID       string          `json:"id"`
+		Type     string          `json:"type"`
+		Text     string          `json:"text"`
+		Command  string          `json:"command"`
+		Name     string          `json:"name"`
+		Input    json.RawMessage `json:"input"`
+		Output   string          `json:"aggregated_output"`
+		Status   string          `json:"status"`
+		ExitCode *int            `json:"exit_code"`
 	}
 	if err := json.Unmarshal(raw, &head); err != nil {
 		return
 	}
 	switch head.Type {
 	case "agent_message":
-		result.Text = head.Text
+		if phase == "item.completed" {
+			result.Text = head.Text
+		}
 	case "command_execution":
 		input := json.RawMessage(`{}`)
 		if head.Command != "" {
 			b, _ := json.Marshal(map[string]string{"command": head.Command})
 			input = b
 		}
-		result.Tools = append(result.Tools, EventToolUse{Name: "command_execution", Input: input})
+		if phase == "item.started" || (phase == "item.completed" && !started[head.ID]) {
+			started[head.ID] = true
+			if emit != nil {
+				emit(EventToolUse{Id: head.ID, Name: "command_execution", Input: input})
+			}
+		}
+		if phase == "item.completed" && emit != nil {
+			isError := head.Status == "failed" || (head.ExitCode != nil && *head.ExitCode != 0)
+			emit(EventToolResult{ToolUseID: head.ID, Content: truncateCodexEventText(head.Output, 16<<10), IsError: isError})
+		}
 	case "mcp_tool_call", "tool_call":
+		if phase != "item.completed" {
+			return
+		}
 		name := head.Name
 		if name == "" {
 			name = head.Type
@@ -426,9 +497,28 @@ func applyCodexCompletedItem(result *codexRunResult, raw json.RawMessage) {
 			input = json.RawMessage(`{}`)
 		}
 		if call, ok := ParseA2ACallTool(name, input); ok {
-			result.AgentCalls = append(result.AgentCalls, EventAgentCall{Agent: call.Agent, Task: call.Task})
+			if emit != nil {
+				emit(EventAgentCall{Agent: call.Agent, Task: call.Task})
+			}
 			return
 		}
-		result.Tools = append(result.Tools, EventToolUse{Name: name, Input: input})
+		if emit != nil {
+			emit(EventToolUse{Id: head.ID, Name: name, Input: input})
+		}
+	case "reasoning":
+		if phase == "item.completed" && emit != nil {
+			emit(EventThinking{})
+		}
 	}
+}
+
+func truncateCodexEventText(s string, max int) string {
+	if len(s) <= max {
+		return s
+	}
+	cut := max
+	for cut > 0 && (s[cut]&0xc0) == 0x80 {
+		cut--
+	}
+	return s[:cut] + "\n…[truncated]"
 }

@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"strings"
 	"sync"
+	"time"
 )
 
 type fixture struct {
@@ -109,7 +110,7 @@ func (f *fixture) controlHandler() http.Handler {
 
 		scenario := r.URL.Query().Get("scenario")
 		switch scenario {
-		case "core", "empty", "scheduler-error":
+		case "core", "empty", "scheduler-error", "live-progress":
 			f.setScenario(scenario)
 			w.WriteHeader(http.StatusNoContent)
 		default:
@@ -124,7 +125,9 @@ func (f *fixture) schedulerHandler() http.Handler {
 			writeFixtureJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "fixture scheduler unavailable"})
 			return
 		}
-		empty := f.currentScenario() == "empty"
+		scenario := f.currentScenario()
+		empty := scenario == "empty"
+		progress := scenario == "live-progress"
 		switch {
 		case r.Method == http.MethodGet && r.URL.Path == "/agents":
 			if empty {
@@ -133,13 +136,13 @@ func (f *fixture) schedulerHandler() http.Handler {
 			}
 			writeFixtureJSON(w, http.StatusOK, agents)
 		case r.Method == http.MethodGet && r.URL.Path == "/archived-agents":
-			if empty {
+			if empty || progress {
 				writeFixtureJSON(w, http.StatusOK, []any{})
 				return
 			}
 			writeFixtureJSON(w, http.StatusOK, coreArchived())
 		case r.Method == http.MethodGet && r.URL.Path == "/rooms":
-			if empty {
+			if empty || progress {
 				writeFixtureJSON(w, http.StatusOK, []any{})
 				return
 			}
@@ -150,6 +153,13 @@ func (f *fixture) schedulerHandler() http.Handler {
 				return
 			}
 			rows := coreInvocations()
+			if progress {
+				rows = []map[string]any{{
+					"id": "inv-progress", "agentName": "live-codex", "contextId": "ctx-progress",
+					"userText": "Build live progress fixture", "status": "in_flight", "speaker": "hetairoi",
+					"source": "a2a_proxy", "startedAt": "2026-08-02T01:00:00Z",
+				}}
+			}
 			if id := r.URL.Query().Get("contextId"); id != "" {
 				filtered := rows[:0]
 				for _, row := range rows {
@@ -160,6 +170,25 @@ func (f *fixture) schedulerHandler() http.Handler {
 				rows = filtered
 			}
 			writeFixtureJSON(w, http.StatusOK, rows)
+		case r.Method == http.MethodGet && r.URL.Path == "/context-events":
+			writeFixtureJSON(w, http.StatusOK, []any{})
+		case r.Method == http.MethodGet && r.URL.Path == "/context-events/stream" && progress:
+			flusher, ok := w.(http.Flusher)
+			if !ok {
+				http.Error(w, "streaming unsupported", http.StatusInternalServerError)
+				return
+			}
+			w.Header().Set("Content-Type", "text/event-stream")
+			w.WriteHeader(http.StatusOK)
+			flusher.Flush()
+			select {
+			case <-r.Context().Done():
+				return
+			case <-time.After(150 * time.Millisecond):
+			}
+			_, _ = io.WriteString(w, "id: live-progress-1\nevent: tool_use\ndata: {\"id\":\"live-progress-1\",\"contextId\":\"ctx-progress\",\"agentName\":\"live-codex\",\"type\":\"tool_use\",\"name\":\"command_execution\",\"input\":{\"command\":\"go test ./...\"}}\n\n")
+			flusher.Flush()
+			<-r.Context().Done()
 		case r.Method == http.MethodGet && r.URL.Path == "/agents/live-codex/history/ctx-live-01":
 			writeFixtureJSON(w, http.StatusOK, liveHistory)
 		case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/agents/live-codex/history/"):

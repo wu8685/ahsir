@@ -33,6 +33,15 @@ type statusResponseWriter struct {
 	wroteHeader bool
 }
 
+func (w *statusResponseWriter) Flush() {
+	if !w.wroteHeader {
+		w.WriteHeader(http.StatusOK)
+	}
+	if f, ok := w.ResponseWriter.(http.Flusher); ok {
+		f.Flush()
+	}
+}
+
 func (w *statusResponseWriter) WriteHeader(status int) {
 	if w.wroteHeader {
 		return

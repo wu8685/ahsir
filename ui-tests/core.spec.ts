@@ -293,7 +293,8 @@ test('empty state settles without a writable composer', async ({ page, request }
   await expect(page.locator('#contexts .sess')).toHaveCount(0);
   await expect(page.locator('#rooms .sess')).toHaveCount(0);
   await expect(page.locator('#archived .sess')).toHaveCount(0);
-  await expect(page.locator('#agentSel option')).toHaveCount(0);
+  await expect(page.locator('#agentSel option')).toHaveCount(1);
+  await expect(page.locator('#agentSel option')).toHaveText('无可用 Agent');
   await expect(page.locator('#detailCard')).toContainText('当前没有运行中的 Agent');
   await expect(page.locator('#detailCard')).toContainText(
     '启动 Agent 后，可在这里查看运行状态和配置信息',
@@ -302,6 +303,63 @@ test('empty state settles without a writable composer', async ({ page, request }
   await expect(page.locator('#ta')).toBeDisabled();
   await expect(page.locator('#ta')).toHaveJSProperty('readOnly', true);
   await expect(page.locator('#sendBtn')).toBeDisabled();
+
+  await page.locator('#newConvo').click();
+  await expect(page.locator('#ctxTitle')).toHaveText('新对话');
+  await expect(page.locator('#ctxId')).toHaveText('等待 Agent');
+  await expect(page.locator('#thread .chat-empty-state')).toBeVisible();
+  await expect(page.locator('#thread')).toContainText('当前没有可用 Agent');
+  await expect(page.locator('#thread')).toContainText(
+    '新对话需要一个正在运行的 Agent。你可以先配置一个，或在启动后重新检查。',
+  );
+  await expect(page.locator('#emptyConfigureAgent')).toHaveText('配置新 Agent');
+  await expect(page.locator('#emptyRetryAgents')).toHaveText('重新检查');
+  await expect(page.locator('.cwrap')).toHaveClass(/is-disabled/);
+  await expect(page.locator('.cwrap')).toHaveAttribute('aria-disabled', 'true');
+  await expect(page.locator('#ta')).toHaveAttribute('placeholder', '启动 Agent 后可开始对话');
+
+  await resetScenario(request, 'core');
+  await page.locator('#emptyRetryAgents').click();
+  await expect(page.locator('#schedLabel')).toHaveText('scheduler · 1 agents');
+  await expect(page.locator('#agentSel')).toHaveValue('live-codex');
+  await expect(page.locator('#ta')).toBeEnabled();
+  await expect(page.locator('#ta')).toBeEditable();
+  await expect(page.locator('#ta')).toBeFocused();
+  await expect(page.locator('.cwrap')).not.toHaveClass(/is-disabled/);
+  await expect(page.locator('#thread .chat-empty-state')).toHaveCount(0);
+});
+
+test('empty new conversation moves mobile users to the recovery state', async ({ page, request }) => {
+  await resetScenario(request, 'empty');
+  await page.setViewportSize({ width: 800, height: 900 });
+  await page.goto('/');
+
+  const navigation = page.getByRole('navigation', { name: '移动端页面导航' });
+  const conversations = navigation.getByRole('button', { name: '会话', exact: true });
+  const chat = navigation.getByRole('button', { name: '聊天', exact: true });
+  await conversations.click();
+  await expect(page.locator('.rail.left')).toBeVisible();
+
+  await page.locator('#newConvo').click();
+  await expect(page.locator('.rail.left')).toBeHidden();
+  await expect(page.locator('main.center')).toBeVisible();
+  await expect(chat).toHaveAttribute('aria-pressed', 'true');
+  await expect(page.locator('#thread .chat-empty-state')).toBeVisible();
+  await expect(page.locator('#emptyConfigureAgent')).toBeVisible();
+  await expect(page.locator('#emptyRetryAgents')).toBeVisible();
+
+  const [emptyBox, composerBox, navigationBox] = await Promise.all([
+    page.locator('#thread .chat-empty-state').boundingBox(),
+    page.locator('.composer').boundingBox(),
+    navigation.boundingBox(),
+  ]);
+  expect(emptyBox).not.toBeNull();
+  expect(composerBox).not.toBeNull();
+  expect(navigationBox).not.toBeNull();
+  if (emptyBox && composerBox && navigationBox) {
+    expect(emptyBox.y + emptyBox.height).toBeLessThanOrEqual(composerBox.y + 1);
+    expect(composerBox.y + composerBox.height).toBeLessThanOrEqual(navigationBox.y + 1);
+  }
 });
 
 test('scheduler failure is explicit and leaves a rendered shell', async ({
@@ -318,6 +376,11 @@ test('scheduler failure is explicit and leaves a rendered shell', async ({
   await expect(page.locator('#schedLabel')).toHaveText('scheduler 不可达');
   await expect(page.locator('.app')).toBeVisible();
   await expect(page.locator('#contexts')).not.toContainText('加载中…');
+  await page.locator('#newConvo').click();
+  await expect(page.locator('#ctxId')).toHaveText('等待连接');
+  await expect(page.locator('#thread .chat-empty-state')).toContainText('无法连接 scheduler');
+  await expect(page.locator('#emptyRetryAgents')).toHaveText('重新连接');
+  await expect(page.locator('#thread')).not.toContainText('当前没有可用 Agent');
 });
 
 test('live participant details and chat remain usable', async ({ page, request }) => {
@@ -343,6 +406,16 @@ test('live participant details and chat remain usable', async ({ page, request }
     contextId: 'ctx-live-01',
   });
   await expect(page.locator('#thread')).toContainText('E2E fixed reply');
+});
+
+test('external invocation renders progress before the turn completes', async ({ page, request }) => {
+  await resetScenario(request, 'live-progress');
+  await page.goto('/');
+  await page.locator('#contexts .sess', { hasText: 'Build live progress fixture' }).click();
+  await expect(page.locator('#thread')).toContainText('Build live progress fixture');
+  await expect(page.locator('#thread')).toContainText('执行中');
+  await expect(page.locator('#thread')).toContainText('command_execution');
+  await expect(page.locator('#thread')).toContainText('go test ./...');
 });
 
 test('chat request detector includes query-string URLs', async ({ page, request }) => {

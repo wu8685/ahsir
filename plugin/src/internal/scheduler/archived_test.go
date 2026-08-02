@@ -263,3 +263,33 @@ func TestGatewayHistoryOfflineAgentNotFound(t *testing.T) {
 		t.Fatalf("status = %d, want 404", status)
 	}
 }
+
+// An idle-stopped agent is still desired and registered, but its last local
+// port is dead. Browsing history must read the managed transcript directly;
+// it must not wake an LLM runtime merely to read a file.
+func TestGatewayHistoryServesIdleStoppedAgentWithoutWake(t *testing.T) {
+	sch, url := newArchivedGateway(t)
+	seedArchivedTranscript(t, sch, "sleeper", "ctx-live", "question", "persisted reply", time.Now().Add(-time.Minute))
+
+	sch.registry.Register(&a2a.AgentCard{Name: "sleeper", URL: "http://127.0.0.1:1"})
+	sch.mu.Lock()
+	cfg := AgentConfig{Name: "sleeper", Workspace: sch.cfg.ManagedAgentWorkspace("sleeper")}
+	sch.desired["sleeper"] = cfg
+	sch.idleStopped["sleeper"] = cfg
+	sch.mu.Unlock()
+
+	status, body := getJSON(t, url+"/agents/sleeper/history/ctx-live")
+	if status != http.StatusOK {
+		t.Fatalf("status = %d, body=%s", status, body)
+	}
+	var turns []wrapper.TranscriptTurn
+	if err := json.Unmarshal(body, &turns); err != nil {
+		t.Fatalf("decode: %v (body=%s)", err, body)
+	}
+	if len(turns) != 1 || turns[0].Reply != "persisted reply" {
+		t.Fatalf("unexpected turns: %+v", turns)
+	}
+	if got := sch.IdleStoppedAgents(); len(got) != 1 || got[0] != "sleeper" {
+		t.Fatalf("history read woke or changed idle agent: %v", got)
+	}
+}

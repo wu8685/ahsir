@@ -30,6 +30,13 @@
     roomRendered: null,// last room id rendered (to force scroll-to-bottom on open)
     roomSig: null,     // last rendered room fingerprint (skip redundant repaints)
     cfgCache: {},      // agent name -> {path, yaml} read-only config detail
+    schedulerState: "loading", // "loading" | "ready" | "error"
+    chatEmptyKind: null, // null | "no-agent" | "scheduler-error"
+    contextSummary: null,
+    contextTurns: [],
+    liveEvents: [],
+    liveSource: null,
+    historyError: null,
   };
 
   // ---- tiny helpers -------------------------------------------------------
@@ -252,10 +259,13 @@
     try {
       agents = await getJSON("/agents");
     } catch (e) {
+      state.schedulerState = "error";
       $("#schedLabel").textContent = "scheduler 不可达";
       toast("无法连接 scheduler：" + e.message);
-      return;
+      renderChatAvailability();
+      return false;
     }
+    state.schedulerState = "ready";
     state.agents = agents || [];
     $("#schedLabel").textContent = `scheduler · ${state.agents.length} agents`;
 
@@ -267,9 +277,17 @@
       o.textContent = a.name;
       sel.appendChild(o);
     });
+    if (!state.agents.length) {
+      const o = el("option");
+      o.value = "";
+      o.textContent = "无可用 Agent";
+      sel.appendChild(o);
+    }
     if (!state.agent && state.agents.length) state.agent = state.agents[0].name;
     if (state.agent) sel.value = state.agent;
     renderDetail();
+    renderChatAvailability();
+    return true;
   }
 
   function agentByName(name) {
@@ -280,10 +298,34 @@
     return state.archivedAgents.find((a) => a.name === name);
   }
 
-  function setComposerWritable(writable) {
-    $("#ta").readOnly = !writable;
-    $("#ta").disabled = !writable;
+  function setComposerWritable(writable, placeholder) {
+    const ta = $("#ta"), wrap = document.querySelector(".cwrap");
+    ta.readOnly = !writable;
+    ta.disabled = !writable;
+    ta.placeholder = writable
+      ? "给 agent 下发任务…  ⌘↩ 发送 · 可拖入或粘贴文件插入路径"
+      : (placeholder || "当前对话只读");
     $("#sendBtn").disabled = !writable;
+    if (wrap) {
+      wrap.classList.toggle("is-disabled", !writable);
+      wrap.setAttribute("aria-disabled", String(!writable));
+      if (!writable && state.chatEmptyKind) wrap.setAttribute("aria-describedby", "chatEmptyDescription");
+      else if (typeof wrap.removeAttribute === "function") wrap.removeAttribute("aria-describedby");
+    }
+  }
+
+  function renderChatAvailability() {
+    if (state.mode !== "chat") return;
+    const schedulerReady = state.schedulerState === "ready";
+    const hasAgents = state.agents.length > 0;
+    const writable = schedulerReady && !!agentByName(state.agent);
+    const placeholder = !schedulerReady
+      ? "连接 scheduler 后可开始对话"
+      : !hasAgents
+        ? "启动 Agent 后可开始对话"
+        : "选择一个可用 Agent 后开始对话";
+    setComposerWritable(writable, placeholder);
+    $("#agentSel").disabled = !schedulerReady || !hasAgents;
   }
 
   function renderUnavailableDetail(name) {
@@ -298,7 +340,6 @@
     const card = $("#detailCard");
     if (!a) {
       if (!state.agent) {
-        setComposerWritable(false);
         if (!state.agents.length) {
           card.innerHTML =
             '<div class="muted-line">当前没有运行中的 Agent</div>' +
@@ -308,12 +349,10 @@
         card.innerHTML = '<div class="muted-line">选择一个 agent 查看详情</div>';
         return;
       }
-      setComposerWritable(false);
       if (archivedAgentByName(state.agent)) { renderArchivedDetail(state.agent); return; }
       renderUnavailableDetail(state.agent);
       return;
     }
-    setComposerWritable(true);
     const skills = (a.skills || []).map((s) => `<span>${esc(s.name)}</span>`).join("");
     card.innerHTML = `
       <div class="ch"><span class="av" style="background:${avatarColor(a.name)}">${esc(a.name.slice(0, 2))}</span>
@@ -469,9 +508,11 @@
   function newAgentForm() {
     if (state.roomPoll) { clearInterval(state.roomPoll); state.roomPoll = null; }
     state.mode = "agentnew";
+    state.chatEmptyKind = null;
     state.roomId = null;
     state.contextId = null;
     $("#agentSel").disabled = true;
+    setComposerWritable(false, "请使用上方表单配置 Agent");
     document.querySelectorAll("#contexts .sess, #rooms .sess").forEach((s) => s.classList.remove("on"));
     $("#ctxTitle").textContent = "新 Agent";
     $("#ctxId").textContent = "command";
@@ -590,10 +631,11 @@
 
   async function openArchivedContext(agentName, c) {
     enterChatMode();
+    state.chatEmptyKind = null;
     state.agent = agentName;
     state.contextId = c.contextId;
     $("#agentSel").value = "";
-    setComposerWritable(false);
+    setComposerWritable(false, "归档会话只读");
     $("#ctxTitle").textContent = c.title || c.contextId;
     $("#ctxId").textContent = "归档 · " + agentName + " · " + short(c.contextId);
     renderArchivedDetail(agentName);
@@ -615,6 +657,7 @@
 
   function renderThread(turns) {
     const t = $("#thread");
+    t.classList.remove("has-chat-empty");
     t.innerHTML = "";
     if (!turns || !turns.length) {
       t.appendChild(el("div", "thread-empty",
@@ -676,8 +719,14 @@
   }
 
   async function openContext(c) {
+    closeLiveSource();
     enterChatMode();
+    state.chatEmptyKind = null;
     state.contextId = c.contextId;
+    state.contextSummary = c;
+    state.liveEvents = [];
+    state.contextTurns = [];
+    state.historyError = null;
     $("#ctxTitle").textContent = c.title || c.contextId;
     $("#ctxId").textContent = "ctx · " + short(c.contextId);
     // Prefer an agent that actually participated in this context.
@@ -686,6 +735,7 @@
     }
     $("#agentSel").value = agentByName(state.agent) ? state.agent : "";
     renderDetail();
+    renderChatAvailability();
     await refreshContextViews();
     markActiveContext();
   }
@@ -696,28 +746,234 @@
     loadContexts();
   }
 
+  function renderChatEmpty(kind, feedbackText) {
+    state.chatEmptyKind = kind;
+    const schedulerError = kind === "scheduler-error";
+    const t = $("#thread");
+    t.innerHTML = "";
+    t.classList.add("has-chat-empty");
+
+    const wrap = el("section", "chat-empty-state");
+    wrap.setAttribute("aria-labelledby", "chatEmptyTitle");
+    const mark = el("div", "chat-empty-mark", '<span class="dot s-idle"></span>');
+    mark.setAttribute("aria-hidden", "true");
+    wrap.appendChild(mark);
+    const title = el("h2", null, schedulerError ? "无法连接 scheduler" : "当前没有可用 Agent");
+    title.setAttribute("id", "chatEmptyTitle");
+    wrap.appendChild(title);
+    const description = el("p", null, schedulerError
+      ? "控制台暂时无法读取 Agent 状态。请确认 scheduler 正在运行，然后重新连接。"
+      : "新对话需要一个正在运行的 Agent。你可以先配置一个，或在启动后重新检查。");
+    description.setAttribute("id", "chatEmptyDescription");
+    wrap.appendChild(description);
+
+    const actions = el("div", "chat-empty-actions");
+    if (!schedulerError) {
+      const configure = el("button", "primary", "配置新 Agent");
+      configure.setAttribute("id", "emptyConfigureAgent");
+      configure.addEventListener("click", newAgentForm);
+      actions.appendChild(configure);
+    }
+    const retry = el("button", schedulerError ? "primary" : "secondary",
+      schedulerError ? "重新连接" : "重新检查");
+    retry.setAttribute("id", "emptyRetryAgents");
+    retry.addEventListener("click", () => retryAgents(retry));
+    actions.appendChild(retry);
+    wrap.appendChild(actions);
+
+    const feedback = el("div", "chat-empty-feedback", feedbackText || "");
+    feedback.setAttribute("id", "chatEmptyFeedback");
+    feedback.setAttribute("aria-live", "polite");
+    wrap.appendChild(feedback);
+    t.appendChild(wrap);
+  }
+
+  async function retryAgents(button) {
+    const oldLabel = button.textContent;
+    button.disabled = true;
+    button.textContent = state.chatEmptyKind === "scheduler-error" ? "连接中…" : "检查中…";
+    const ok = await loadAgents();
+    if (!ok) {
+      renderChatEmpty("scheduler-error");
+      renderChatAvailability();
+      return;
+    }
+    if (state.agents.length) {
+      const found = state.agents[0].name;
+      state.agent = found;
+      toast(`已发现 ${found}`);
+      newConversation();
+      return;
+    }
+    button.disabled = false;
+    button.textContent = oldLabel;
+    const feedback = $("#chatEmptyFeedback");
+    if (feedback) feedback.textContent = "仍未发现运行中的 Agent";
+  }
+
   function newConversation() {
+    closeLiveSource();
     enterChatMode();
-    state.contextId = uuid();
+    state.contextSummary = null;
+    state.liveEvents = [];
+    state.contextTurns = [];
+    state.historyError = null;
     $("#ctxTitle").textContent = "新对话";
+
+    if (state.schedulerState !== "ready") {
+      state.contextId = null;
+      $("#ctxId").textContent = "等待连接";
+      renderChatEmpty("scheduler-error");
+      renderChatAvailability();
+      showMobileSurface("center");
+      return;
+    }
+    if (!state.agents.length) {
+      state.agent = null;
+      state.contextId = null;
+      $("#agentSel").value = "";
+      $("#ctxId").textContent = "等待 Agent";
+      renderDetail();
+      renderChatEmpty("no-agent");
+      renderChatAvailability();
+      showMobileSurface("center");
+      return;
+    }
+
+    state.chatEmptyKind = null;
+    if (!agentByName(state.agent)) state.agent = state.agents[0].name;
+    state.contextId = uuid();
+    $("#agentSel").value = state.agent;
     $("#ctxId").textContent = "ctx · " + short(state.contextId);
     renderThread([]);
     $("#trace").innerHTML = '<div class="muted-line">-</div>';
     document.querySelectorAll("#contexts .sess").forEach((s) => s.classList.remove("on"));
+    renderDetail();
+    renderChatAvailability();
+    showMobileSurface("center");
     $("#ta").focus();
   }
 
   // Reload the selected agent's transcript for the current context + the trace.
   async function refreshContextViews() {
     if (!state.contextId || !state.agent) { renderThread([]); return; }
-    try {
-      const turns = await getJSON(`/agents/${encodeURIComponent(state.agent)}/history/${encodeURIComponent(state.contextId)}`);
-      renderThread(turns);
-    } catch (e) {
-      renderThread([]);
-    }
+    const contextID = state.contextId;
+    const historyPath = `/agents/${encodeURIComponent(state.agent)}/history/${encodeURIComponent(contextID)}`;
+    const eventPath = `/context-events?contextId=${encodeURIComponent(contextID)}`;
+    const [history, live] = await Promise.allSettled([getJSON(historyPath), getJSON(eventPath)]);
+    if (state.contextId !== contextID) return;
+    state.contextTurns = history.status === "fulfilled" ? (history.value || []) : [];
+    state.historyError = history.status === "rejected" ? history.reason.message : null;
+    state.liveEvents = live.status === "fulfilled" ? (live.value || []) : [];
+    renderCurrentContext();
+    if (isActiveInvocation(state.contextSummary)) startLiveSource();
+    else closeLiveSource();
     loadTrace();
     loadContextAgents();
+  }
+
+  function isActiveInvocation(summary) {
+    return !!summary && ["queued", "in_flight", "recovering"].includes(summary.lastStatus);
+  }
+
+  function closeLiveSource() {
+    if (state.liveSource) {
+      state.liveSource.close();
+      state.liveSource = null;
+    }
+  }
+
+  function renderCurrentContext() {
+    renderThread(state.contextTurns || []);
+    const summary = state.contextSummary;
+    const terminalWithoutTranscript = summary && !isActiveInvocation(summary) &&
+      (!state.contextTurns || !state.contextTurns.length) && summary.userText;
+    if (isActiveInvocation(summary) || terminalWithoutTranscript) {
+      appendLiveTurn(summary, state.liveEvents || []);
+    }
+    if (state.historyError) appendHistoryError(state.historyError);
+  }
+
+  function ensureThreadWrap() {
+    let wrap = $("#thread .tw");
+    if (!wrap) {
+      $("#thread").innerHTML = "";
+      wrap = el("div", "tw");
+      $("#thread").appendChild(wrap);
+    }
+    return wrap;
+  }
+
+  function appendLiveTurn(summary, events) {
+    if (!summary) return;
+    const wrap = ensureThreadWrap();
+    const startMs = summary.startedAt ? new Date(summary.startedAt).getTime() : Date.now();
+    const ub = msgBlock("u");
+    ub.appendChild(el("div", null, msgHead("u", summary.speaker || "user", startMs, summary.startedAt)));
+    ub.appendChild(el("div", "umsg", `<div class="b">${mdToHtml(summary.userText || summary.title || "")}</div>`));
+    wrap.appendChild(ub);
+
+    const ab = msgBlock("a");
+    ab.appendChild(el("div", null, msgHead("a", state.agent || "agent", Date.now())));
+    const body = el("div", "amsg live-progress");
+    const status = liveStatusLabel(summary.lastStatus);
+    body.appendChild(el("div", "elapsed mono", `<span class="dot ${isActiveInvocation(summary) ? "s-run" : "s-wait"}"></span>${esc(state.agent)} · ${esc(status)}`));
+    events.forEach((ev) => body.appendChild(renderLiveStep(ev)));
+    if (summary.error) body.appendChild(el("div", "live-error", `✗ ${esc(summary.error)}`));
+    ab.appendChild(body);
+    wrap.appendChild(ab);
+    $("#thread").scrollTop = $("#thread").scrollHeight;
+  }
+
+  function liveStatusLabel(status) {
+    return ({ queued: "排队中", in_flight: "执行中", recovering: "恢复中", completed: "已完成",
+      recovered: "已恢复", failed: "执行失败", recovery_failed: "恢复失败", canceled: "已取消" })[status] || status || "执行中";
+  }
+
+  function renderLiveStep(ev) {
+    if (ev.type === "thinking") return el("div", "live-step thinking", "Agent 正在思考");
+    if (ev.type === "status" || ev.type === "span_start" || ev.type === "span_end") {
+      return el("div", "live-step muted-line", esc(ev.state || ev.type));
+    }
+    if (ev.type === "text_delta") return el("div", "live-step live-text", mdToHtml(ev.content || ""));
+    const label = ev.name || ev.type || "step";
+    let detail = "";
+    if (ev.input != null) {
+      try { detail = JSON.stringify(ev.input, null, 2); } catch (_) { detail = String(ev.input); }
+    } else if (ev.content) detail = ev.content;
+    return el("details", "live-step" + (ev.isError ? " failed" : ""),
+      `<summary><span class="dot ${ev.isError ? "s-wait" : "s-ok"}"></span><code>${esc(label)}</code></summary>` +
+      (detail ? `<pre>${esc(detail)}</pre>` : ""));
+  }
+
+  function appendHistoryError(message) {
+    const wrap = ensureThreadWrap();
+    wrap.appendChild(el("div", "history-error", `<b>无法读取会话记录</b><span>${esc(message)}</span>`));
+  }
+
+  function startLiveSource() {
+    closeLiveSource();
+    if (typeof EventSource === "undefined" || !state.contextId) return;
+    const last = state.liveEvents.length ? state.liveEvents[state.liveEvents.length - 1].id : "";
+    const path = `/context-events/stream?contextId=${encodeURIComponent(state.contextId)}` +
+      (last ? `&after=${encodeURIComponent(last)}` : "");
+    const source = new EventSource(api(path));
+    state.liveSource = source;
+    const types = ["status", "text_delta", "tool_use", "tool_result", "thinking", "span_start", "span_end", "terminal"];
+    types.forEach((type) => source.addEventListener(type, (e) => {
+      if (source !== state.liveSource) return;
+      let ev;
+      try { ev = JSON.parse(e.data); } catch (_) { return; }
+      if (state.liveEvents.some((x) => x.id === ev.id)) return;
+      state.liveEvents.push(ev);
+      if (type === "terminal") {
+        if (state.contextSummary) state.contextSummary.lastStatus = ev.state || "completed";
+        closeLiveSource();
+        setTimeout(() => refreshContextViews(), 50);
+        return;
+      }
+      renderCurrentContext();
+    }));
   }
 
   async function loadContextAgents() {
@@ -810,6 +1066,7 @@
     state.agent = name;
     $("#agentSel").value = agentByName(name) ? name : "";
     renderDetail();
+    renderChatAvailability();
     refreshContextViews();
   }
 
@@ -889,6 +1146,7 @@
 
   // Leaving room mode: stop polling and fall back to 1:1 chat.
   function enterChatMode() {
+    closeLiveSource();
     state.mode = "chat";
     state.roomId = null;
     state.roomRendered = null;
@@ -1714,9 +1972,22 @@
 
     loadAgents().then(() => { loadContexts(); loadArchived(); loadRooms(); });
     // Light polling so external CLI activity shows up in the rails.
-    setInterval(() => {
+    setInterval(async () => {
       loadRooms();
-      if (state.mode === "chat") { loadContexts(); loadArchived(); if (state.contextId) loadTrace(); }
+      if (state.mode === "chat") {
+        const waitingForAgent = state.chatEmptyKind === "no-agent";
+        const agentLoadOK = waitingForAgent ? await loadAgents() : false;
+        if (waitingForAgent && state.mode === "chat" && state.chatEmptyKind === "no-agent" &&
+            agentLoadOK && state.agents.length) {
+          const found = state.agents[0].name;
+          state.agent = found;
+          toast(`已发现 ${found}`);
+          newConversation();
+        }
+        loadContexts();
+        loadArchived();
+        if (state.contextId) loadTrace();
+      }
     }, 8000);
   }
 
