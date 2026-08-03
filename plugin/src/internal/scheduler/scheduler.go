@@ -75,12 +75,12 @@ type Scheduler struct {
 	// respawn from. Guarded by s.mu.
 	idleStopped map[string]AgentConfig
 
-	// waking single-flights concurrent wake attempts for one idle-stopped agent
-	// (R2): the first request creates the channel and spawns the process; others
-	// wait on it. Guarded by s.mu. The same map single-flights first-time spawns
-	// of a pooled instance child (issue #18) — the key space (agent names) is
-	// shared and the two intents never collide on one name.
-	waking map[string]chan struct{}
+	// activations single-flights the complete runtime activation, including
+	// readiness, for base agents and pooled instance children alike.
+	// It has a separate mutex so callers can join an activation while its leader
+	// holds s.mu to allocate and publish the process.
+	activationMu sync.Mutex
+	activations  map[string]*activationCall
 
 	// pools holds the per-card instance pool for every agent whose card backs
 	// more than one concurrent runtime instance (issue #18). Lazily created in
@@ -97,6 +97,12 @@ type agentProcess struct {
 	stopping        bool
 	restartAttempts int
 	internalToken   string
+	done            chan struct{} // closed by monitorAgent after cmd.Wait and state cleanup
+}
+
+type activationCall struct {
+	done chan struct{}
+	err  error
 }
 
 type supervisorConfig struct {
@@ -127,6 +133,17 @@ const continuationPrompt = "You were restarted while working on a previous task 
 // auto-allocation loop in startAgentLocked can skip to the next candidate
 // while pinned-port configs still surface it as a hard error.
 var errPortInUse = errors.New("port in use")
+
+// ErrAgentIncompatible means an idempotent registration found scheduler
+// desired state under the same name, but its immutable configuration differs
+// from the request. Callers should surface this as HTTP 409 without modifying
+// the persisted card or restarting the existing runtime.
+var ErrAgentIncompatible = errors.New("agent registration incompatible")
+
+// ErrAgentAlreadyExists preserves the legacy pre-staged-card POST behavior:
+// without an inline card there is no requested immutable definition to verify,
+// so an existing name remains a conflict rather than an idempotent success.
+var ErrAgentAlreadyExists = errors.New("agent already exists")
 
 // New creates a new scheduler from configuration.
 func New(cfg *Config) *Scheduler {
@@ -164,7 +181,7 @@ func New(cfg *Config) *Scheduler {
 		findLocalListener:    defaultFindLocalListener,
 		killLocalProcessTree: defaultKillLocalProcessTree,
 		idleStopped:          make(map[string]AgentConfig),
-		waking:               make(map[string]chan struct{}),
+		activations:          make(map[string]*activationCall),
 		pools:                make(map[string]*instancePool),
 	}
 	// Roundtable turns reuse the normal per-agent chat path (shared contextId,
@@ -377,6 +394,136 @@ func (s *Scheduler) StartAgent(cfg AgentConfig) (int, error) {
 	return s.agents[cfg.Name].cfg.Port, nil
 }
 
+// EnsureAgent atomically reconciles one dynamically registered Agent. The
+// existence/compatibility check, optional card write, and first process spawn
+// all run under s.mu, so concurrent identical registrations cannot both write
+// or launch. An already-desired compatible Agent is success and is left
+// byte-for-byte untouched; a mismatch returns ErrAgentIncompatible before any
+// filesystem mutation.
+func (s *Scheduler) EnsureAgent(cfg AgentConfig, card *wrapper.AgentCardConfig) (port int, created bool, err error) {
+	s.mu.Lock()
+	if !s.running {
+		s.mu.Unlock()
+		return 0, false, fmt.Errorf("scheduler not running")
+	}
+	if cfg.Name == "" {
+		s.mu.Unlock()
+		return 0, false, fmt.Errorf("agent name is required")
+	}
+	if cfg.Workspace == "" {
+		s.mu.Unlock()
+		return 0, false, fmt.Errorf("agent workspace is required")
+	}
+	for name, existing := range s.desired {
+		if name != cfg.Name && sameCleanPath(existing.Workspace, cfg.Workspace) {
+			s.mu.Unlock()
+			return 0, false, fmt.Errorf("%w for %q: workspace %q is already desired by %q", ErrAgentIncompatible, cfg.Name, cfg.Workspace, name)
+		}
+	}
+
+	if existing, ok := s.desired[cfg.Name]; ok {
+		if card == nil {
+			s.mu.Unlock()
+			return 0, false, fmt.Errorf("%w: agent %q already running or desired", ErrAgentAlreadyExists, cfg.Name)
+		}
+		compatible, detail := compatibleRegistration(existing, cfg)
+		if compatible {
+			matches, matchErr := wrapper.CardMatches(existing.Workspace, card)
+			switch {
+			case matchErr != nil:
+				compatible = false
+				detail = "existing card cannot be verified: " + matchErr.Error()
+			case !matches:
+				compatible = false
+				detail = "inline card differs"
+			}
+		}
+		if !compatible {
+			s.mu.Unlock()
+			return 0, false, fmt.Errorf("%w for %q: %s", ErrAgentIncompatible, cfg.Name, detail)
+		}
+		if proc, running := s.agents[cfg.Name]; running {
+			s.mu.Unlock()
+			if err := s.waitAgentHealthy(proc); err != nil {
+				return 0, false, fmt.Errorf("ensure running agent %q ready: %w", cfg.Name, err)
+			}
+			return proc.cfg.Port, false, nil
+		}
+		if _, idle := s.idleStopped[cfg.Name]; idle {
+			s.mu.Unlock()
+			if err := s.ensureAwake(cfg.Name); err != nil {
+				return 0, false, err
+			}
+			s.mu.Lock()
+			proc := s.agents[cfg.Name]
+			s.mu.Unlock()
+			if proc == nil {
+				return 0, false, fmt.Errorf("ensure idle-stopped agent %q ready: runtime missing after wake", cfg.Name)
+			}
+			return proc.cfg.Port, false, nil
+		}
+		// Desired state with neither a process nor an intentional idle-stop is
+		// scheduler/runtime drift. Fill it now under the same lock. A pending
+		// supervisor restart will observe s.agents populated and become a no-op.
+		if err := s.startAgentLocked(s.ctx, existing, 0); err != nil {
+			s.mu.Unlock()
+			return 0, false, fmt.Errorf("reconcile missing runtime for %q: %w", cfg.Name, err)
+		}
+		proc := s.agents[cfg.Name]
+		s.mu.Unlock()
+		if err := s.waitAgentHealthy(proc); err != nil {
+			s.rollbackFailedWake(cfg.Name, proc)
+			return 0, false, fmt.Errorf("reconcile missing runtime for %q readiness: %w", cfg.Name, err)
+		}
+		return proc.cfg.Port, true, nil
+	}
+
+	if card != nil {
+		if err := wrapper.WriteCard(cfg.Workspace, card); err != nil {
+			s.mu.Unlock()
+			return 0, false, fmt.Errorf("scaffold inline card: %w", err)
+		}
+	}
+	if err := s.startAgentLocked(s.ctx, cfg, 0); err != nil {
+		s.mu.Unlock()
+		return 0, false, err
+	}
+	proc := s.agents[cfg.Name]
+	s.mu.Unlock()
+	if err := s.waitAgentHealthy(proc); err != nil {
+		s.rollbackFailedWake(cfg.Name, proc)
+		return 0, false, fmt.Errorf("start agent %q readiness: %w", cfg.Name, err)
+	}
+	return proc.cfg.Port, true, nil
+}
+
+func compatibleRegistration(existing, requested AgentConfig) (bool, string) {
+	if existing.InstanceCap() != requested.InstanceCap() {
+		return false, fmt.Sprintf("instances=%d, requested=%d", existing.InstanceCap(), requested.InstanceCap())
+	}
+	if !sameCleanPath(existing.Workspace, requested.Workspace) {
+		return false, fmt.Sprintf("workspace=%q, requested=%q", existing.Workspace, requested.Workspace)
+	}
+	existingWorkdir := existing.Workdir
+	if existingWorkdir == "" {
+		existingWorkdir = existing.Workspace
+	}
+	requestedWorkdir := requested.Workdir
+	if requestedWorkdir == "" {
+		requestedWorkdir = requested.Workspace
+	}
+	if !sameCleanPath(existingWorkdir, requestedWorkdir) {
+		return false, fmt.Sprintf("workdir=%q, requested=%q", existingWorkdir, requestedWorkdir)
+	}
+	// Port zero means dynamic allocation. Once resolved, desired state stores
+	// the concrete port, so a repeated dynamic request must ignore that runtime
+	// detail. An explicitly pinned request remains part of compatibility.
+	if requested.Port > 0 && existing.Port != requested.Port {
+		return false, fmt.Sprintf("port=%d, requested=%d", existing.Port, requested.Port)
+	}
+	return true, ""
+}
+
 // StopAgent tears down a running agent. Idempotent on "not running" —
 // returns nil if the name isn't in the map. Files in the workspace are
 // preserved (this is dynamic deregistration only). To remove files,
@@ -422,10 +569,18 @@ func (s *Scheduler) startAgentLocked(ctx context.Context, cfg AgentConfig, resta
 		// process (not a stale ahsir-agent we can evict) is skipped rather
 		// than failing the whole agent start — the allocator's job is to
 		// find a *usable* port, not just the next integer.
-		for {
+		candidateCount := s.cfg.PortRange.End - s.cfg.PortRange.Start + 1
+		if candidateCount <= 0 {
+			return fmt.Errorf("no available ports in range %d-%d", s.cfg.PortRange.Start, s.cfg.PortRange.End)
+		}
+		allocated := false
+		for range candidateCount {
 			port, err := s.cfg.AllocatePort()
 			if err != nil {
 				return err
+			}
+			if s.portReservedLocked(port) {
+				continue
 			}
 			// Persist the resolved port into cfg so s.agents[name].cfg.Port
 			// reflects the actually-allocated value (callers — admin API,
@@ -438,11 +593,20 @@ func (s *Scheduler) startAgentLocked(ctx context.Context, cfg AgentConfig, resta
 				}
 				return err
 			}
+			allocated = true
 			break
+		}
+		if !allocated {
+			return fmt.Errorf("no available ports in range %d-%d", s.cfg.PortRange.Start, s.cfg.PortRange.End)
 		}
 	} else {
 		// Explicitly pinned port: in-use by a foreign process is a hard
-		// error the user must resolve.
+		// error the user must resolve. Check scheduler ownership first: a
+		// freshly-published process may not have bound its listener yet, so an
+		// OS-only probe leaves a window for two pinned Agents to share a port.
+		if s.portReservedByOtherLocked(cfg.Port, cfg.Name) {
+			return fmt.Errorf("port %d is reserved by another scheduler agent", cfg.Port)
+		}
 		if err := s.evictStaleLocalAgent(cfg); err != nil {
 			return err
 		}
@@ -486,6 +650,7 @@ func (s *Scheduler) startAgentLocked(ctx context.Context, cfg AgentConfig, resta
 		cancel:          cancel,
 		restartAttempts: restartAttempts,
 		internalToken:   cfg.InternalToken,
+		done:            make(chan struct{}),
 	}
 	s.agents[cfg.Name] = proc
 	s.desired[cfg.Name] = cfg
@@ -499,6 +664,66 @@ func (s *Scheduler) startAgentLocked(ctx context.Context, cfg AgentConfig, resta
 	}
 
 	return nil
+}
+
+// portReservedLocked reports whether a dynamic candidate is owned by
+// scheduler state. The caller holds s.mu, which keeps choosing the port and
+// publishing the new agentProcess atomic with every other scheduler start.
+//
+// Running processes retain their ports until monitorAgent observes exit.
+// Desired agents also retain their ports across crash/health restart backoff,
+// except for idle-stopped agents whose process has deliberately released the
+// listener. Statically pinned config entries are reserved regardless of config
+// order so an earlier dynamic entry cannot take a later pinned port during
+// scheduler startup.
+func (s *Scheduler) portReservedLocked(port int) bool {
+	for _, proc := range s.agents {
+		if proc.cfg.Port == port {
+			return true
+		}
+	}
+	for name, cfg := range s.desired {
+		if _, idle := s.idleStopped[name]; idle {
+			continue
+		}
+		if cfg.Port == port {
+			return true
+		}
+	}
+	for _, cfg := range s.cfg.Agents {
+		if cfg.Port > 0 && cfg.Port == port {
+			return true
+		}
+	}
+	return false
+}
+
+// portReservedByOtherLocked is the explicit-port counterpart to
+// portReservedLocked. The same name is excluded so a supervisor restart may
+// reclaim its desired pinned port after its old process has exited.
+func (s *Scheduler) portReservedByOtherLocked(port int, name string) bool {
+	for procName, proc := range s.agents {
+		if procName != name && proc.cfg.Port == port {
+			return true
+		}
+	}
+	for desiredName, cfg := range s.desired {
+		if desiredName == name {
+			continue
+		}
+		if _, idle := s.idleStopped[desiredName]; idle {
+			continue
+		}
+		if cfg.Port == port {
+			return true
+		}
+	}
+	for _, cfg := range s.cfg.Agents {
+		if cfg.Name != name && cfg.Port > 0 && cfg.Port == port {
+			return true
+		}
+	}
+	return false
 }
 
 func (s *Scheduler) evictStaleLocalAgent(cfg AgentConfig) error {
@@ -548,15 +773,35 @@ func sameCleanPath(a, b string) bool {
 	if a == "" || b == "" {
 		return false
 	}
-	aa, err := filepath.Abs(filepath.Clean(a))
-	if err == nil {
-		a = aa
+	return canonicalPath(a) == canonicalPath(b)
+}
+
+// canonicalPath resolves symlinks in an existing path or in its nearest
+// existing ancestor. The latter matters for managed workspaces: the Agent
+// directory may not exist yet while its configured parent is a symlink.
+func canonicalPath(path string) string {
+	clean := filepath.Clean(path)
+	if abs, err := filepath.Abs(clean); err == nil {
+		clean = abs
 	}
-	bb, err := filepath.Abs(filepath.Clean(b))
-	if err == nil {
-		b = bb
+	if resolved, err := filepath.EvalSymlinks(clean); err == nil {
+		return filepath.Clean(resolved)
 	}
-	return a == b
+
+	cur := clean
+	var suffix []string
+	for {
+		parent := filepath.Dir(cur)
+		if parent == cur {
+			return clean
+		}
+		suffix = append([]string{filepath.Base(cur)}, suffix...)
+		if resolved, err := filepath.EvalSymlinks(parent); err == nil {
+			parts := append([]string{resolved}, suffix...)
+			return filepath.Clean(filepath.Join(parts...))
+		}
+		cur = parent
+	}
 }
 
 func defaultFindLocalListener(port int) (localProcessInfo, bool, error) {
@@ -681,6 +926,9 @@ func (s *Scheduler) agentInternalToken(name string) string {
 
 func (s *Scheduler) monitorAgent(proc *agentProcess) {
 	err := proc.cmd.Wait()
+	if proc.done != nil {
+		defer close(proc.done)
+	}
 	if err != nil {
 		log.Printf("Agent %s exited: %v", proc.cfg.Name, err)
 	} else {
@@ -844,6 +1092,9 @@ func (s *Scheduler) scheduleRestartLocked(cfg AgentConfig, attempt int, delay ti
 		if _, exists := s.agents[cfg.Name]; exists {
 			return
 		}
+		if _, idle := s.idleStopped[cfg.Name]; idle {
+			return
+		}
 		if err := s.startAgentLocked(s.ctx, currentCfg, attempt); err != nil {
 			nextAttempt := attempt + 1
 			nextDelay := s.restartBackoff(nextAttempt)
@@ -942,7 +1193,6 @@ func (s *Scheduler) Stop() {
 	s.agents = make(map[string]*agentProcess)
 	s.desired = make(map[string]AgentConfig)
 	s.idleStopped = make(map[string]AgentConfig)
-	s.waking = make(map[string]chan struct{})
 	s.pools = make(map[string]*instancePool)
 	s.running = false
 }
@@ -1046,9 +1296,37 @@ func (s *Scheduler) IdleStoppedAgents() []string {
 // (the activator, spec §4.4). No-op when the agent is already running or is not
 // idle-stopped: an unknown, explicitly-stopped, or archived agent is left alone
 // so it does NOT spring back to life on a single access (spec §4.5). Concurrent
-// callers single-flight through s.waking (R2) — only the first spawns a
-// process; the rest wait for it to come up.
+// callers single-flight through runActivation (R2) — only the first spawns a
+// process; the rest wait for the same readiness result.
 func (s *Scheduler) ensureAwake(name string) error {
+	return s.runActivation(name, func() error { return s.ensureAwakeOnce(name) })
+}
+
+// runActivation single-flights one complete activation, including its health
+// check and any rollback. Every concurrent caller observes the leader's exact
+// result; a failed call is removed only after cleanup has finished, so the next
+// caller can safely retry.
+func (s *Scheduler) runActivation(name string, activate func() error) error {
+	s.activationMu.Lock()
+	if call, ok := s.activations[name]; ok {
+		s.activationMu.Unlock()
+		<-call.done
+		return call.err
+	}
+	call := &activationCall{done: make(chan struct{})}
+	s.activations[name] = call
+	s.activationMu.Unlock()
+
+	err := activate()
+	s.activationMu.Lock()
+	call.err = err
+	delete(s.activations, name)
+	close(call.done)
+	s.activationMu.Unlock()
+	return err
+}
+
+func (s *Scheduler) ensureAwakeOnce(name string) error {
 	s.mu.Lock()
 	if !s.running {
 		s.mu.Unlock()
@@ -1058,12 +1336,6 @@ func (s *Scheduler) ensureAwake(name string) error {
 		s.mu.Unlock()
 		return nil
 	}
-	if ch, waking := s.waking[name]; waking {
-		// Another goroutine is already bringing it up — wait for that attempt.
-		s.mu.Unlock()
-		<-ch
-		return nil
-	}
 	cfg, idle := s.idleStopped[name]
 	if !idle {
 		// Not idle-stopped: nothing to wake. The caller's normal dial decides
@@ -1071,8 +1343,6 @@ func (s *Scheduler) ensureAwake(name string) error {
 		s.mu.Unlock()
 		return nil
 	}
-	ch := make(chan struct{})
-	s.waking[name] = ch
 	// Re-allocate the port: the reaped process's port may linger in TIME_WAIT.
 	cfg.Port = 0
 	startErr := s.startAgentLocked(s.ctx, cfg, 0)
@@ -1083,24 +1353,56 @@ func (s *Scheduler) ensureAwake(name string) error {
 	}
 	s.mu.Unlock()
 
-	// Always release the single-flight latch, success or failure, so a failed
-	// wake doesn't wedge every later request behind a never-closed channel.
-	defer func() {
-		s.mu.Lock()
-		delete(s.waking, name)
-		s.mu.Unlock()
-		close(ch)
-	}()
-
 	if startErr != nil {
 		return fmt.Errorf("wake idle-stopped agent %s: %w", name, startErr)
 	}
 	log.Printf("Agent %s waking from idle-stopped", name)
 	if err := s.waitAgentHealthy(proc); err != nil {
+		s.rollbackFailedWake(name, proc)
 		return fmt.Errorf("wake idle-stopped agent %s: %w", name, err)
 	}
 	log.Printf("Agent %s awake and healthy", name)
 	return nil
+}
+
+// rollbackFailedWake removes a process that started but never became healthy
+// and restores the desired agent to idle-stopped so the next request can try a
+// fresh activation. Marking the process stopping before kill prevents its
+// monitor from scheduling a crash restart in parallel with that retry.
+func (s *Scheduler) rollbackFailedWake(name string, proc *agentProcess) {
+	s.mu.Lock()
+	current, running := s.agents[name]
+	if running && current == proc {
+		proc.stopping = true
+		killAgentProcess(proc)
+		proc.cancel()
+	}
+	done := proc.done
+	s.mu.Unlock()
+
+	// monitorAgent owns removal from s.agents. Waiting for it preserves the
+	// dynamic-port reservation until cmd.Wait confirms the listener process has
+	// actually exited; otherwise an immediate retry could race the dying process
+	// and falsely probe its old health endpoint.
+	if running && current == proc && done != nil {
+		<-done
+	}
+
+	s.mu.Lock()
+	_, replacementRunning := s.agents[name]
+	if cfg, desired := s.desired[name]; desired && s.running {
+		// The failed process may have exited and queued a supervisor restart
+		// before this readiness caller reached rollback. If that replacement is
+		// already published, leave it running; marking the name idle-stopped here
+		// would create contradictory state and race the next activator.
+		if !replacementRunning {
+			s.idleStopped[name] = cfg
+		}
+	}
+	s.mu.Unlock()
+	if !replacementRunning {
+		_ = s.registry.Unregister(name)
+	}
 }
 
 // waitAgentHealthy polls the agent's /healthz until it responds OK or a wake
@@ -1187,11 +1489,12 @@ func (s *Scheduler) resolveInstance(agentName, contextID string) (target string,
 // running and healthy: it wakes an idle-stopped instance via the activator,
 // waits on an in-flight spawn by another goroutine, or scaffolds the isolated
 // instance workspace and spawns a fresh ahsir-agent process. Concurrent callers
-// for the same instance single-flight through s.waking, mirroring ensureAwake,
-// so exactly one process is started.
+// for the same instance single-flight through runActivation, mirroring
+// ensureAwake, so exactly one process is started and every waiter observes the
+// same readiness or rollback result.
 func (s *Scheduler) startOrWakeInstance(base string, idx int) error {
 	instName := instanceName(base, idx)
-	for {
+	return s.runActivation(instName, func() error {
 		s.mu.Lock()
 		if !s.running {
 			s.mu.Unlock()
@@ -1201,17 +1504,11 @@ func (s *Scheduler) startOrWakeInstance(base string, idx int) error {
 			s.mu.Unlock()
 			return nil
 		}
-		if ch, waking := s.waking[instName]; waking {
-			// Another goroutine is bringing this instance up — wait, then
-			// re-check (it may have failed and left nothing running).
-			s.mu.Unlock()
-			<-ch
-			continue
-		}
 		if _, idle := s.idleStopped[instName]; idle {
-			// A reaped instance: reuse the activator's own single-flight wake.
+			// This call already owns the instance activation singleflight; invoke
+			// the one-shot wake directly to avoid recursively joining itself.
 			s.mu.Unlock()
-			return s.ensureAwake(instName)
+			return s.ensureAwakeOnce(instName)
 		}
 		baseCfg, ok := s.desired[base]
 		if !ok {
@@ -1223,23 +1520,23 @@ func (s *Scheduler) startOrWakeInstance(base string, idx int) error {
 			s.mu.Unlock()
 			return fmt.Errorf("scaffold instance %s: %w", instName, err)
 		}
-		ch := make(chan struct{})
-		s.waking[instName] = ch
 		startErr := s.startAgentLocked(s.ctx, instCfg, 0)
 		var proc *agentProcess
 		if startErr == nil {
 			proc = s.agents[instName]
 		}
-		delete(s.waking, instName)
 		s.mu.Unlock()
-		close(ch)
 
 		if startErr != nil {
 			return fmt.Errorf("start instance %s: %w", instName, startErr)
 		}
 		log.Printf("Agent %s instance #%d started on port %d (workspace=%s)", base, idx, proc.cfg.Port, instCfg.Workspace)
-		return s.waitAgentHealthy(proc)
-	}
+		if err := s.waitAgentHealthy(proc); err != nil {
+			s.rollbackFailedWake(instName, proc)
+			return fmt.Errorf("start instance %s: %w", instName, err)
+		}
+		return nil
+	})
 }
 
 // deriveInstanceConfig produces the AgentConfig for instance idx from its base

@@ -17,6 +17,20 @@ type Client struct {
 	HTTP       *http.Client
 }
 
+// AdminHTTPError preserves scheduler control-plane status so the CMA facade
+// can distinguish deterministic request conflicts from transient upstream
+// failures.
+type AdminHTTPError struct {
+	Operation  string
+	Agent      string
+	StatusCode int
+	Detail     string
+}
+
+func (e *AdminHTTPError) Error() string {
+	return fmt.Sprintf("%s agent %q: %s", e.Operation, e.Agent, e.Detail)
+}
+
 // New builds a client. baseURL is the scheduler gateway root.
 //
 // The HTTP client has NO fixed Timeout: it would cap the whole request/response
@@ -36,8 +50,8 @@ func New(baseURL, adminToken string) *Client {
 // proposed inline-registration extension (pending ahsir-side support); until it
 // lands, RegisterAgent will fail and the gateway surfaces a clear error.
 type registerRequest struct {
-	Name      string     `json:"name"`
-	Workspace string     `json:"workspace,omitempty"`
+	Name      string `json:"name"`
+	Workspace string `json:"workspace,omitempty"`
 	// Instances caps how many concurrent runtime instances the scheduler may
 	// pool for this card (issue #18). 0 (the default) means single-instance.
 	Instances int        `json:"instances,omitempty"`
@@ -46,9 +60,9 @@ type registerRequest struct {
 
 // RegisterAgent hot-registers an ahsir agent from an inline card. instances
 // caps how many concurrent runtime instances the scheduler may pool for the
-// card (0 = single instance, unchanged). Idempotent at the caller level: a 409
-// "already running" means the (versioned) agent exists, which we treat as
-// success.
+// card (0 = single instance, unchanged). Only a 2xx response proves success;
+// a generic 409 does not prove the colliding runtime has a compatible card or
+// instance cap and must be surfaced to the caller.
 func (c *Client) RegisterAgent(ctx context.Context, name string, card *AgentCard, instances int) error {
 	body, err := json.Marshal(registerRequest{Name: name, Instances: instances, Card: card})
 	if err != nil {
@@ -63,20 +77,17 @@ func (c *Client) RegisterAgent(ctx context.Context, name string, card *AgentCard
 		return fmt.Errorf("register agent %q: %w", name, err)
 	}
 	defer resp.Body.Close()
-	if resp.StatusCode == http.StatusConflict {
-		return nil // already running — fine for our versioned-name model
-	}
 	if resp.StatusCode == http.StatusUnauthorized {
 		// 401 here almost always means one of: CMA_AHSIR_ADMIN_TOKEN doesn't match
 		// the scheduler's token, OR CMA_AHSIR_URL points at the wrong process (e.g.
 		// an agent's A2A port instead of the scheduler, common when a port collides
 		// with a running fleet). Surface both so the operator isn't left guessing.
-		return fmt.Errorf("register agent %q: 401 unauthorized from %s — check CMA_AHSIR_ADMIN_TOKEN "+
+		return &AdminHTTPError{Operation: "register", Agent: name, StatusCode: resp.StatusCode, Detail: fmt.Sprintf("401 unauthorized from %s — check CMA_AHSIR_ADMIN_TOKEN "+
 			"matches the scheduler's admin token (or that both are unset for token-free local use), "+
-			"and that CMA_AHSIR_URL points at the ahsir scheduler, not an agent port", name, c.BaseURL)
+			"and that CMA_AHSIR_URL points at the ahsir scheduler, not an agent port", c.BaseURL)}
 	}
 	if resp.StatusCode >= 300 {
-		return fmt.Errorf("register agent %q: %s", name, readErr(resp))
+		return &AdminHTTPError{Operation: "register", Agent: name, StatusCode: resp.StatusCode, Detail: readErr(resp)}
 	}
 	return nil
 }
@@ -186,9 +197,19 @@ func (c *Client) newRequest(ctx context.Context, method, path string, body []byt
 }
 
 func readErr(resp *http.Response) string {
+	detail, _ := readErrFields(resp)
+	return detail
+}
+
+func readErrFields(resp *http.Response) (detail, schedulerError string) {
 	b, _ := io.ReadAll(io.LimitReader(resp.Body, 4<<10))
 	if len(b) == 0 {
-		return resp.Status
+		return resp.Status, ""
 	}
-	return fmt.Sprintf("%s: %s", resp.Status, bytes.TrimSpace(b))
+	trimmed := bytes.TrimSpace(b)
+	var wire struct {
+		Error string `json:"error"`
+	}
+	_ = json.Unmarshal(trimmed, &wire)
+	return fmt.Sprintf("%s: %s", resp.Status, trimmed), wire.Error
 }

@@ -398,11 +398,7 @@ func (s *Server) gcAhsirAgentIfUnused(ahsirName string) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	if err := s.ahsir.DeleteAgent(ctx, ahsirName); err == nil {
-		s.regMu.Lock()
-		delete(s.registered, ahsirName)
-		s.regMu.Unlock()
-	}
+	_ = s.ahsir.DeleteAgent(ctx, ahsirName)
 }
 
 // cancelInFlight best-effort cancels a session's running turn (A2A tasks/cancel),
@@ -469,6 +465,31 @@ func (s *Server) sendEvents(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "invalid_request_error", "invalid body: "+err.Error())
 		return
 	}
+	// user.message is acknowledged by event-driven callers as soon as this
+	// handler succeeds. Reconcile the persisted CMA desired state synchronously
+	// before appending any event from the batch: accepting first and discovering
+	// a missing scheduler runtime on the background turn can permanently lose a
+	// source event that Hetairoi already deduplicated.
+	if containsUserMessage(req.Events) {
+		if err := s.reconcileSession(r.Context(), rec); err != nil {
+			var adminErr *ahsir.AdminHTTPError
+			switch {
+			case errors.Is(err, errAgentNotFound):
+				writeErr(w, http.StatusNotFound, "not_found_error", err.Error())
+			case errors.Is(err, errAgentArchived):
+				writeErr(w, http.StatusBadRequest, "invalid_request_error", err.Error())
+			case errors.As(err, &adminErr) && adminErr.StatusCode >= 400 && adminErr.StatusCode < 500:
+				typ := "invalid_request_error"
+				if adminErr.StatusCode == http.StatusNotFound {
+					typ = "not_found_error"
+				}
+				writeErr(w, adminErr.StatusCode, typ, err.Error())
+			default:
+				writeErr(w, http.StatusBadGateway, "api_error", "reconcile scheduler runtime: "+err.Error())
+			}
+			return
+		}
+	}
 	for _, ev := range req.Events {
 		switch ev.Type {
 		case cma.EvtUserMessage:
@@ -491,6 +512,15 @@ func (s *Server) sendEvents(w http.ResponseWriter, r *http.Request) {
 	}
 	// SendSessionEvents.data is optional; return an empty object.
 	writeJSON(w, http.StatusOK, map[string]any{})
+}
+
+func containsUserMessage(events []cma.Event) bool {
+	for _, ev := range events {
+		if ev.Type == cma.EvtUserMessage {
+			return true
+		}
+	}
+	return false
 }
 
 func (s *Server) listEvents(w http.ResponseWriter, r *http.Request) {
@@ -618,6 +648,13 @@ func (s *Server) executeTurn(rec *store.SessionRecord, text string) {
 	ctx, cancel := context.WithTimeout(context.Background(), turnTimeout)
 	defer cancel()
 
+	agent, err := s.sessionAgent(rec)
+	if err != nil {
+		s.terminateTurn(rec, fmt.Errorf("cma agent id=%s version=%d scheduler=%q: dispatch rejected; reconciliation=skipped: %w",
+			rec.Session.Agent.ID, rec.Session.Agent.Version, rec.AhsirName, err))
+		return
+	}
+
 	onReschedule := func() { s.emit(rec, newEvent(cma.EvtSessionStatusRescheduled)) }
 	// onEvent maps ahsir's structured stream events (DataParts) to CMA
 	// observability events, emitted live as the agent works (before the final
@@ -626,6 +663,18 @@ func (s *Server) executeTurn(rec *store.SessionRecord, text string) {
 	obs := &turnObs{mcpToolUse: map[string]bool{}}
 	onEvent := func(se ahsir.StreamEvent) { s.emitObservability(rec, se, obs) }
 	reply, err := s.ahsir.ChatStream(ctx, rec.AhsirName, rec.ContextID, text, rec.SetInFlightTask, onReschedule, onEvent)
+	reconcileResult := "not attempted"
+	if err != nil && ahsir.IsPreStreamRuntimeError(err) {
+		reconcileErr := s.ensureRegistered(ctx, rec.AhsirName, agent)
+		if reconcileErr != nil {
+			reconcileResult = "failed: " + reconcileErr.Error()
+		} else {
+			reconcileResult = "succeeded"
+			// A definite scheduler 404 happened before any SSE response was
+			// accepted, so no Agent turn began and replaying once is safe.
+			reply, err = s.ahsir.ChatStream(ctx, rec.AhsirName, rec.ContextID, text, rec.SetInFlightTask, onReschedule, onEvent)
+		}
+	}
 	rec.SetInFlightTask("") // turn is no longer cancelable
 
 	switch {
@@ -635,17 +684,22 @@ func (s *Server) executeTurn(rec *store.SessionRecord, text string) {
 		s.emitMessageIfAny(rec, reply)
 		s.emitIdle(rec)
 	case err != nil:
-		e := newEvent(cma.EvtSessionError)
-		e.Error = &cma.EventError{Type: "unknown_error", Message: err.Error(), RetryStatus: cma.RetryStatus{Type: "terminal"}}
-		s.emit(rec, e)
-		s.emit(rec, newEvent(cma.EvtSessionStatusTerminate))
-		s.setStatus(rec, cma.StatusTerminated)
+		s.terminateTurn(rec, fmt.Errorf("cma agent id=%s version=%d scheduler=%q: dispatch failed: %w; reconciliation=%s",
+			agent.ID, agent.Version, rec.AhsirName, err, reconcileResult))
 	default:
 		msg := newEvent(cma.EvtAgentMessage)
 		msg.Content = []cma.ContentBlock{{Type: "text", Text: reply}}
 		s.emit(rec, msg)
 		s.emitIdle(rec)
 	}
+}
+
+func (s *Server) terminateTurn(rec *store.SessionRecord, err error) {
+	e := newEvent(cma.EvtSessionError)
+	e.Error = &cma.EventError{Type: "unknown_error", Message: err.Error(), RetryStatus: cma.RetryStatus{Type: "terminal"}}
+	s.emit(rec, e)
+	s.emit(rec, newEvent(cma.EvtSessionStatusTerminate))
+	s.setStatus(rec, cma.StatusTerminated)
 }
 
 func (s *Server) emitMessageIfAny(rec *store.SessionRecord, text string) {
@@ -754,14 +808,32 @@ func (s *Server) setStatus(rec *store.SessionRecord, status string) {
 	_ = s.store.SetSessionStatus(rec, status, time.Now().UTC())
 }
 
-// ensureRegistered registers the versioned ahsir agent once per process.
-func (s *Server) ensureRegistered(ctx context.Context, ahsirName string, agent *cma.Agent) error {
-	s.regMu.Lock()
-	already := s.registered[ahsirName]
-	s.regMu.Unlock()
-	if already {
-		return nil
+// sessionAgent resolves the immutable Agent version pinned by a persisted
+// Session. The session snapshot itself deliberately has no ArchivedAt field,
+// so the Store remains authoritative for revocation.
+func (s *Server) sessionAgent(rec *store.SessionRecord) (*cma.Agent, error) {
+	agent, ok := s.store.Agent(rec.Session.Agent.ID, rec.Session.Agent.Version)
+	if !ok {
+		return nil, errAgentNotFound
 	}
+	if agent.ArchivedAt != nil {
+		return nil, errAgentArchived
+	}
+	return agent, nil
+}
+
+func (s *Server) reconcileSession(ctx context.Context, rec *store.SessionRecord) error {
+	agent, err := s.sessionAgent(rec)
+	if err != nil {
+		return err
+	}
+	return s.ensureRegistered(ctx, rec.AhsirName, agent)
+}
+
+// ensureRegistered reconciles persisted CMA desired state on every call. A
+// process-local boolean cannot prove scheduler state survived a restart or a
+// failed idle wake, so successful past registration is never a fast path.
+func (s *Server) ensureRegistered(ctx context.Context, ahsirName string, agent *cma.Agent) error {
 	card, err := translate.AgentToCard(ahsirName, agent, s.rt)
 	if err != nil {
 		return fmt.Errorf("translate agent card: %w", err)
@@ -770,9 +842,6 @@ func (s *Server) ensureRegistered(ctx context.Context, ahsirName string, agent *
 	if err := s.ahsir.RegisterAgent(ctx, ahsirName, card, instances); err != nil {
 		return err
 	}
-	s.regMu.Lock()
-	s.registered[ahsirName] = true
-	s.regMu.Unlock()
 	return nil
 }
 

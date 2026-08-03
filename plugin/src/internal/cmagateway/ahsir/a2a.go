@@ -12,12 +12,39 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
-	"time"
 )
 
 // ErrTurnCanceled is returned by ChatStream when the turn ended because it was
 // cancelled (via CancelTask / tasks/cancel) rather than completing normally.
 var ErrTurnCanceled = errors.New("turn canceled")
+
+const (
+	schedulerErrorCodeHeader    = "X-Ahsir-Error-Code"
+	schedulerErrorAgentNotFound = "scheduler_agent_not_found"
+)
+
+// PreStreamHTTPError is a scheduler failure returned before an A2A SSE stream
+// was accepted. No Agent turn has started, so selected statuses are safe for a
+// caller to reconcile and retry once.
+type PreStreamHTTPError struct {
+	Agent      string
+	StatusCode int
+	Detail     string
+	Reason     string
+}
+
+func (e *PreStreamHTTPError) Error() string {
+	return fmt.Sprintf("stream %q: %d %s", e.Agent, e.StatusCode, e.Detail)
+}
+
+// IsPreStreamRuntimeError reports scheduler state drift that is safe to repair
+// and replay. Only a definite 404 is eligible: a generic 502 may represent an
+// ambiguous proxy failure after the upstream accepted the request, so replaying
+// it could duplicate a turn.
+func IsPreStreamRuntimeError(err error) bool {
+	var httpErr *PreStreamHTTPError
+	return errors.As(err, &httpErr) && httpErr.StatusCode == http.StatusNotFound && httpErr.Reason == "agent_not_found"
+}
 
 // These minimal types mirror the a2a-go wire shapes (github.com/a2aproject/
 // a2a-go/a2a) for exactly the fields cma-service produces/consumes — kept
@@ -253,83 +280,36 @@ func (c *Client) ChatStream(ctx context.Context, agent, contextID, message strin
 	return buf.String(), nil
 }
 
-// openStream wake-retry window. A scaled-to-zero agent (idle reaper, issue #6)
-// is respawned on next access — respawn the wrapper + cold-start the runtime
-// (claude CLI + MCP config load) + bind the A2A port — which routinely takes
-// 30–90s. The retry loop must outlast that cold start, so the total window is
-// sized to ~100s: the first attempts stay fast (a port still binding after a
-// normal supervised restart comes back in well under a second) while the
-// per-attempt backoff is capped so the window stretches without the delay
-// between late attempts ballooning.
-//
-// Backoff before attempt N is min(N*openStreamBaseBackoff, openStreamMaxBackoff).
-// Total window over attempts 1..openStreamMaxAttempts-1 is ~103s (16.5s of fast
-// early backoff + 29 capped 3s waits). These are vars, not consts, only so tests
-// can shrink the window; production never mutates them.
-var (
-	openStreamMaxAttempts = 40
-	openStreamBaseBackoff = 300 * time.Millisecond
-	openStreamMaxBackoff  = 3 * time.Second
-)
-
-// openStreamBackoff is the wait before a given (1-based) retry attempt: linear
-// growth from openStreamBaseBackoff, capped at openStreamMaxBackoff.
-func openStreamBackoff(attempt int) time.Duration {
-	d := time.Duration(attempt) * openStreamBaseBackoff
-	if d > openStreamMaxBackoff {
-		return openStreamMaxBackoff
-	}
-	return d
-}
-
-// openStream POSTs the message/stream request and returns the live SSE
-// response, retrying transient pre-stream failures. Right after registration
-// the agent's A2A server may still be binding its port (the admin start returns
-// at spawn, not at listen), a supervised restart briefly drops the port, and a
-// scaled-to-zero agent must cold-start on access; all surface as a dial refusal
-// or a 502 from the gateway proxy. No turn has started in those cases, so
-// retrying is idempotent. The window (openStreamMaxAttempts) is sized to cover
-// a full cold start, not just a port rebind.
+// openStream POSTs one message/stream request. Transport errors and generic
+// 502s are deliberately not retried: the scheduler may have delivered the
+// request upstream before losing the response, so replay could duplicate a
+// turn. A definite scheduler agent-not-found response is returned as a typed
+// error; the facade may reconcile and perform one bounded retry with a fresh
+// call.
 func (c *Client) openStream(ctx context.Context, agent string, body []byte, onReschedule func()) (*http.Response, error) {
-	maxAttempts := openStreamMaxAttempts
-	var lastErr error
-	for attempt := 0; attempt < maxAttempts; attempt++ {
-		if attempt > 0 {
-			if attempt == 1 && onReschedule != nil {
-				// First retry: the agent was unreachable and we're waiting for
-				// it to come back — i.e. its compute is being (re)scheduled.
-				onReschedule()
-			}
-			select {
-			case <-ctx.Done():
-				return nil, ctx.Err()
-			case <-time.After(openStreamBackoff(attempt)):
-			}
-		}
-		req, err := c.newRequest(ctx, http.MethodPost, "/a2a/"+url.PathEscape(agent), body)
-		if err != nil {
-			return nil, err
-		}
-		req.Header.Set("Accept", "text/event-stream")
-
-		resp, err := c.HTTP.Do(req)
-		if err != nil {
-			lastErr = fmt.Errorf("stream %q: %w", agent, err) // dial refused etc.
-			continue
-		}
-		if resp.StatusCode == http.StatusBadGateway {
-			lastErr = fmt.Errorf("stream %q: %s", agent, readErr(resp)) // proxy couldn't reach agent yet
-			resp.Body.Close()
-			continue
-		}
-		if resp.StatusCode >= 300 {
-			err := fmt.Errorf("stream %q: %s", agent, readErr(resp))
-			resp.Body.Close()
-			return nil, err
-		}
-		return resp, nil
+	_ = onReschedule
+	req, err := c.newRequest(ctx, http.MethodPost, "/a2a/"+url.PathEscape(agent), body)
+	if err != nil {
+		return nil, err
 	}
-	return nil, fmt.Errorf("stream %q: agent unreachable after %d attempts: %w", agent, maxAttempts, lastErr)
+	req.Header.Set("Accept", "text/event-stream")
+	resp, err := c.HTTP.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("stream %q: %w", agent, err)
+	}
+	if resp.StatusCode >= 300 {
+		detail, schedulerError := readErrFields(resp)
+		reason := ""
+		if resp.StatusCode == http.StatusNotFound &&
+			resp.Header.Get(schedulerErrorCodeHeader) == schedulerErrorAgentNotFound &&
+			schedulerError == "agent not found" {
+			reason = "agent_not_found"
+		}
+		err := &PreStreamHTTPError{Agent: agent, StatusCode: resp.StatusCode, Detail: detail, Reason: reason}
+		resp.Body.Close()
+		return nil, err
+	}
+	return resp, nil
 }
 
 // CancelTask requests cancellation of an in-flight A2A task (tasks/cancel),

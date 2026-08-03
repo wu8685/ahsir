@@ -14,9 +14,9 @@ import (
 
 // AgentRecord keeps every immutable version of one agent.
 type AgentRecord struct {
-	ID       string                `json:"id"`
-	Latest   int64                 `json:"latest"`
-	Versions map[int64]*cma.Agent  `json:"versions"`
+	ID       string               `json:"id"`
+	Latest   int64                `json:"latest"`
+	Versions map[int64]*cma.Agent `json:"versions"`
 }
 
 // SessionRecord binds a CMA session to an ahsir (agent name, contextId) and
@@ -75,11 +75,30 @@ func (r *SessionRecord) drainTurns() {
 	}
 }
 
+// Status returns the session status under the record lock. Turn execution
+// updates the same field asynchronously, so callers must not read Session.Status
+// directly while a queued turn may still be running.
+func (r *SessionRecord) Status() string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.Session.Status
+}
+
+// TurnsIdle reports whether every queued turn has returned, including its
+// synchronous persistence work. Status can become visible just before the
+// final state-file write completes, so callers needing a durable completion
+// boundary should wait for both conditions.
+func (r *SessionRecord) TurnsIdle() bool {
+	r.turnMu.Lock()
+	defer r.turnMu.Unlock()
+	return !r.turnBusy && len(r.turnQueue) == 0
+}
+
 // persisted is the on-disk shape.
 type persisted struct {
-	Agents       map[string]*AgentRecord    `json:"agents"`
+	Agents       map[string]*AgentRecord     `json:"agents"`
 	Environments map[string]*cma.Environment `json:"environments"`
-	Sessions     map[string]*SessionRecord  `json:"sessions"`
+	Sessions     map[string]*SessionRecord   `json:"sessions"`
 }
 
 type Store struct {
@@ -182,7 +201,7 @@ func (s *Store) PutAgentVersion(a *cma.Agent) error {
 		rec = &AgentRecord{ID: a.ID, Versions: map[int64]*cma.Agent{}}
 		s.agents[a.ID] = rec
 	}
-	rec.Versions[a.Version] = a
+	rec.Versions[a.Version] = cloneAgent(a)
 	if a.Version > rec.Latest {
 		rec.Latest = a.Version
 	}
@@ -201,14 +220,21 @@ func (s *Store) Agent(id string, version int64) (*cma.Agent, bool) {
 		version = rec.Latest
 	}
 	a, ok := rec.Versions[version]
-	return a, ok
+	return cloneAgent(a), ok
 }
 
 func (s *Store) AgentRecord(id string) (*AgentRecord, bool) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	rec, ok := s.agents[id]
-	return rec, ok
+	if !ok {
+		return nil, false
+	}
+	copyRec := &AgentRecord{ID: rec.ID, Latest: rec.Latest, Versions: make(map[int64]*cma.Agent, len(rec.Versions))}
+	for version, agent := range rec.Versions {
+		copyRec.Versions[version] = cloneAgent(agent)
+	}
+	return copyRec, true
 }
 
 // ArchiveAgent marks every version of an agent archived (so retrieve of any
@@ -226,7 +252,7 @@ func (s *Store) ArchiveAgent(id string, at time.Time) (*cma.Agent, bool) {
 	}
 	latest := rec.Versions[rec.Latest]
 	_ = s.saveLocked()
-	return latest, true
+	return cloneAgent(latest), true
 }
 
 func (s *Store) ListAgents() []*cma.Agent {
@@ -235,10 +261,36 @@ func (s *Store) ListAgents() []*cma.Agent {
 	out := make([]*cma.Agent, 0, len(s.agents))
 	for _, rec := range s.agents {
 		if a, ok := rec.Versions[rec.Latest]; ok {
-			out = append(out, a)
+			out = append(out, cloneAgent(a))
 		}
 	}
 	return out
+}
+
+func cloneAgent(a *cma.Agent) *cma.Agent {
+	if a == nil {
+		return nil
+	}
+	clone := *a
+	clone.Tools = append([]cma.ToolDef(nil), a.Tools...)
+	for i := range clone.Tools {
+		clone.Tools[i].InputSchema = append([]byte(nil), a.Tools[i].InputSchema...)
+		clone.Tools[i].DefaultConfig = append([]byte(nil), a.Tools[i].DefaultConfig...)
+		clone.Tools[i].Configs = append([]byte(nil), a.Tools[i].Configs...)
+	}
+	clone.Skills = append([]cma.SkillRef(nil), a.Skills...)
+	clone.MCPServers = append([]cma.MCPServer(nil), a.MCPServers...)
+	if a.Metadata != nil {
+		clone.Metadata = make(map[string]string, len(a.Metadata))
+		for key, value := range a.Metadata {
+			clone.Metadata[key] = value
+		}
+	}
+	if a.ArchivedAt != nil {
+		archivedAt := *a.ArchivedAt
+		clone.ArchivedAt = &archivedAt
+	}
+	return &clone
 }
 
 // ----- Environments -----

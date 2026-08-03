@@ -9,9 +9,14 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 	"unicode/utf8"
@@ -888,6 +893,58 @@ func freeGatewayTestPort(t *testing.T) int {
 	return l.Addr().(*net.TCPAddr).Port
 }
 
+func useFastHealthyAgent(t *testing.T, sch *Scheduler, starts *atomic.Int32) {
+	t.Helper()
+	sch.supervisor.HealthStartupGrace = 0
+	sch.supervisor.HealthInterval = 10 * time.Millisecond
+	sch.supervisor.HealthTimeout = 20 * time.Millisecond
+	base := healthAgentCommand(filepath.Join(t.TempDir(), "health-starts.log"), "healthy", 0)
+	sch.agentCommand = func(ctx context.Context, agentExe string, cfg AgentConfig, registryURL string) *exec.Cmd {
+		starts.Add(1)
+		return base(ctx, agentExe, cfg, registryURL)
+	}
+}
+
+func TestGatewayA2AProxySchedulerNotFoundHasMachineMarker(t *testing.T) {
+	_, gwURL := newTestScheduler(t)
+	resp, err := http.Post(gwURL+"/a2a/missing", "application/json", bytes.NewReader([]byte(`{}`)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404", resp.StatusCode)
+	}
+	if got := resp.Header.Get(SchedulerErrorCodeHeader); got != SchedulerErrorAgentNotFound {
+		t.Fatalf("scheduler error marker = %q, want %q", got, SchedulerErrorAgentNotFound)
+	}
+}
+
+func TestGatewayA2AProxyUpstreamNotFoundHasNoSchedulerMarker(t *testing.T) {
+	sch, gwURL := newTestScheduler(t)
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// This response header belongs to the scheduler control plane. An
+		// upstream must not be able to forge it and make CMA replay a request
+		// that already reached the Agent.
+		w.Header().Set(SchedulerErrorCodeHeader, SchedulerErrorAgentNotFound)
+		writeJSONError(w, http.StatusNotFound, "agent not found")
+	}))
+	defer upstream.Close()
+	sch.Registry().Register(&a2a.AgentCard{Name: "upstream-404", URL: upstream.URL})
+
+	resp, err := http.Post(gwURL+"/a2a/upstream-404", "application/json", bytes.NewReader([]byte(`{}`)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("status = %d, want upstream 404", resp.StatusCode)
+	}
+	if got := resp.Header.Get(SchedulerErrorCodeHeader); got != "" {
+		t.Fatalf("upstream forged scheduler marker was forwarded: %q", got)
+	}
+}
+
 func TestGatewayRegistryLeavesRemoteAgentURLUnchanged(t *testing.T) {
 	sch, gwURL := newTestScheduler(t)
 	remoteURL := "http://192.0.2.10:9801/"
@@ -1457,6 +1514,505 @@ func TestAdminEndpointRequiresToken(t *testing.T) {
 	// DELETE no token → 401.
 	if st := doReq(t, http.MethodDelete, gwURL+"/admin/agents/x", "", nil); st != http.StatusUnauthorized {
 		t.Errorf("DELETE /admin/agents/x no token = %d, want 401", st)
+	}
+}
+
+// Reconciliation may race an already-running scheduler Agent. The admin start
+// endpoint must compare the requested immutable card and instance cap before
+// touching disk: an incompatible request returns a distinguishable 409 and
+// leaves the configuration consumed by the running process unchanged.
+func TestAdminStart_IncompatibleExistingAgentDoesNotOverwriteCard(t *testing.T) {
+	tests := []struct {
+		name               string
+		requestedSystem    string
+		requestedInstances int
+	}{
+		{name: "card mismatch", requestedSystem: "new system", requestedInstances: 2},
+		{name: "instances mismatch", requestedSystem: "old system", requestedInstances: 3},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			sch, gwURL := newTestScheduler(t)
+			workspace := t.TempDir()
+			const agentName = "cma-persisted-v4"
+			existingCard := &wrapper.AgentCardConfig{
+				Name: agentName, Version: "4",
+				Claude:  wrapper.ClaudeConfig{SystemPrompt: "old system"},
+				Runtime: wrapper.RuntimeConfig{Provider: "echo", Model: "old-model"},
+			}
+			if err := wrapper.WriteCard(workspace, existingCard); err != nil {
+				t.Fatal(err)
+			}
+			existingCfg := AgentConfig{Name: agentName, Workspace: workspace, Port: 9801, Instances: 2}
+			sch.mu.Lock()
+			sch.running = true
+			sch.ctx = context.Background()
+			sch.agents[agentName] = &agentProcess{cfg: existingCfg, cancel: func() {}}
+			sch.desired[agentName] = existingCfg
+			sch.mu.Unlock()
+
+			requestedCard := *existingCard
+			requestedCard.Claude.SystemPrompt = tc.requestedSystem
+			body, err := json.Marshal(startAgentRequest{
+				Name: agentName, Workspace: workspace, Instances: tc.requestedInstances, Card: &requestedCard,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			req, err := http.NewRequest(http.MethodPost, gwURL+"/admin/agents", bytes.NewReader(body))
+			if err != nil {
+				t.Fatal(err)
+			}
+			resp, err := http.DefaultClient.Do(req)
+			if err != nil {
+				t.Fatal(err)
+			}
+			responseBody, _ := io.ReadAll(resp.Body)
+			resp.Body.Close()
+			if resp.StatusCode != http.StatusConflict {
+				t.Fatalf("status = %d, want 409; body=%s", resp.StatusCode, responseBody)
+			}
+			if !strings.Contains(strings.ToLower(string(responseBody)), "incompatible") {
+				t.Fatalf("409 is not machine/operator distinguishable as incompatible: %s", responseBody)
+			}
+
+			got, err := wrapper.NewAgentCardBuilder(workspace).Load()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got.Claude.SystemPrompt != existingCard.Claude.SystemPrompt || got.Runtime.Model != existingCard.Runtime.Model {
+				t.Fatalf("incompatible reconcile overwrote running card: got system=%q model=%q", got.Claude.SystemPrompt, got.Runtime.Model)
+			}
+			if gotCfg := sch.desired[agentName]; gotCfg.Instances != existingCfg.Instances {
+				t.Fatalf("incompatible reconcile changed instances to %d, want %d", gotCfg.Instances, existingCfg.Instances)
+			}
+		})
+	}
+}
+
+// A repeated registration is the normal CMA reconciliation path after the
+// facade loses its process-local cache. If the immutable card and instance cap
+// still match, POST /admin/agents is an idempotent ensure operation: it must
+// succeed without restarting the live process or even rewriting its card.
+func TestAdminStart_CompatibleExistingAgentIsIdempotent(t *testing.T) {
+	sch, gwURL := newTestScheduler(t)
+	sch.supervisor.HealthStartupGrace = 0
+	sch.supervisor.HealthInterval = 10 * time.Millisecond
+	sch.supervisor.HealthTimeout = 20 * time.Millisecond
+	var healthChecks atomic.Int32
+	healthSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		healthChecks.Add(1)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer healthSrv.Close()
+	healthURL, err := url.Parse(healthSrv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	healthPort, err := strconv.Atoi(healthURL.Port())
+	if err != nil {
+		t.Fatal(err)
+	}
+	workspace := t.TempDir()
+	const agentName = "cma-persisted-v4"
+	card := &wrapper.AgentCardConfig{
+		Name: agentName, Version: "4",
+		Claude:  wrapper.ClaudeConfig{SystemPrompt: "stable system"},
+		Runtime: wrapper.RuntimeConfig{Provider: "echo", Model: "stable-model"},
+	}
+	if err := wrapper.WriteCard(workspace, card); err != nil {
+		t.Fatal(err)
+	}
+	cardPath := filepath.Join(workspace, ".a2a", "agent-card.yaml")
+	originalModTime := time.Unix(1_700_000_000, 0)
+	if err := os.Chtimes(cardPath, originalModTime, originalModTime); err != nil {
+		t.Fatal(err)
+	}
+
+	existingCfg := AgentConfig{Name: agentName, Workspace: workspace, Port: healthPort, Instances: 2}
+	existingProc := &agentProcess{cfg: existingCfg, cancel: func() {}}
+	sch.mu.Lock()
+	sch.running = true
+	sch.ctx = context.Background()
+	sch.agents[agentName] = existingProc
+	sch.desired[agentName] = existingCfg
+	sch.mu.Unlock()
+
+	body, err := json.Marshal(startAgentRequest{
+		Name: agentName, Workspace: workspace, Instances: 2, Card: card,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp, err := http.Post(gwURL+"/admin/agents", "application/json", bytes.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	responseBody, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
+		t.Fatalf("compatible ensure status = %d, want 200/201; body=%s", resp.StatusCode, responseBody)
+	}
+	if healthChecks.Load() == 0 {
+		t.Fatal("compatible running ensure returned success without checking readiness")
+	}
+
+	sch.mu.Lock()
+	gotProc := sch.agents[agentName]
+	gotCfg := sch.desired[agentName]
+	sch.mu.Unlock()
+	if gotProc != existingProc {
+		t.Fatal("compatible ensure restarted or replaced the running process")
+	}
+	if gotCfg.Instances != existingCfg.Instances || gotCfg.Port != existingCfg.Port {
+		t.Fatalf("compatible ensure mutated desired config: got %+v, want %+v", gotCfg, existingCfg)
+	}
+	info, err := os.Stat(cardPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !info.ModTime().Equal(originalModTime) {
+		t.Fatalf("compatible ensure rewrote card: modtime=%s, want %s", info.ModTime(), originalModTime)
+	}
+}
+
+// Two facades (or two concurrent turns after scheduler-state loss) can race to
+// reconcile the same versioned Agent. Identical registrations must coalesce at
+// the scheduler boundary: both callers observe success and exactly one process
+// is spawned.
+func TestAdminStart_ConcurrentIdenticalRegistrationStartsOnce(t *testing.T) {
+	registryPort := freeGatewayTestPort(t)
+	agentPort := freeGatewayTestPort(t)
+	for agentPort == registryPort {
+		agentPort = freeGatewayTestPort(t)
+	}
+	cfg := &Config{
+		Registry:  RegistryConfig{Host: "127.0.0.1", Port: registryPort},
+		PortRange: PortRange{Start: agentPort, End: agentPort},
+	}
+	cfg.nextPort = cfg.PortRange.Start
+	sch := New(cfg)
+	var starts atomic.Int32
+	useFastHealthyAgent(t, sch, &starts)
+	ctx, cancel := context.WithTimeout(context.Background(), testLifecycleDeadline)
+	defer cancel()
+	if err := sch.Start(ctx); err != nil {
+		t.Fatal(err)
+	}
+	defer sch.Stop()
+
+	gw := newGatewayHandler(sch, registry.NewHTTPHandler(sch.Registry()))
+	srv := httptest.NewServer(gw)
+	defer srv.Close()
+	workspace := t.TempDir()
+	card := &wrapper.AgentCardConfig{
+		Name: "cma-race-v1", Version: "1",
+		Claude:  wrapper.ClaudeConfig{SystemPrompt: "same system"},
+		Runtime: wrapper.RuntimeConfig{Provider: "echo", Model: "same-model"},
+	}
+	body, err := json.Marshal(startAgentRequest{
+		Name: card.Name, Workspace: workspace, Instances: 2, Card: card,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	start := make(chan struct{})
+	statuses := make([]int, 2)
+	errs := make([]error, 2)
+	var wg sync.WaitGroup
+	for i := range statuses {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			<-start
+			resp, err := http.Post(srv.URL+"/admin/agents", "application/json", bytes.NewReader(body))
+			if err != nil {
+				errs[i] = err
+				return
+			}
+			statuses[i] = resp.StatusCode
+			_, _ = io.Copy(io.Discard, resp.Body)
+			errs[i] = resp.Body.Close()
+		}(i)
+	}
+	close(start)
+	wg.Wait()
+	for i := range statuses {
+		if errs[i] != nil {
+			t.Fatalf("registration %d failed: %v", i, errs[i])
+		}
+		if statuses[i] != http.StatusOK && statuses[i] != http.StatusCreated {
+			t.Errorf("registration %d status = %d, want 200/201", i, statuses[i])
+		}
+	}
+	if got := starts.Load(); got != 1 {
+		t.Fatalf("identical concurrent registration started %d processes, want 1", got)
+	}
+}
+
+// Desired state alone is not proof that a runtime exists. This is the drift
+// shape left by a lost process (or a pending supervisor restart): reconciliation
+// must fill the missing runtime atomically, while concurrent callers still
+// coalesce to one spawn.
+func TestAdminStart_CompatibleDesiredWithoutRuntimeStartsOnce(t *testing.T) {
+	sch, gwURL := newTestScheduler(t)
+	workspace := t.TempDir()
+	port := freeGatewayTestPort(t)
+	card := &wrapper.AgentCardConfig{
+		Name: "cma-drift-v1", Version: "1",
+		Claude:  wrapper.ClaudeConfig{SystemPrompt: "same system"},
+		Runtime: wrapper.RuntimeConfig{Provider: "echo", Model: "same-model"},
+	}
+	if err := wrapper.WriteCard(workspace, card); err != nil {
+		t.Fatal(err)
+	}
+	existingCfg := AgentConfig{Name: card.Name, Workspace: workspace, Port: port, Instances: 2}
+	var starts atomic.Int32
+	useFastHealthyAgent(t, sch, &starts)
+	sch.mu.Lock()
+	sch.running = true
+	sch.ctx = context.Background()
+	sch.desired[card.Name] = existingCfg
+	sch.mu.Unlock()
+	t.Cleanup(func() {
+		sch.mu.Lock()
+		if proc := sch.agents[card.Name]; proc != nil {
+			proc.stopping = true
+			killAgentProcess(proc)
+			proc.cancel()
+		}
+		sch.mu.Unlock()
+	})
+
+	body, err := json.Marshal(startAgentRequest{
+		Name: card.Name, Workspace: workspace, Instances: 2, Card: card,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	start := make(chan struct{})
+	statuses := make([]int, 2)
+	errs := make([]error, 2)
+	var wg sync.WaitGroup
+	for i := range statuses {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			<-start
+			resp, err := http.Post(gwURL+"/admin/agents", "application/json", bytes.NewReader(body))
+			if err != nil {
+				errs[i] = err
+				return
+			}
+			statuses[i] = resp.StatusCode
+			_, _ = io.Copy(io.Discard, resp.Body)
+			errs[i] = resp.Body.Close()
+		}(i)
+	}
+	close(start)
+	wg.Wait()
+	for i := range statuses {
+		if errs[i] != nil {
+			t.Fatalf("registration %d failed: %v", i, errs[i])
+		}
+		if statuses[i] != http.StatusOK && statuses[i] != http.StatusCreated {
+			t.Errorf("registration %d status = %d, want 200/201", i, statuses[i])
+		}
+	}
+	if got := starts.Load(); got != 1 {
+		t.Fatalf("compatible desired reconciliation started %d processes, want 1", got)
+	}
+	sch.mu.Lock()
+	proc := sch.agents[card.Name]
+	sch.mu.Unlock()
+	if proc == nil {
+		t.Fatal("compatible desired reconciliation returned success without a runtime")
+	}
+}
+
+func TestAdminStart_CompatibleIdleStoppedWakesBeforeSuccess(t *testing.T) {
+	sch, gwURL := newTestScheduler(t)
+	workspace := t.TempDir()
+	card := &wrapper.AgentCardConfig{Name: "cma-idle-v1", Version: "1", Runtime: wrapper.RuntimeConfig{Provider: "echo"}}
+	if err := wrapper.WriteCard(workspace, card); err != nil {
+		t.Fatal(err)
+	}
+	cfg := AgentConfig{Name: card.Name, Workspace: workspace, Port: freeGatewayTestPort(t)}
+	var starts atomic.Int32
+	useFastHealthyAgent(t, sch, &starts)
+	sch.mu.Lock()
+	sch.running = true
+	sch.ctx = context.Background()
+	sch.desired[card.Name] = cfg
+	sch.idleStopped[card.Name] = cfg
+	sch.mu.Unlock()
+	t.Cleanup(func() { sch.Stop() })
+
+	body, _ := json.Marshal(startAgentRequest{Name: card.Name, Workspace: workspace, Card: card})
+	resp, err := http.Post(gwURL+"/admin/agents", "application/json", bytes.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
+		t.Fatalf("idle ensure status=%d body=%s", resp.StatusCode, raw)
+	}
+	if starts.Load() != 1 {
+		t.Fatalf("idle ensure starts=%d, want 1", starts.Load())
+	}
+	if got := sch.IdleStoppedAgents(); len(got) != 0 {
+		t.Fatalf("idle ensure returned before wake completed: %v", got)
+	}
+}
+
+func TestAdminStart_NewAgentReadinessFailureRollsBackAndReturnsError(t *testing.T) {
+	sch, gwURL := newTestScheduler(t)
+	workspace := t.TempDir()
+	card := &wrapper.AgentCardConfig{Name: "cma-not-ready-v1", Version: "1", Runtime: wrapper.RuntimeConfig{Provider: "echo"}}
+	port := freeGatewayTestPort(t)
+	sch.cfg.PortRange = PortRange{Start: port, End: port}
+	sch.cfg.nextPort = port
+	sch.supervisor.HealthStartupGrace = 0
+	sch.supervisor.HealthInterval = 10 * time.Millisecond
+	sch.supervisor.HealthTimeout = 10 * time.Millisecond
+	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Millisecond)
+	defer cancel()
+	sch.mu.Lock()
+	sch.running = true
+	sch.ctx = ctx
+	sch.mu.Unlock()
+	sch.agentCommand = func(ctx context.Context, agentExe string, cfg AgentConfig, registryURL string) *exec.Cmd {
+		return exec.CommandContext(ctx, "sh", "-c", "sleep 30")
+	}
+
+	body, _ := json.Marshal(startAgentRequest{Name: card.Name, Workspace: workspace, Card: card})
+	resp, err := http.Post(gwURL+"/admin/agents", "application/json", bytes.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode < 300 {
+		t.Fatalf("unready new Agent was acknowledged: status=%d body=%s", resp.StatusCode, raw)
+	}
+	sch.mu.Lock()
+	_, running := sch.agents[card.Name]
+	sch.mu.Unlock()
+	if running {
+		t.Fatal("unready new Agent was not rolled back")
+	}
+}
+
+func TestAdminStart_DifferentNameCannotReuseDesiredWorkspace(t *testing.T) {
+	sch, gwURL := newTestScheduler(t)
+	workspace := t.TempDir()
+	existing := &wrapper.AgentCardConfig{Name: "existing", Version: "1", Runtime: wrapper.RuntimeConfig{Provider: "echo"}}
+	if err := wrapper.WriteCard(workspace, existing); err != nil {
+		t.Fatal(err)
+	}
+	existingCfg := AgentConfig{Name: existing.Name, Workspace: workspace, Port: 9801}
+	sch.mu.Lock()
+	sch.running = true
+	sch.ctx = context.Background()
+	sch.agents[existing.Name] = &agentProcess{cfg: existingCfg, cancel: func() {}}
+	sch.desired[existing.Name] = existingCfg
+	sch.mu.Unlock()
+
+	requested := &wrapper.AgentCardConfig{Name: "other", Version: "1", Runtime: wrapper.RuntimeConfig{Provider: "echo"}}
+	body, _ := json.Marshal(startAgentRequest{Name: requested.Name, Workspace: workspace, Card: requested})
+	resp, err := http.Post(gwURL+"/admin/agents", "application/json", bytes.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusConflict {
+		t.Fatalf("workspace reuse status=%d, want 409; body=%s", resp.StatusCode, raw)
+	}
+	got, err := wrapper.NewAgentCardBuilder(workspace).Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Name != existing.Name {
+		t.Fatalf("workspace reuse overwrote existing card name=%q", got.Name)
+	}
+}
+
+func TestAdminStart_DifferentNameCannotReuseWorkspaceThroughSymlink(t *testing.T) {
+	sch, gwURL := newTestScheduler(t)
+	realWorkspace := t.TempDir()
+	alias := filepath.Join(t.TempDir(), "workspace-alias")
+	if err := os.Symlink(realWorkspace, alias); err != nil {
+		t.Fatal(err)
+	}
+	existing := &wrapper.AgentCardConfig{Name: "existing", Version: "1", Runtime: wrapper.RuntimeConfig{Provider: "echo"}}
+	if err := wrapper.WriteCard(realWorkspace, existing); err != nil {
+		t.Fatal(err)
+	}
+	existingCfg := AgentConfig{Name: existing.Name, Workspace: realWorkspace, Port: 9801}
+	sch.mu.Lock()
+	sch.running = true
+	sch.ctx = context.Background()
+	sch.agents[existing.Name] = &agentProcess{cfg: existingCfg, cancel: func() {}}
+	sch.desired[existing.Name] = existingCfg
+	sch.mu.Unlock()
+
+	requested := &wrapper.AgentCardConfig{Name: "other", Version: "1", Runtime: wrapper.RuntimeConfig{Provider: "echo"}}
+	body, _ := json.Marshal(startAgentRequest{Name: requested.Name, Workspace: alias, Card: requested})
+	resp, err := http.Post(gwURL+"/admin/agents", "application/json", bytes.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusConflict {
+		t.Fatalf("symlink workspace reuse status=%d, want 409; body=%s", resp.StatusCode, raw)
+	}
+	got, err := wrapper.NewAgentCardBuilder(realWorkspace).Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Name != existing.Name {
+		t.Fatalf("symlink workspace reuse overwrote existing card name=%q", got.Name)
+	}
+}
+
+// The legacy pre-staged-card API supplies no inline card to verify. Preserve
+// its historical conflict behavior for an existing Agent instead of treating
+// an unverifiable registration as compatible success.
+func TestAdminStart_ExistingAgentWithoutInlineCardConflicts(t *testing.T) {
+	sch, gwURL := newTestScheduler(t)
+	workspace := t.TempDir()
+	const agentName = "legacy-agent"
+	existingCfg := AgentConfig{Name: agentName, Workspace: workspace, Port: 9801}
+	existingProc := &agentProcess{cfg: existingCfg, cancel: func() {}}
+	sch.mu.Lock()
+	sch.running = true
+	sch.ctx = context.Background()
+	sch.agents[agentName] = existingProc
+	sch.desired[agentName] = existingCfg
+	sch.mu.Unlock()
+
+	body, err := json.Marshal(startAgentRequest{Name: agentName, Workspace: workspace})
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp, err := http.Post(gwURL+"/admin/agents", "application/json", bytes.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	responseBody, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusConflict {
+		t.Fatalf("legacy duplicate status = %d, want 409; body=%s", resp.StatusCode, responseBody)
+	}
+	sch.mu.Lock()
+	gotProc := sch.agents[agentName]
+	sch.mu.Unlock()
+	if gotProc != existingProc {
+		t.Fatal("legacy duplicate registration replaced the running process")
 	}
 }
 

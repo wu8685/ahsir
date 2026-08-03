@@ -15,6 +15,8 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -459,6 +461,231 @@ func TestSchedulerRestartsLocalAgentAfterUnexpectedExit(t *testing.T) {
 	}
 	if firstPort != secondPort {
 		t.Fatalf("restart should reuse port: first %s second %s", firstPort, secondPort)
+	}
+}
+
+func TestSchedulerReleasedDynamicPortCanBeReusedByLaterAgent(t *testing.T) {
+	dynamicPort := freePort(t)
+	registryPort := freePort(t)
+	for registryPort == dynamicPort {
+		registryPort = freePort(t)
+	}
+	cfg := &Config{
+		Registry:  RegistryConfig{Host: "127.0.0.1", Port: registryPort},
+		PortRange: PortRange{Start: dynamicPort, End: dynamicPort},
+	}
+	cfg.nextPort = cfg.PortRange.Start
+	sch := New(cfg)
+	sch.agentCommand = func(ctx context.Context, agentExe string, cfg AgentConfig, registryURL string) *exec.Cmd {
+		return exec.CommandContext(ctx, "sh", "-c", "sleep 30")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), testLifecycleDeadline)
+	defer cancel()
+	if err := sch.Start(ctx); err != nil {
+		t.Fatal(err)
+	}
+	defer sch.Stop()
+
+	firstDir := t.TempDir()
+	if port, err := sch.StartAgent(AgentConfig{Name: "first", Workspace: firstDir}); err != nil {
+		t.Fatalf("start first dynamic agent: %v", err)
+	} else if port != dynamicPort {
+		t.Fatalf("first agent port = %d, want %d", port, dynamicPort)
+	}
+	if err := sch.StopAgent("first"); err != nil {
+		t.Fatalf("stop first dynamic agent: %v", err)
+	}
+	deadline := time.Now().Add(testLifecycleDeadline)
+	for {
+		sch.mu.Lock()
+		_, stillRunning := sch.agents["first"]
+		sch.mu.Unlock()
+		if !stillRunning {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("timeout waiting for first dynamic agent to exit")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	secondDir := t.TempDir()
+	port, err := sch.StartAgent(AgentConfig{Name: "second", Workspace: secondDir})
+	if err != nil {
+		t.Fatalf("start second agent on released dynamic port: %v", err)
+	}
+	if port != dynamicPort {
+		t.Fatalf("second agent port = %d, want released port %d", port, dynamicPort)
+	}
+}
+
+func TestSchedulerConcurrentDistinctAgentsAllocateDistinctDynamicPorts(t *testing.T) {
+	portStart := freePort(t)
+	cfg := &Config{
+		Registry:  RegistryConfig{Host: "127.0.0.1", Port: freePort(t)},
+		PortRange: PortRange{Start: portStart, End: portStart + 1},
+	}
+	cfg.nextPort = portStart
+	sch := New(cfg)
+	sch.running = true
+	sch.ctx = context.Background()
+	sch.agentCommand = func(ctx context.Context, agentExe string, cfg AgentConfig, registryURL string) *exec.Cmd {
+		return exec.CommandContext(ctx, "sh", "-c", "sleep 30")
+	}
+	defer sch.Stop()
+
+	ports := make([]int, 2)
+	errs := make([]error, 2)
+	start := make(chan struct{})
+	var wg sync.WaitGroup
+	for i := range ports {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			<-start
+			ports[i], errs[i] = sch.StartAgent(AgentConfig{Name: fmt.Sprintf("worker-%d", i), Workspace: t.TempDir()})
+		}(i)
+	}
+	close(start)
+	wg.Wait()
+	for i, err := range errs {
+		if err != nil {
+			t.Fatalf("start worker-%d: %v", i, err)
+		}
+	}
+	if ports[0] == ports[1] {
+		t.Fatalf("concurrent dynamic starts shared port %d", ports[0])
+	}
+}
+
+func TestSchedulerExplicitPinnedPortRejectsSchedulerReservationBeforeBind(t *testing.T) {
+	port := freePort(t)
+	sch := New(&Config{PortRange: PortRange{Start: port, End: port + 1}})
+	sch.running = true
+	sch.ctx = context.Background()
+	sch.agents["first"] = &agentProcess{cfg: AgentConfig{Name: "first", Workspace: t.TempDir(), Port: port}}
+	sch.desired["first"] = sch.agents["first"].cfg
+	// Model the window after cmd.Start/publication but before the first process
+	// binds its listener. OS probing alone reports the port as free here.
+	sch.findLocalListener = func(int) (localProcessInfo, bool, error) {
+		return localProcessInfo{}, false, nil
+	}
+	var starts atomic.Int32
+	sch.agentCommand = func(ctx context.Context, agentExe string, cfg AgentConfig, registryURL string) *exec.Cmd {
+		starts.Add(1)
+		return exec.CommandContext(ctx, "sh", "-c", "sleep 30")
+	}
+
+	_, err := sch.StartAgent(AgentConfig{Name: "second", Workspace: t.TempDir(), Port: port})
+	if err == nil || !strings.Contains(err.Error(), "reserved") {
+		t.Fatalf("same pinned port error = %v, want scheduler reservation conflict", err)
+	}
+	if got := starts.Load(); got != 0 {
+		t.Fatalf("same pinned port spawned %d processes, want 0", got)
+	}
+}
+
+func TestSameCleanPathResolvesSymlinkedParentForManagedWorkspace(t *testing.T) {
+	realParent := t.TempDir()
+	aliasParent := filepath.Join(t.TempDir(), "managed-root-alias")
+	if err := os.Symlink(realParent, aliasParent); err != nil {
+		t.Fatal(err)
+	}
+	// The managed Agent directory has not been scaffolded yet; ownership still
+	// has to recognize that both names resolve beneath the same physical root.
+	realWorkspace := filepath.Join(realParent, "cma-worker-v1")
+	aliasWorkspace := filepath.Join(aliasParent, "cma-worker-v1")
+	if !sameCleanPath(realWorkspace, aliasWorkspace) {
+		t.Fatalf("managed workspace aliases were not canonicalized: %q vs %q", realWorkspace, aliasWorkspace)
+	}
+}
+
+func TestSchedulerDynamicPortSkipsForeignListener(t *testing.T) {
+	start := freePort(t)
+	sch := New(&Config{PortRange: PortRange{Start: start, End: start + 1}, nextPort: start})
+	sch.running = true
+	sch.ctx = context.Background()
+	sch.findLocalListener = func(port int) (localProcessInfo, bool, error) {
+		if port == start {
+			return localProcessInfo{PID: 42, Command: "/usr/sbin/foreign-service"}, true, nil
+		}
+		return localProcessInfo{}, false, nil
+	}
+	sch.agentCommand = func(ctx context.Context, agentExe string, cfg AgentConfig, registryURL string) *exec.Cmd {
+		return exec.CommandContext(ctx, "sh", "-c", "sleep 30")
+	}
+	defer sch.Stop()
+
+	port, err := sch.StartAgent(AgentConfig{Name: "worker", Workspace: t.TempDir()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if port != start+1 {
+		t.Fatalf("dynamic port = %d, want %d after skipping foreign listener", port, start+1)
+	}
+}
+
+func TestSchedulerFullyReservedDynamicRangeFailsWithoutSpawn(t *testing.T) {
+	portStart := freePort(t)
+	cfg := &Config{PortRange: PortRange{Start: portStart, End: portStart + 1}}
+	cfg.nextPort = portStart
+	sch := New(cfg)
+	sch.running = true
+	sch.ctx = context.Background()
+	sch.agents["held-a"] = &agentProcess{cfg: AgentConfig{Name: "held-a", Port: portStart}}
+	sch.agents["held-b"] = &agentProcess{cfg: AgentConfig{Name: "held-b", Port: portStart + 1}}
+	var starts atomic.Int32
+	sch.agentCommand = func(ctx context.Context, agentExe string, cfg AgentConfig, registryURL string) *exec.Cmd {
+		starts.Add(1)
+		return exec.CommandContext(ctx, "sh", "-c", "sleep 30")
+	}
+
+	_, err := sch.StartAgent(AgentConfig{Name: "blocked", Workspace: t.TempDir()})
+	if err == nil || !strings.Contains(err.Error(), "no available ports") {
+		t.Fatalf("fully reserved range error = %v, want no available ports", err)
+	}
+	if got := starts.Load(); got != 0 {
+		t.Fatalf("fully reserved range spawned %d processes, want 0", got)
+	}
+}
+
+func TestSchedulerEarlierDynamicAgentDoesNotTakePinnedConfiguredPort(t *testing.T) {
+	pinnedPort := freePort(t)
+	registryPort := freePort(t)
+	for registryPort == pinnedPort || registryPort == pinnedPort+1 {
+		registryPort = freePort(t)
+	}
+	cfg := &Config{
+		Agents: []AgentConfig{
+			{Name: "dynamic", Workspace: t.TempDir(), Port: 0},
+			{Name: "pinned", Workspace: t.TempDir(), Port: pinnedPort},
+		},
+		Registry:  RegistryConfig{Host: "127.0.0.1", Port: registryPort},
+		PortRange: PortRange{Start: pinnedPort, End: pinnedPort + 1},
+	}
+	cfg.nextPort = cfg.PortRange.Start
+	sch := New(cfg)
+	sch.agentCommand = func(ctx context.Context, agentExe string, cfg AgentConfig, registryURL string) *exec.Cmd {
+		return exec.CommandContext(ctx, "sh", "-c", "sleep 30")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), testLifecycleDeadline)
+	defer cancel()
+	if err := sch.Start(ctx); err != nil {
+		t.Fatal(err)
+	}
+	defer sch.Stop()
+
+	sch.mu.Lock()
+	dynamicGot := sch.agents["dynamic"].cfg.Port
+	pinnedGot := sch.agents["pinned"].cfg.Port
+	sch.mu.Unlock()
+	if pinnedGot != pinnedPort {
+		t.Fatalf("pinned agent port = %d, want %d", pinnedGot, pinnedPort)
+	}
+	if dynamicGot == pinnedPort {
+		t.Fatalf("earlier dynamic agent took later configured agent's pinned port %d", pinnedPort)
 	}
 }
 

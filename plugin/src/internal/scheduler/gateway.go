@@ -24,6 +24,11 @@ import (
 
 const a2aProxyPrefix = "/a2a/"
 
+const (
+	SchedulerErrorCodeHeader    = "X-Ahsir-Error-Code"
+	SchedulerErrorAgentNotFound = "scheduler_agent_not_found"
+)
+
 // AdminTokenHeader carries the control-plane admin token on requests to the
 // privileged endpoints (/admin/agents lifecycle + registry write). See
 // specs/2026-06-08-auth-baseline.md.
@@ -396,6 +401,7 @@ func (g *gatewayHandler) handleA2AProxy(w http.ResponseWriter, r *http.Request) 
 	// receive the internal token.
 	card, internalToken, ok := g.sch.agentDialTarget(decodedName)
 	if !ok {
+		w.Header().Set(SchedulerErrorCodeHeader, SchedulerErrorAgentNotFound)
 		writeJSONError(w, http.StatusNotFound, "agent not found")
 		return
 	}
@@ -444,6 +450,11 @@ func (g *gatewayHandler) handleA2AProxy(w http.ResponseWriter, r *http.Request) 
 
 	copyHeader(w.Header(), upstreamResp.Header)
 	removeHopByHopHeaders(w.Header())
+	// This is a scheduler control-plane marker, not an end-to-end Agent
+	// response header. Only the local pre-dispatch miss above may emit it;
+	// forwarding an upstream value could make CMA replay a turn that already
+	// reached the Agent.
+	w.Header().Del(SchedulerErrorCodeHeader)
 	w.WriteHeader(upstreamResp.StatusCode)
 	var copyErr error
 	if strings.Contains(upstreamResp.Header.Get("Content-Type"), "text/event-stream") {
@@ -835,9 +846,10 @@ func (g *gatewayHandler) handleAdminStart(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	// Resolve the workspace. With an inline card we may allocate a managed
-	// workspace and scaffold the agent-card.yaml; without one, the workspace
-	// must already exist (pre-staged card) as before.
+	// Resolve the workspace. The Scheduler performs the compatibility check,
+	// optional card write, and spawn atomically; doing the write here would let
+	// an incompatible reconcile overwrite a live Agent before we discover the
+	// name conflict.
 	workspace := req.Workspace
 	if req.Card != nil {
 		if workspace == "" {
@@ -847,12 +859,6 @@ func (g *gatewayHandler) handleAdminStart(w http.ResponseWriter, r *http.Request
 				return
 			}
 		}
-		if err := wrapper.WriteCard(workspace, req.Card); err != nil {
-			log.Printf("admin: scaffold inline card for %q failed: %v", req.Name, err)
-			writeJSONError(w, http.StatusInternalServerError, "scaffold inline card: "+err.Error())
-			return
-		}
-		log.Printf("admin: scaffolded inline card for %q at %s/.a2a/agent-card.yaml", req.Name, workspace)
 	} else if workspace == "" {
 		writeJSONError(w, http.StatusBadRequest, "workspace is required")
 		return
@@ -864,26 +870,29 @@ func (g *gatewayHandler) handleAdminStart(w http.ResponseWriter, r *http.Request
 	// by startAgent itself ("Agent X started on port Y (pid: Z)").
 	log.Printf("admin: start agent %q (workspace=%s, port=%d)", req.Name, workspace, req.Port)
 
-	port, err := g.sch.StartAgent(AgentConfig{
+	port, created, err := g.sch.EnsureAgent(AgentConfig{
 		Name:      req.Name,
 		Workspace: workspace,
 		Workdir:   req.Workdir,
 		Port:      req.Port,
 		Instances: req.Instances,
-	})
+	}, req.Card)
 	if err != nil {
 		log.Printf("admin: start agent %q failed: %v", req.Name, err)
-		// Distinguish "already running" (409) from misconfig (500) so the
-		// CLI / caller can surface the right hint.
-		msg := err.Error()
-		if strings.Contains(msg, "already running") {
-			writeJSONError(w, http.StatusConflict, msg)
+		if errors.Is(err, ErrAgentIncompatible) || errors.Is(err, ErrAgentAlreadyExists) {
+			writeJSONError(w, http.StatusConflict, err.Error())
 			return
 		}
-		writeJSONError(w, http.StatusInternalServerError, msg)
+		writeJSONError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	writeJSON(w, http.StatusCreated, startAgentResponse{Name: req.Name, Port: port})
+	if created {
+		log.Printf("admin: scaffolded and started inline agent %q at %s/.a2a/agent-card.yaml", req.Name, workspace)
+		writeJSON(w, http.StatusCreated, startAgentResponse{Name: req.Name, Port: port})
+		return
+	}
+	log.Printf("admin: agent %q already desired with compatible configuration", req.Name)
+	writeJSON(w, http.StatusOK, startAgentResponse{Name: req.Name, Port: port})
 }
 
 func (g *gatewayHandler) handleAdminStop(w http.ResponseWriter, r *http.Request, name string) {

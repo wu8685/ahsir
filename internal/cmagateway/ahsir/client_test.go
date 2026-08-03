@@ -3,6 +3,7 @@ package ahsir
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -118,16 +119,36 @@ func TestCard_AgentIdleTimeoutWire(t *testing.T) {
 	}
 }
 
-// A 409 from the scheduler ("already running") is success for the versioned
-// name model — RegisterAgent must not surface it as an error.
-func TestRegisterAgent_ConflictIsSuccess(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusConflict)
-	}))
-	defer srv.Close()
+// A generic or explicitly incompatible 409 cannot prove that the scheduler's
+// running process has the requested immutable version/card/instance cap.
+// Treating either as success is the persisted-CMA drift bug: dispatch proceeds
+// against an arbitrary runtime merely because its name collides.
+func TestRegisterAgent_UnverifiedConflictIsError(t *testing.T) {
+	tests := []struct {
+		name string
+		body string
+	}{
+		{name: "generic legacy conflict", body: `{"error":"agent already running"}`},
+		{name: "incompatible configuration", body: `{"error":"agent already running with incompatible configuration"}`},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusConflict)
+				_, _ = w.Write([]byte(tc.body))
+			}))
+			defer srv.Close()
 
-	c := New(srv.URL, "")
-	if err := c.RegisterAgent(context.Background(), "cma-coder-v1", &AgentCard{Name: "cma-coder-v1"}, 3); err != nil {
-		t.Fatalf("409 should be treated as success, got %v", err)
+			c := New(srv.URL, "")
+			err := c.RegisterAgent(context.Background(), "cma-coder-v1", &AgentCard{Name: "cma-coder-v1", Version: "1"}, 3)
+			if err == nil {
+				t.Fatal("unverified 409 was treated as success")
+			}
+			var statusErr *AdminHTTPError
+			if !errors.As(err, &statusErr) || statusErr.StatusCode != http.StatusConflict {
+				t.Fatalf("error = %T %v, want typed 409 AdminHTTPError", err, err)
+			}
+		})
 	}
 }
