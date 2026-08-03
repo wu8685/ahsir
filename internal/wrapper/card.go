@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 
 	"github.com/a2aproject/a2a-go/a2a"
 	"gopkg.in/yaml.v3"
@@ -294,6 +295,37 @@ func WriteCard(workspaceDir string, cfg *AgentCardConfig) error {
 		return fmt.Errorf("write agent-card.yaml: %w", err)
 	}
 	return nil
+}
+
+// CardMatches reports whether the persisted card in workspaceDir is
+// semantically equal to requested without rewriting either one. Both sides are
+// round-tripped through YAML first so representation-only differences such as
+// nil versus empty slices/maps do not turn an idempotent registration into a
+// false conflict.
+func CardMatches(workspaceDir string, requested *AgentCardConfig) (bool, error) {
+	if requested == nil {
+		return false, fmt.Errorf("requested agent card is required")
+	}
+	existingData, err := os.ReadFile(filepath.Join(workspaceDir, ".a2a", "agent-card.yaml"))
+	if err != nil {
+		return false, fmt.Errorf("read agent-card.yaml: %w", err)
+	}
+	if err := checkRenamedCardKeys(existingData); err != nil {
+		return false, err
+	}
+	var existing AgentCardConfig
+	if err := yaml.Unmarshal(existingData, &existing); err != nil {
+		return false, fmt.Errorf("parse agent-card.yaml: %w", err)
+	}
+	requestedData, err := yaml.Marshal(requested)
+	if err != nil {
+		return false, fmt.Errorf("marshal requested agent-card.yaml: %w", err)
+	}
+	var normalizedRequested AgentCardConfig
+	if err := yaml.Unmarshal(requestedData, &normalizedRequested); err != nil {
+		return false, fmt.Errorf("normalize requested agent-card.yaml: %w", err)
+	}
+	return reflect.DeepEqual(existing, normalizedRequested), nil
 }
 
 // renamedCardKey pairs a removed YAML key (old, still-in-the-wild) with the

@@ -221,14 +221,24 @@ func (c *Config) ManagedAgentsDir() string {
 	return filepath.Join(filepath.Dir(c.path), ".ahsir", "agents")
 }
 
-// AllocatePort allocates the next available port from the range.
+// AllocatePort returns the next candidate from the dynamic port range. The
+// cursor wraps so released ports can be considered again; the Scheduler owns
+// availability checks and bounds each scan to one complete pass over the
+// range.
 func (c *Config) AllocatePort() (int, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if c.nextPort > c.PortRange.End {
-		return 0, fmt.Errorf("no available ports in range %d-%d", c.PortRange.Start, c.PortRange.End)
+	if err := c.PortRange.validate(); err != nil {
+		return 0, err
+	}
+	if c.nextPort < c.PortRange.Start || c.nextPort > c.PortRange.End {
+		c.nextPort = c.PortRange.Start
 	}
 	port := c.nextPort
-	c.nextPort++
+	if c.nextPort == c.PortRange.End {
+		c.nextPort = c.PortRange.Start
+	} else {
+		c.nextPort++
+	}
 	return port, nil
 }

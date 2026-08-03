@@ -14,10 +14,12 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"testing"
 	"time"
 
+	"github.com/a2aproject/a2a-go/a2a"
 	"github.com/wu8685/ahsir/internal/registry"
 	"github.com/wu8685/ahsir/internal/wrapper"
 )
@@ -128,6 +130,9 @@ func waitForIdleStopped(t *testing.T, sch *Scheduler, name string, timeout time.
 func newIdleTestScheduler(t *testing.T, dir string, cmd agentCommandBuilder) *Scheduler {
 	t.Helper()
 	portStart := freePort(t)
+	if portStart > 65535-40 {
+		portStart -= 40
+	}
 	cfg := &Config{
 		Agents: []AgentConfig{{
 			Name:      "worker",
@@ -240,6 +245,95 @@ func TestSchedulerActivatorWakesIdleStopped(t *testing.T) {
 	}
 }
 
+// TestSchedulerActivatorReusesOnlyDynamicPortAfterIdleStop locks the dynamic
+// range to one port. Once the initial process has scaled to zero that port is
+// no longer in use, so the activator must be able to lease it again instead of
+// treating the monotonically-advanced allocation cursor as permanent
+// exhaustion.
+func TestSchedulerActivatorReusesOnlyDynamicPortAfterIdleStop(t *testing.T) {
+	dir := t.TempDir()
+	logPath := filepath.Join(dir, "starts.log")
+	marker := filepath.Join(dir, "marker")
+	dynamicPort := freePort(t)
+	registryPort := freePort(t)
+	for registryPort == dynamicPort {
+		registryPort = freePort(t)
+	}
+	cfg := &Config{
+		Agents: []AgentConfig{{
+			Name:      "worker",
+			Workspace: dir,
+			Port:      0,
+		}},
+		Registry:  RegistryConfig{Host: "127.0.0.1", Port: registryPort},
+		PortRange: PortRange{Start: dynamicPort, End: dynamicPort},
+	}
+	cfg.nextPort = cfg.PortRange.Start
+	sch := New(cfg)
+	sch.supervisor.HealthStartupGrace = 50 * time.Millisecond
+	sch.supervisor.HealthInterval = 20 * time.Millisecond
+	sch.agentCommand = idleAgentCommand(logPath, marker, 80, wrapper.IdleStopExitCode)
+
+	ctx, cancel := context.WithTimeout(context.Background(), testLifecycleDeadline)
+	defer cancel()
+	if err := sch.Start(ctx); err != nil {
+		t.Fatal(err)
+	}
+	defer sch.Stop()
+
+	_ = waitForLines(t, logPath, 1, testLifecycleDeadline)
+	waitForIdleStopped(t, sch, "worker", testLifecycleDeadline)
+	if err := sch.ensureAwake("worker"); err != nil {
+		t.Fatalf("wake should reuse released dynamic port %d: %v", dynamicPort, err)
+	}
+
+	lines := waitForLines(t, logPath, 2, testLifecycleDeadline)
+	if got := argValue(lines[1], "--port"); got != strconv.Itoa(dynamicPort) {
+		t.Fatalf("woken agent port = %q, want released port %d; starts=%q", got, dynamicPort, lines)
+	}
+}
+
+func TestSchedulerRepeatedIdleWakeExceedsDynamicRangeSize(t *testing.T) {
+	dir := t.TempDir()
+	logPath := filepath.Join(dir, "starts.log")
+	dynamicPort := freePort(t)
+	registryPort := freePort(t)
+	for registryPort == dynamicPort {
+		registryPort = freePort(t)
+	}
+	cfg := &Config{
+		Agents:    []AgentConfig{{Name: "worker", Workspace: dir}},
+		Registry:  RegistryConfig{Host: "127.0.0.1", Port: registryPort},
+		PortRange: PortRange{Start: dynamicPort, End: dynamicPort},
+	}
+	cfg.nextPort = dynamicPort
+	sch := New(cfg)
+	sch.supervisor.HealthStartupGrace = 50 * time.Millisecond
+	sch.supervisor.HealthInterval = 20 * time.Millisecond
+	// With no marker every process scales to zero, including woken processes.
+	sch.agentCommand = idleAgentCommand(logPath, "", 80, wrapper.IdleStopExitCode)
+	ctx, cancel := context.WithTimeout(context.Background(), testLifecycleDeadline)
+	defer cancel()
+	if err := sch.Start(ctx); err != nil {
+		t.Fatal(err)
+	}
+	defer sch.Stop()
+
+	const wakeCount = 3 // greater than the one-port range size
+	for i := 0; i < wakeCount; i++ {
+		waitForIdleStopped(t, sch, "worker", testLifecycleDeadline)
+		if err := sch.ensureAwake("worker"); err != nil {
+			t.Fatalf("wake %d: %v", i+1, err)
+		}
+	}
+	lines := waitForLines(t, logPath, wakeCount+1, testLifecycleDeadline)
+	for i, line := range lines {
+		if got := argValue(line, "--port"); got != strconv.Itoa(dynamicPort) {
+			t.Fatalf("start %d port=%q, want reused %d", i+1, got, dynamicPort)
+		}
+	}
+}
+
 // TestSchedulerActivatorSingleFlight: concurrent wakes of one idle-stopped agent
 // spawn exactly one new process (R2 — no double-start, no port race).
 func TestSchedulerActivatorSingleFlight(t *testing.T) {
@@ -278,6 +372,314 @@ func TestSchedulerActivatorSingleFlight(t *testing.T) {
 	time.Sleep(200 * time.Millisecond)
 	if lines := readLines(t, logPath); len(lines) != 2 {
 		t.Fatalf("single-flight violated: got %d start lines, want 2 (%q)", len(lines), lines)
+	}
+}
+
+// A wake readiness rollback may restore idle-stopped after the failed process
+// has already exited and queued a supervisor restart. That pending restart must
+// observe the intentional idle state and become a no-op, or it races the next
+// activator and can double-start the Agent.
+func TestScheduledRestartDoesNotResurrectIdleStoppedAgent(t *testing.T) {
+	dir := t.TempDir()
+	sch := newIdleTestScheduler(t, dir, idleAgentCommand(filepath.Join(dir, "starts.log"), filepath.Join(dir, "marker"), 1000, wrapper.IdleStopExitCode))
+	var starts atomic.Int32
+	sch.agentCommand = func(ctx context.Context, agentExe string, cfg AgentConfig, registryURL string) *exec.Cmd {
+		starts.Add(1)
+		return exec.CommandContext(ctx, "sh", "-c", "sleep 30")
+	}
+	sch.mu.Lock()
+	sch.ctx = context.Background()
+	sch.running = true
+	cfg := AgentConfig{Name: "worker", Workspace: dir, Port: sch.cfg.PortRange.Start}
+	sch.desired["worker"] = cfg
+	sch.idleStopped["worker"] = cfg
+	sch.scheduleRestartLocked(cfg, 1, 10*time.Millisecond)
+	sch.mu.Unlock()
+	time.Sleep(80 * time.Millisecond)
+	if got := starts.Load(); got != 0 {
+		t.Fatalf("pending supervisor restart resurrected idle-stopped Agent %d time(s)", got)
+	}
+}
+
+func TestFailedWakeRollbackDoesNotMarkReplacementIdle(t *testing.T) {
+	dir := t.TempDir()
+	sch := newIdleTestScheduler(t, dir, nil)
+	sch.running = true
+	sch.ctx = context.Background()
+	cfg := AgentConfig{Name: "worker", Workspace: dir, Port: sch.cfg.PortRange.Start}
+	oldDone := make(chan struct{})
+	close(oldDone)
+	oldProc := &agentProcess{cfg: cfg, done: oldDone, cancel: func() {}}
+	replacement := &agentProcess{cfg: cfg, cancel: func() {}}
+	sch.desired["worker"] = cfg
+	sch.agents["worker"] = replacement
+	sch.registry.Register(&a2a.AgentCard{Name: "worker", URL: "http://127.0.0.1:1"})
+
+	sch.rollbackFailedWake("worker", oldProc)
+	if _, idle := sch.idleStopped["worker"]; idle {
+		t.Fatal("rollback of failed old process marked a live supervisor replacement idle-stopped")
+	}
+	if got := sch.agents["worker"]; got != replacement {
+		t.Fatal("rollback disturbed the supervisor replacement process")
+	}
+	if _, ok := sch.registry.Get("worker"); !ok {
+		t.Fatal("rollback unregistered the live supervisor replacement")
+	}
+}
+
+func TestSchedulerActivatorSingleFlightPropagatesStartFailure(t *testing.T) {
+	dir := t.TempDir()
+	port := freePort(t)
+	cfg := &Config{
+		Registry:  RegistryConfig{Host: "127.0.0.1", Port: freePort(t)},
+		PortRange: PortRange{Start: port, End: port},
+	}
+	cfg.nextPort = port
+	sch := New(cfg)
+	sch.running = true
+	sch.ctx = context.Background()
+	wakeCfg := AgentConfig{Name: "worker", Workspace: dir, Port: port}
+	sch.desired["worker"] = wakeCfg
+	sch.idleStopped["worker"] = wakeCfg
+	sch.findLocalListener = func(int) (localProcessInfo, bool, error) {
+		return localProcessInfo{}, false, nil
+	}
+
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	var starts atomic.Int32
+	sch.agentCommand = func(ctx context.Context, agentExe string, cfg AgentConfig, registryURL string) *exec.Cmd {
+		if starts.Add(1) == 1 {
+			close(entered)
+		}
+		<-release
+		return exec.CommandContext(ctx, filepath.Join(dir, "missing-ahsir-agent"))
+	}
+
+	const callers = 6
+	errs := make([]error, callers)
+	var wg sync.WaitGroup
+	wg.Add(callers)
+	go func() {
+		defer wg.Done()
+		errs[0] = sch.ensureAwake("worker")
+	}()
+	<-entered
+	for i := 1; i < callers; i++ {
+		go func(i int) {
+			defer wg.Done()
+			errs[i] = sch.ensureAwake("worker")
+		}(i)
+	}
+	time.Sleep(50 * time.Millisecond)
+	close(release)
+	wg.Wait()
+
+	for i, err := range errs {
+		if err == nil {
+			t.Errorf("concurrent wake %d returned nil after leader start failure", i)
+		}
+	}
+	if got := starts.Load(); got != 1 {
+		t.Fatalf("start attempts = %d, want one shared failed wake attempt", got)
+	}
+}
+
+func TestSchedulerActivatorHealthFailureRemainsRetryable(t *testing.T) {
+	dir := t.TempDir()
+	logPath := filepath.Join(dir, "starts.log")
+	port := freePort(t)
+	cfg := &Config{
+		Registry:  RegistryConfig{Host: "127.0.0.1", Port: freePort(t)},
+		PortRange: PortRange{Start: port, End: port},
+	}
+	cfg.nextPort = port
+	sch := New(cfg)
+	sch.running = true
+	sch.ctx = context.Background()
+	defer sch.Stop()
+	sch.supervisor.HealthCheckEnabled = false
+	sch.supervisor.HealthStartupGrace = 0
+	sch.supervisor.HealthInterval = 10 * time.Millisecond
+	wakeCfg := AgentConfig{Name: "worker", Workspace: dir, Port: port}
+	sch.desired["worker"] = wakeCfg
+	sch.idleStopped["worker"] = wakeCfg
+	sch.findLocalListener = func(int) (localProcessInfo, bool, error) {
+		return localProcessInfo{}, false, nil
+	}
+
+	var starts atomic.Int32
+	healthyCommand := healthAgentCommand(logPath, "healthy", 0)
+	sch.agentCommand = func(ctx context.Context, agentExe string, cfg AgentConfig, registryURL string) *exec.Cmd {
+		if starts.Add(1) == 1 {
+			// Starts successfully but never binds /healthz.
+			return exec.CommandContext(ctx, "sh", "-c", "sleep 30")
+		}
+		return healthyCommand(ctx, agentExe, cfg, registryURL)
+	}
+
+	if err := sch.ensureAwake("worker"); err == nil {
+		t.Fatal("first wake unexpectedly succeeded without a health endpoint")
+	}
+	sch.mu.Lock()
+	_, stillRunning := sch.agents["worker"]
+	_, retryable := sch.idleStopped["worker"]
+	sch.mu.Unlock()
+	if stillRunning {
+		t.Error("failed wake left an agent in the running map")
+	}
+	if !retryable {
+		t.Error("failed wake did not restore idle-stopped state")
+	}
+
+	if err := sch.ensureAwake("worker"); err != nil {
+		t.Fatalf("retry wake after health failure: %v", err)
+	}
+	if got := starts.Load(); got != 2 {
+		t.Fatalf("start attempts = %d, want failed attempt plus retry", got)
+	}
+	sch.mu.Lock()
+	_, running := sch.agents["worker"]
+	_, idle := sch.idleStopped["worker"]
+	sch.mu.Unlock()
+	if !running || idle {
+		t.Fatalf("successful retry state: running=%v idleStopped=%v", running, idle)
+	}
+
+}
+
+func TestSchedulerPooledFreshSpawnSingleFlightIncludesReadinessAndRollback(t *testing.T) {
+	dir := t.TempDir()
+	writeInstanceTestCard(t, dir)
+	port := freePort(t)
+	cfg := &Config{
+		Registry:  RegistryConfig{Host: "127.0.0.1", Port: freePort(t)},
+		PortRange: PortRange{Start: port, End: port + 2},
+	}
+	cfg.nextPort = port
+	sch := New(cfg)
+	sch.running = true
+	firstCtx, cancelFirst := context.WithCancel(context.Background())
+	sch.ctx = firstCtx
+	sch.supervisor.HealthCheckEnabled = false
+	sch.supervisor.HealthStartupGrace = 0
+	sch.supervisor.HealthInterval = 10 * time.Millisecond
+	sch.desired["worker"] = AgentConfig{Name: "worker", Workspace: dir, Instances: 2}
+
+	entered := make(chan struct{})
+	var starts atomic.Int32
+	sch.agentCommand = func(ctx context.Context, agentExe string, cfg AgentConfig, registryURL string) *exec.Cmd {
+		if starts.Add(1) == 1 {
+			close(entered)
+		}
+		return exec.CommandContext(ctx, "sh", "-c", "sleep 30")
+	}
+
+	const callers = 5
+	errs := make([]error, callers)
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		errs[0] = sch.startOrWakeInstance("worker", 1)
+	}()
+	<-entered
+	for i := 1; i < callers; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			errs[i] = sch.startOrWakeInstance("worker", 1)
+		}(i)
+	}
+	time.Sleep(50 * time.Millisecond)
+	cancelFirst() // fail readiness promptly; rollback must be shared by all waiters
+	wg.Wait()
+
+	for i, err := range errs {
+		if err == nil {
+			t.Fatalf("pooled caller %d returned success before readiness", i)
+		}
+		if err.Error() != errs[0].Error() {
+			t.Errorf("pooled caller %d error = %q, want shared %q", i, err, errs[0])
+		}
+	}
+	if got := starts.Load(); got != 1 {
+		t.Fatalf("pooled failed readiness started %d processes, want 1", got)
+	}
+	sch.mu.Lock()
+	_, running := sch.agents["worker#1"]
+	_, retryable := sch.idleStopped["worker#1"]
+	sch.mu.Unlock()
+	if running || !retryable {
+		t.Fatalf("pooled rollback state: running=%v idleStopped=%v, want false/true", running, retryable)
+	}
+
+	secondCtx, cancelSecond := context.WithCancel(context.Background())
+	defer cancelSecond()
+	sch.ctx = secondCtx
+	sch.agentCommand = healthAgentCommand(filepath.Join(dir, "pooled-retry.log"), "healthy", 0)
+	if err := sch.startOrWakeInstance("worker", 1); err != nil {
+		t.Fatalf("pooled retry after readiness rollback: %v", err)
+	}
+	sch.mu.Lock()
+	proc := sch.agents["worker#1"]
+	sch.mu.Unlock()
+	if proc == nil {
+		t.Fatal("pooled retry returned success without a running child")
+	}
+	sch.mu.Lock()
+	proc.stopping = true
+	sch.mu.Unlock()
+	killAgentProcess(proc)
+	proc.cancel()
+}
+
+func TestRollbackFailedWakeRetainsPortReservationUntilMonitorExit(t *testing.T) {
+	sch := New(&Config{})
+	sch.running = true
+	sch.ctx = context.Background()
+	done := make(chan struct{})
+	proc := &agentProcess{
+		cfg:    AgentConfig{Name: "worker", Workspace: t.TempDir(), Port: 9801},
+		cancel: func() {},
+		done:   done,
+	}
+	sch.agents["worker"] = proc
+	sch.desired["worker"] = proc.cfg
+
+	returned := make(chan struct{})
+	go func() {
+		sch.rollbackFailedWake("worker", proc)
+		close(returned)
+	}()
+	time.Sleep(50 * time.Millisecond)
+	select {
+	case <-returned:
+		t.Fatal("rollback returned before monitor confirmed process exit")
+	default:
+	}
+	sch.mu.Lock()
+	got := sch.agents["worker"]
+	sch.mu.Unlock()
+	if got != proc {
+		t.Fatal("rollback released agents/port reservation before process exit")
+	}
+
+	// Simulate monitorAgent completing Wait and releasing the reservation.
+	sch.mu.Lock()
+	delete(sch.agents, "worker")
+	sch.mu.Unlock()
+	close(done)
+	select {
+	case <-returned:
+	case <-time.After(time.Second):
+		t.Fatal("rollback did not finish after monitor exit")
+	}
+	sch.mu.Lock()
+	_, idle := sch.idleStopped["worker"]
+	sch.mu.Unlock()
+	if !idle {
+		t.Fatal("rollback did not restore idle-stopped state after monitor exit")
 	}
 }
 

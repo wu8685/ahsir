@@ -6,7 +6,6 @@ package cmagateway
 import (
 	"encoding/json"
 	"net/http"
-	"sync"
 	"time"
 
 	"github.com/wu8685/ahsir/internal/cmagateway/ahsir"
@@ -20,18 +19,14 @@ type Server struct {
 	store *store.Store
 	ahsir *ahsir.Client
 	rt    translate.RuntimeDefaults
-
-	regMu      sync.Mutex
-	registered map[string]bool // ahsir agent name -> registered this process
 }
 
 func New(cfg Config, st *store.Store, ac *ahsir.Client) *Server {
 	return &Server{
-		cfg:        cfg,
-		store:      st,
-		ahsir:      ac,
-		rt:         translate.RuntimeDefaults{Provider: cfg.RuntimeProvider, BaseURL: cfg.RuntimeBaseURL, APIKey: cfg.RuntimeAPIKey},
-		registered: map[string]bool{},
+		cfg:   cfg,
+		store: st,
+		ahsir: ac,
+		rt:    translate.RuntimeDefaults{Provider: cfg.RuntimeProvider, BaseURL: cfg.RuntimeBaseURL, APIKey: cfg.RuntimeAPIKey},
 	}
 }
 
