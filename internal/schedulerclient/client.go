@@ -118,12 +118,19 @@ func (c *SchedulerHTTPClient) ChatWithAgent(agentName, contextID, message string
 // (specs/2026-06-08-shared-context-collaboration.md). Empty speaker keeps the
 // wire shape identical to ChatWithAgent.
 func (c *SchedulerHTTPClient) ChatWithAgentAs(agentName, contextID, speaker, message string) (string, error) {
-	payload := map[string]string{"message": message}
+	return c.ChatWithAgentAsRequiredPaths(agentName, contextID, speaker, message, nil)
+}
+
+func (c *SchedulerHTTPClient) ChatWithAgentAsRequiredPaths(agentName, contextID, speaker, message string, requiredPaths []string) (string, error) {
+	payload := map[string]any{"message": message}
 	if contextID != "" {
 		payload["contextId"] = contextID
 	}
 	if speaker != "" {
 		payload["speaker"] = speaker
+	}
+	if len(requiredPaths) > 0 {
+		payload["requiredPaths"] = append([]string(nil), requiredPaths...)
 	}
 	body, err := json.Marshal(payload)
 	if err != nil {
@@ -183,6 +190,14 @@ func (c *SchedulerHTTPClient) StreamWithAgent(agentName, contextID, message stri
 // speaker rides the A2A message metadata, mirroring ChatWithAgentAs. Empty
 // speaker keeps the wire shape identical to StreamWithAgent.
 func (c *SchedulerHTTPClient) StreamWithAgentAs(agentName, contextID, speaker, message string, onDelta func(string)) (string, error) {
+	return c.StreamWithAgentAsRequiredPaths(agentName, contextID, speaker, message, nil, onDelta)
+}
+
+func (c *SchedulerHTTPClient) StreamWithAgentAsRequiredPaths(agentName, contextID, speaker, message string, requiredPaths []string, onDelta func(string)) (string, error) {
+	if len(requiredPaths) > 0 {
+		agentURL := c.baseURL + "/a2a/" + url.PathEscape(agentName)
+		return streamAgentSSEWithRequirements(c.httpc, agentURL, contextID, speaker, message, requiredPaths, onDelta)
+	}
 	agentURL, err := c.resolveAgentURL(agentName)
 	if err != nil {
 		return "", err
@@ -221,6 +236,10 @@ func (c *SchedulerHTTPClient) resolveAgentURL(agentName string) (string, error) 
 // off long streams. Caller must arrange external cancellation if they need
 // it (the CLI honors SIGINT via its own context).
 func streamAgentSSE(httpc *http.Client, agentURL, contextID, speaker, message string, onDelta func(string)) (string, error) {
+	return streamAgentSSEWithRequirements(httpc, agentURL, contextID, speaker, message, nil, onDelta)
+}
+
+func streamAgentSSEWithRequirements(httpc *http.Client, agentURL, contextID, speaker, message string, requiredPaths []string, onDelta func(string)) (string, error) {
 	msgID := fmt.Sprintf("cli-stream-%d", time.Now().UnixNano())
 	msg := map[string]any{
 		"messageId": msgID,
@@ -230,6 +249,14 @@ func streamAgentSSE(httpc *http.Client, agentURL, contextID, speaker, message st
 	}
 	if speaker != "" {
 		msg["metadata"] = map[string]any{"speaker": speaker}
+	}
+	if len(requiredPaths) > 0 {
+		metadata, _ := msg["metadata"].(map[string]any)
+		if metadata == nil {
+			metadata = make(map[string]any)
+			msg["metadata"] = metadata
+		}
+		metadata[wrapper.MetadataRequiredFilesystemPathsKey] = append([]string(nil), requiredPaths...)
 	}
 	payload := map[string]any{
 		"jsonrpc": "2.0",
@@ -365,12 +392,19 @@ func streamAgentSSE(httpc *http.Client, agentURL, contextID, speaker, message st
 // taskId to poll and the contextId (agent-generated when the caller passed
 // none — needed for the `ahsir history` degradation path).
 func (c *SchedulerHTTPClient) ChatAsync(agentName, contextID, speaker, message string) (taskID, taskContextID string, err error) {
+	return c.ChatAsyncWithRequiredPaths(agentName, contextID, speaker, message, nil)
+}
+
+func (c *SchedulerHTTPClient) ChatAsyncWithRequiredPaths(agentName, contextID, speaker, message string, requiredPaths []string) (taskID, taskContextID string, err error) {
 	payload := map[string]any{"message": message, "async": true}
 	if contextID != "" {
 		payload["contextId"] = contextID
 	}
 	if speaker != "" {
 		payload["speaker"] = speaker
+	}
+	if len(requiredPaths) > 0 {
+		payload["requiredPaths"] = append([]string(nil), requiredPaths...)
 	}
 	body, err := json.Marshal(payload)
 	if err != nil {

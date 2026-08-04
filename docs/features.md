@@ -42,11 +42,12 @@ Code / Codex driving them via a shell:
 ```bash
 ahsir list                                  # registered agents
 ahsir chat <agent> "<msg>" [--context ID] [--as NAME] [--async] [--stream]
+                             [--require-path PATH]...
 ahsir status <agent> <task-id>              # poll a task
 ahsir history <agent> <contextId> [--json]  # replay a transcript
 ahsir trace [contextId] [--json]            # invocation timeline
 ahsir ping                                  # liveness (exit 0/2)
-ahsir doctor                                # config + provider + auth checklist
+ahsir doctor [--json]                       # config + provider + lifecycle checklist
 ahsir agent new|delete|list-configs         # manage personas (see §4)
 ahsir ui                                    # web console (see §5)
 ahsir version                               # print the build version (also --version / -v)
@@ -54,6 +55,12 @@ ahsir version                               # print the build version (also --ve
 
 `chat` submits asynchronously and polls internally, so the UX is "reply on
 stdout" while arbitrarily long queue waits survive proxies and timeouts.
+
+When a task depends on local files, repeat `--require-path` to declare them.
+The scheduler checks those paths against the selected Agent's filesystem policy
+before dispatch, so a reviewer scoped to another repository fails immediately
+instead of starting a turn it cannot complete. Calls that omit the flag retain
+the existing behavior.
 
 ---
 
@@ -297,6 +304,11 @@ no-op.
   console 轨迹 panel.
 - **Continuation prompt**: after a supervised restart, recoverable work with a
   `contextId` gets a continuation prompt so the conversation resumes.
+- **Lifecycle diagnostics**: `ahsir doctor` distinguishes healthy online and
+  scale-to-zero Agents from operator stops, invalid runtime configuration,
+  restart backoff, and health-check failures. Idle Agents are informational,
+  not warnings; `ahsir doctor --json` exposes the same state and reason codes
+  for automation.
 
 See the [recovery-continuation example](../example/recovery-continuation/) for
 the mechanics.

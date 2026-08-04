@@ -82,6 +82,11 @@ type Scheduler struct {
 	activationMu sync.Mutex
 	activations  map[string]*activationCall
 
+	// lifecycles retains scheduler-owned operational state even when an agent
+	// has no live registry card (idle, stopped, invalid, or restarting).
+	// Guarded by s.mu.
+	lifecycles map[string]AgentLifecycleSnapshot
+
 	// pools holds the per-card instance pool for every agent whose card backs
 	// more than one concurrent runtime instance (issue #18). Lazily created in
 	// poolFor from the agent's desired InstanceCap; absent for single-instance
@@ -98,6 +103,8 @@ type agentProcess struct {
 	restartAttempts int
 	internalToken   string
 	done            chan struct{} // closed by monitorAgent after cmd.Wait and state cleanup
+	failureState    AgentLifecycleState
+	failureReason   string
 }
 
 type activationCall struct {
@@ -182,7 +189,11 @@ func New(cfg *Config) *Scheduler {
 		killLocalProcessTree: defaultKillLocalProcessTree,
 		idleStopped:          make(map[string]AgentConfig),
 		activations:          make(map[string]*activationCall),
+		lifecycles:           make(map[string]AgentLifecycleSnapshot),
 		pools:                make(map[string]*instancePool),
+	}
+	for _, agentCfg := range cfg.Agents {
+		s.setLifecycleLocked(agentCfg.Name, AgentLifecycleStopped, "configured-not-started", "configured but not started", 0, time.Time{})
 	}
 	// Roundtable turns reuse the normal per-agent chat path (shared contextId,
 	// speaker attribution, ledger) — the room id is the contextId.
@@ -327,6 +338,11 @@ func (s *Scheduler) Start(ctx context.Context) error {
 			continue
 		}
 		if err := s.startAgentLocked(ctx, agentCfg, 0); err != nil {
+			var configErr *agentConfigurationError
+			if errors.As(err, &configErr) {
+				log.Printf("Agent %s not started: %v", agentCfg.Name, configErr)
+				continue
+			}
 			s.abortStartLocked()
 			return fmt.Errorf("start agent %s: %w", agentCfg.Name, err)
 		}
@@ -532,16 +548,22 @@ func (s *Scheduler) StopAgent(name string) error {
 	s.mu.Lock()
 	proc, ok := s.agents[name]
 	if !ok {
+		_, wasDesired := s.desired[name]
+		_, wasKnown := s.lifecycles[name]
 		delete(s.desired, name)
 		// An explicitly stopped agent must not be resurrected by the activator,
 		// even if it had scaled to zero (spec §4.5: idle-stopped wakes; stopped
 		// / archived does not).
 		delete(s.idleStopped, name)
+		if wasDesired || wasKnown {
+			s.setLifecycleLocked(name, AgentLifecycleStopped, "operator-stopped", "stopped by operator", 0, time.Time{})
+		}
 		s.mu.Unlock()
 		return nil
 	}
 	delete(s.desired, name)
 	delete(s.idleStopped, name)
+	s.setLifecycleLocked(name, AgentLifecycleStopped, "operator-stopped", "stopped by operator", 0, time.Time{})
 	proc.stopping = true
 	// Kill the process group before canceling the CommandContext. If
 	// CommandContext kills only the direct child first, we may lose the parent
@@ -564,6 +586,16 @@ func (s *Scheduler) StopAgent(name string) error {
 // before being stored in s.agents — callers reading s.agents[name].cfg.Port
 // rely on this.
 func (s *Scheduler) startAgentLocked(ctx context.Context, cfg AgentConfig, restartAttempts int) error {
+	if err := validateAgentConfiguration(cfg); err != nil {
+		var configErr *agentConfigurationError
+		reasonCode := "invalid-agent-card"
+		if errors.As(err, &configErr) {
+			reasonCode = configErr.reasonCode
+		}
+		s.desired[cfg.Name] = cfg
+		s.setLifecycleLocked(cfg.Name, AgentLifecycleInvalidConfig, reasonCode, err.Error(), 0, time.Time{})
+		return err
+	}
 	if cfg.Port == 0 {
 		// Auto-allocation probes each candidate: a port held by a foreign
 		// process (not a stale ahsir-agent we can evict) is skipped rather
@@ -962,6 +994,7 @@ func (s *Scheduler) monitorAgent(proc *agentProcess) {
 	// dead port and could try to restart it.
 	if idle {
 		s.idleStopped[proc.cfg.Name] = cfg
+		s.setLifecycleLocked(proc.cfg.Name, AgentLifecycleIdle, "scale-to-zero", "idle timeout elapsed; wakeable on next request", 0, time.Time{})
 		proc.cancel()
 		s.mu.Unlock()
 		log.Printf("Agent %s idle-stopped (scaled to zero); will wake on next access", proc.cfg.Name)
@@ -969,6 +1002,15 @@ func (s *Scheduler) monitorAgent(proc *agentProcess) {
 	}
 	attempt := proc.restartAttempts + 1
 	delay := s.restartBackoff(attempt)
+	state := AgentLifecycleRestartBackoff
+	reasonCode := "process-exit"
+	reason := fmt.Sprintf("process exited: %v", err)
+	if proc.failureState == AgentLifecycleHealthFailed {
+		state = AgentLifecycleHealthFailed
+		reasonCode = "health-threshold"
+		reason = proc.failureReason
+	}
+	s.setLifecycleLocked(proc.cfg.Name, state, reasonCode, reason, attempt, time.Now().Add(delay).UTC())
 	log.Printf("Agent %s scheduling restart attempt=%d delay=%s", proc.cfg.Name, attempt, delay)
 	s.scheduleRestartLocked(cfg, attempt, delay)
 	s.mu.Unlock()
@@ -1065,6 +1107,9 @@ func (s *Scheduler) restartUnhealthyAgent(proc *agentProcess, detail string) {
 		return
 	}
 	log.Printf("Agent %s health threshold reached; killing process pid=%d detail=%s", proc.cfg.Name, proc.cmd.Process.Pid, detail)
+	proc.failureState = AgentLifecycleHealthFailed
+	proc.failureReason = "health check failed: " + detail
+	s.setLifecycleLocked(proc.cfg.Name, AgentLifecycleHealthFailed, "health-threshold", proc.failureReason, proc.restartAttempts, time.Time{})
 	killAgentProcess(proc)
 	proc.cancel()
 	s.mu.Unlock()
@@ -1096,8 +1141,14 @@ func (s *Scheduler) scheduleRestartLocked(cfg AgentConfig, attempt int, delay ti
 			return
 		}
 		if err := s.startAgentLocked(s.ctx, currentCfg, attempt); err != nil {
+			var configErr *agentConfigurationError
+			if errors.As(err, &configErr) {
+				log.Printf("Agent %s restart stopped: invalid config: %v", cfg.Name, configErr)
+				return
+			}
 			nextAttempt := attempt + 1
 			nextDelay := s.restartBackoff(nextAttempt)
+			s.setLifecycleLocked(cfg.Name, AgentLifecycleRestartBackoff, "process-exit", "restart failed: "+err.Error(), nextAttempt, time.Now().Add(nextDelay).UTC())
 			log.Printf("Agent %s restart failed attempt=%d next_delay=%s err=%v", cfg.Name, attempt, nextDelay, err)
 			s.scheduleRestartLocked(currentCfg, nextAttempt, nextDelay)
 			return

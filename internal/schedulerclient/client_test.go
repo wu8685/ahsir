@@ -9,6 +9,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/wu8685/ahsir/internal/wrapper"
 )
 
 func TestRefreshTimeoutAddsClientBufferForPositiveChatTimeout(t *testing.T) {
@@ -157,6 +159,57 @@ func TestChatAsyncPostsAsyncFlag(t *testing.T) {
 	}
 	if got, _ := captured["speaker"].(string); got != "alice" {
 		t.Fatalf("posted speaker = %q", got)
+	}
+}
+
+func TestChatAsyncWithRequiredPathsPostsExplicitRequirements(t *testing.T) {
+	var captured map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		_ = json.Unmarshal(body, &captured)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusAccepted)
+		_, _ = w.Write([]byte(`{"taskId":"task-1","contextId":"ctx-1"}`))
+	}))
+	defer srv.Close()
+
+	c := NewSchedulerHTTPClient(srv.URL)
+	_, _, err := c.ChatAsyncWithRequiredPaths("reviewer", "ctx-1", "alice", "review", []string{"/repo/a", "/repo/b"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, ok := captured["requiredPaths"].([]any)
+	if !ok || len(got) != 2 || got[0] != "/repo/a" || got[1] != "/repo/b" {
+		t.Fatalf("requiredPaths = %#v (body=%v)", captured["requiredPaths"], captured)
+	}
+}
+
+func TestStreamWithRequiredPathsUsesSchedulerA2AProxy(t *testing.T) {
+	var gotPath string
+	var captured map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		body, _ := io.ReadAll(r.Body)
+		_ = json.Unmarshal(body, &captured)
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(w, "data: {\"jsonrpc\":\"2.0\",\"result\":{\"kind\":\"task\",\"history\":[{\"role\":\"agent\",\"parts\":[{\"kind\":\"text\",\"text\":\"ok\"}]}]}}\n\n")
+	}))
+	defer srv.Close()
+
+	c := NewSchedulerHTTPClient(srv.URL)
+	reply, err := c.StreamWithAgentAsRequiredPaths("reviewer", "ctx-1", "alice", "review", []string{"/repo/a"}, nil)
+	if err != nil || reply != "ok" {
+		t.Fatalf("stream reply=%q err=%v", reply, err)
+	}
+	if gotPath != "/a2a/reviewer" {
+		t.Fatalf("stream path=%q", gotPath)
+	}
+	params := captured["params"].(map[string]any)
+	message := params["message"].(map[string]any)
+	metadata := message["metadata"].(map[string]any)
+	paths := metadata[wrapper.MetadataRequiredFilesystemPathsKey].([]any)
+	if len(paths) != 1 || paths[0] != "/repo/a" {
+		t.Fatalf("stream metadata=%v", metadata)
 	}
 }
 

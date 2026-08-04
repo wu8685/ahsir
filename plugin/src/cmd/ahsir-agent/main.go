@@ -397,6 +397,9 @@ func parsePoolDuration(s string) (time.Duration, error) {
 // the CLI cwd and the base for relative allowed_paths. workdir == workspace
 // unless the operator decoupled them to share a cwd across agents.
 func buildSessionConfig(name string, rt wrapper.RuntimeConfig, fs wrapper.FilesystemConfig, mcp wrapper.MCPConfig, stream wrapper.StreamingConfig, workspace, workdir string, network ...wrapper.NetworkConfig) (wrapper.SessionConfig, error) {
+	if err := wrapper.ValidateRuntimeConfig(rt, mcp); err != nil {
+		return wrapper.SessionConfig{}, err
+	}
 	timeout := 120 * time.Second
 	if rt.Timeout != "" {
 		d, err := time.ParseDuration(rt.Timeout)

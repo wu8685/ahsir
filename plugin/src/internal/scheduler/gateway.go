@@ -99,6 +99,9 @@ func newGatewayHandler(sch *Scheduler, registry http.Handler) *gatewayHandler {
 type chatRequest struct {
 	Message   string `json:"message"`
 	ContextID string `json:"contextId,omitempty"`
+	// RequiredPaths declares filesystem inputs that the selected agent must be
+	// able to access. The scheduler validates them before waking or dispatching.
+	RequiredPaths []string `json:"requiredPaths,omitempty"`
 	// Speaker is the self-claimed sender identity for shared-context
 	// attribution (`ahsir chat --as`). Forwarded as A2A message metadata
 	// and recorded in the ledger. Advisory at the local-machine trust
@@ -145,6 +148,11 @@ func (g *gatewayHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			"chat":        g.sch.cfg.Timeouts.ChatTimeout().String(),
 			"task_status": g.sch.cfg.Timeouts.TaskStatusTimeout().String(),
 		})
+		return
+	}
+
+	if r.URL.Path == "/diagnostics/agents" && r.Method == http.MethodGet {
+		writeJSON(w, http.StatusOK, g.sch.AgentLifecycles())
 		return
 	}
 
@@ -380,6 +388,28 @@ func (g *gatewayHandler) handleA2AProxy(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
+	// Read and validate the request before the activator. A denied filesystem
+	// requirement must not wake an idle process or create a ledger record.
+	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxRequestBodyBytes))
+	if err != nil {
+		var tooLarge *http.MaxBytesError
+		if errors.As(err, &tooLarge) {
+			writeJSONError(w, http.StatusRequestEntityTooLarge, fmt.Sprintf("request body exceeds %d bytes", tooLarge.Limit))
+			return
+		}
+		writeJSONError(w, http.StatusBadRequest, "read request body: "+err.Error())
+		return
+	}
+	requiredPaths, err := requiredPathsFromA2AJSON(body)
+	if err != nil {
+		writeJSONError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if err := g.sch.PreflightFilesystem(decodedName, requiredPaths); err != nil {
+		writeFilesystemPreflightError(w, err)
+		return
+	}
+
 	// Activator: transparently wake an idle-stopped agent BEFORE resolving its
 	// dial target, so an A2A dispatch after a scale-to-zero re-spawns the
 	// runtime on a fresh process/port instead of dialing the dead cached
@@ -411,16 +441,6 @@ func (g *gatewayHandler) handleA2AProxy(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxRequestBodyBytes))
-	if err != nil {
-		var tooLarge *http.MaxBytesError
-		if errors.As(err, &tooLarge) {
-			writeJSONError(w, http.StatusRequestEntityTooLarge, fmt.Sprintf("request body exceeds %d bytes", tooLarge.Limit))
-			return
-		}
-		writeJSONError(w, http.StatusBadRequest, "read request body: "+err.Error())
-		return
-	}
 	meta := metadataFromA2AJSON(decodedName, body)
 	inv := g.sch.ledger.Begin(meta)
 
@@ -609,6 +629,10 @@ func (g *gatewayHandler) handleChat(w http.ResponseWriter, r *http.Request, name
 	}
 	if req.Message == "" {
 		writeJSONError(w, http.StatusBadRequest, "message is required")
+		return
+	}
+	if err := g.sch.PreflightFilesystem(name, req.RequiredPaths); err != nil {
+		writeFilesystemPreflightError(w, err)
 		return
 	}
 
@@ -1021,6 +1045,50 @@ func writeJSON(w http.ResponseWriter, status int, v interface{}) {
 
 func writeJSONError(w http.ResponseWriter, status int, msg string) {
 	writeJSON(w, status, map[string]string{"error": msg})
+}
+
+func writeFilesystemPreflightError(w http.ResponseWriter, err error) {
+	var preflight *FilesystemPreflightError
+	if !errors.As(err, &preflight) {
+		writeJSONError(w, http.StatusForbidden, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusForbidden, map[string]string{
+		"error": preflight.Error(),
+		"code":  preflight.Code,
+		"agent": preflight.Agent,
+		"path":  preflight.Path,
+	})
+}
+
+func requiredPathsFromA2AJSON(body []byte) ([]string, error) {
+	var envelope struct {
+		Params struct {
+			Message struct {
+				Metadata map[string]json.RawMessage `json:"metadata"`
+			} `json:"message"`
+		} `json:"params"`
+	}
+	if err := json.Unmarshal(body, &envelope); err != nil {
+		return nil, fmt.Errorf("invalid A2A request body: %w", err)
+	}
+	raw, present := envelope.Params.Message.Metadata[wrapper.MetadataRequiredFilesystemPathsKey]
+	if !present {
+		return nil, nil
+	}
+	var paths []string
+	if err := json.Unmarshal(raw, &paths); err != nil {
+		return nil, fmt.Errorf("message.metadata.%s must be an array of non-empty strings", wrapper.MetadataRequiredFilesystemPathsKey)
+	}
+	if paths == nil {
+		return nil, fmt.Errorf("message.metadata.%s must be an array of non-empty strings", wrapper.MetadataRequiredFilesystemPathsKey)
+	}
+	for _, path := range paths {
+		if strings.TrimSpace(path) == "" {
+			return nil, fmt.Errorf("message.metadata.%s must be an array of non-empty strings", wrapper.MetadataRequiredFilesystemPathsKey)
+		}
+	}
+	return paths, nil
 }
 
 func copyHeader(dst, src http.Header) {

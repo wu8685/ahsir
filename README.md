@@ -211,8 +211,11 @@ stop, or hijack agents.
    CLI reads the same file, so same-user usage needs **zero configuration**.
 
 `ahsir agent new` / `ahsir agent delete` auto-discover the token and attach it.
-`ahsir doctor` reports whether the CLI can find a token. The scheduler logs its
-auth status (enabled + source) at startup.
+`ahsir doctor` reports whether the CLI can find a token and shows each Agent's
+lifecycle state. Expected scale-to-zero is informational; invalid runtime
+configuration, restart backoff, and health failures are reported separately.
+Use `ahsir doctor --json` for the same machine-readable distinctions. The
+scheduler logs its auth status (enabled + source) at startup.
 
 **Rotation:** delete the `admin-token` file and restart the scheduler (a new
 token is generated); or set/replace `AHSIR_ADMIN_TOKEN`.
@@ -416,6 +419,7 @@ Once the plugin is loaded, two things happen automatically:
    ahsir ping                                # is the scheduler up?
    ahsir list                                # what agents are available?
    ahsir chat teacher "<task>" --context T1  # send a task, get reply
+   ahsir chat reviewer "review" --require-path /path/to/repo
    ```
 
 ### Explicit invocation
