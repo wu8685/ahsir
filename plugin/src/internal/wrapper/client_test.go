@@ -115,6 +115,23 @@ func TestSendMessageWithSpeakerSetsMetadata(t *testing.T) {
 	}
 }
 
+func TestSendMessageWithRequirementsSetsFilesystemMetadata(t *testing.T) {
+	var captured map[string]any
+	srv := speakerCaptureA2AServer(t, &captured)
+
+	client, err := NewAgentClient(context.Background(), speakerTestCard(srv.URL))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := client.SendMessageWithRequirements(context.Background(), "ctx-1", "alice", "review", []string{"/repo/a", "/repo/b"}); err != nil {
+		t.Fatal(err)
+	}
+	got, ok := captured[MetadataRequiredFilesystemPathsKey].([]any)
+	if !ok || len(got) != 2 || got[0] != "/repo/a" || got[1] != "/repo/b" {
+		t.Fatalf("required filesystem metadata = %#v", captured[MetadataRequiredFilesystemPathsKey])
+	}
+}
+
 // TestSendMessageWithoutSpeakerOmitsMetadata pins backward compatibility:
 // plain SendMessage must not grow a metadata key — absent speaker means the
 // wire shape is identical to today's.
@@ -131,5 +148,8 @@ func TestSendMessageWithoutSpeakerOmitsMetadata(t *testing.T) {
 	}
 	if _, present := captured[MetadataSpeakerKey]; present {
 		t.Fatalf("plain SendMessage must not set speaker metadata, got %v", captured)
+	}
+	if _, present := captured[MetadataRequiredFilesystemPathsKey]; present {
+		t.Fatalf("plain SendMessage must not set filesystem metadata, got %v", captured)
 	}
 }

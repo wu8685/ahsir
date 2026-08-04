@@ -30,6 +30,18 @@ import (
 
 const defaultSchedulerURL = "http://127.0.0.1:9800"
 
+type pathListFlag []string
+
+func (p *pathListFlag) String() string { return strings.Join(*p, ",") }
+
+func (p *pathListFlag) Set(value string) error {
+	if strings.TrimSpace(value) == "" {
+		return fmt.Errorf("path must not be empty")
+	}
+	*p = append(*p, value)
+	return nil
+}
+
 // parsePositionals runs fs.Parse iteratively over args so flags and
 // positionals can be freely interleaved. Go's stdlib `flag` stops at
 // the first non-flag — so a natural invocation like
@@ -136,6 +148,8 @@ func chatCmd(args []string) {
 	speakerFlag := fs.String("as", "", "Speaker identity for shared-context attribution (default: OS username)")
 	asyncMode := fs.Bool("async", false, "Submit the turn and print the taskId; fetch later with `ahsir status <agent> <taskId>`")
 	streamMode := fs.Bool("stream", false, "Stream the response token-by-token via SSE (requires agent's streaming.partial_messages=true)")
+	var requiredPaths pathListFlag
+	fs.Var(&requiredPaths, "require-path", "Filesystem path the agent must be allowed to access (repeatable)")
 	fs.Usage = func() {
 		fmt.Fprintf(os.Stderr, "Usage: ahsir chat <agent> \"<message>\" [flags]\n")
 		fs.PrintDefaults()
@@ -166,7 +180,7 @@ func chatCmd(args []string) {
 		// typewriter effect. The final aggregated reply returned by
 		// StreamWithAgent is discarded — the deltas already covered it.
 		// A trailing newline closes the rendered line.
-		_, err := client.StreamWithAgentAs(agent, *contextID, speaker, message, func(delta string) {
+		_, err := client.StreamWithAgentAsRequiredPaths(agent, *contextID, speaker, message, []string(requiredPaths), func(delta string) {
 			fmt.Print(delta)
 		})
 		fmt.Println()
@@ -181,7 +195,7 @@ func chatCmd(args []string) {
 	// the polling so the UX is unchanged — reply on stdout — but without a
 	// long-held HTTP connection, so arbitrarily long queue waits survive
 	// proxies and timeouts. --async surfaces the taskId instead.
-	taskID, taskCtx, err := client.ChatAsync(agent, *contextID, speaker, message)
+	taskID, taskCtx, err := client.ChatAsyncWithRequiredPaths(agent, *contextID, speaker, message, []string(requiredPaths))
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "chat failed: %v\n", err)
 		os.Exit(1)

@@ -6,7 +6,33 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"time"
 )
+
+// ValidateRuntimeConfig performs the side-effect-free portion of agent runtime
+// startup validation. Both scheduler preflight and ahsir-agent bootstrap call
+// it so invalid credentials/timeouts are classified before a provider process
+// starts without duplicating validation policy.
+func ValidateRuntimeConfig(rt RuntimeConfig, mcp MCPConfig) error {
+	if rt.Timeout != "" {
+		if _, err := time.ParseDuration(rt.Timeout); err != nil {
+			return fmt.Errorf("runtime.timeout %q: %w", rt.Timeout, err)
+		}
+	}
+	if _, _, err := ParseAgentIdleTimeout(rt.AgentIdleTimeout); err != nil {
+		return fmt.Errorf("runtime.agent_idle_timeout %q: %w", rt.AgentIdleTimeout, err)
+	}
+	if _, err := ResolveProviderEnv(rt); err != nil {
+		return err
+	}
+	if _, err := ResolveRuntimeModel(rt); err != nil {
+		return err
+	}
+	if RuntimeProvider(rt) == ProviderCodex && len(mcp.Servers) > 0 {
+		return fmt.Errorf("mcp.servers is only supported for claude-backed agents; codex configures MCP via its CODEX_HOME config.toml")
+	}
+	return nil
+}
 
 // Provider identifiers recognised by ResolveProviderEnv.
 const (

@@ -60,6 +60,11 @@ func NewAgentClientWithInternalToken(ctx context.Context, card *a2a.AgentCard, i
 // lands, the same key carries the verified principal instead.
 const MetadataSpeakerKey = "speaker"
 
+// MetadataRequiredFilesystemPathsKey carries an explicit list of filesystem
+// inputs that the scheduler must validate against the selected agent card
+// before dispatch.
+const MetadataRequiredFilesystemPathsKey = "requiredFilesystemPaths"
+
 // SendMessage sends a text message to the agent. contextID, when non-empty,
 // is set on the outgoing A2A Message so the callee's SessionPool can route
 // the request to an existing session for that contextID. Empty contextID
@@ -74,7 +79,13 @@ func (c *AgentClient) SendMessage(ctx context.Context, contextID, text string) (
 // can tag the turn and its transcript with who said it. Empty speaker keeps
 // the wire shape byte-identical to SendMessage (no metadata key at all).
 func (c *AgentClient) SendMessageWithSpeaker(ctx context.Context, contextID, speaker, text string) (string, error) {
-	params := &a2a.MessageSendParams{Message: buildUserMessage(contextID, speaker, text)}
+	return c.SendMessageWithRequirements(ctx, contextID, speaker, text, nil)
+}
+
+// SendMessageWithRequirements is SendMessageWithSpeaker plus explicit
+// filesystem inputs. Empty requiredPaths keeps the legacy A2A wire shape.
+func (c *AgentClient) SendMessageWithRequirements(ctx context.Context, contextID, speaker, text string, requiredPaths []string) (string, error) {
+	params := &a2a.MessageSendParams{Message: buildUserMessageWithRequirements(contextID, speaker, text, requiredPaths)}
 	result, err := c.client.SendMessage(ctx, params)
 	if err != nil {
 		return "", fmt.Errorf("send message to %s: %w", c.card.Name, err)
@@ -94,9 +105,13 @@ func (c *AgentClient) SendMessageWithSpeaker(ctx context.Context, contextID, spe
 // configuration.blocking=false: the agent answers immediately with a
 // `submitted` task whose progress is polled via GetTask.
 func (c *AgentClient) SendMessageNonBlocking(ctx context.Context, contextID, speaker, text string) (*a2a.Task, error) {
+	return c.SendMessageNonBlockingWithRequirements(ctx, contextID, speaker, text, nil)
+}
+
+func (c *AgentClient) SendMessageNonBlockingWithRequirements(ctx context.Context, contextID, speaker, text string, requiredPaths []string) (*a2a.Task, error) {
 	blocking := false
 	params := &a2a.MessageSendParams{
-		Message: buildUserMessage(contextID, speaker, text),
+		Message: buildUserMessageWithRequirements(contextID, speaker, text, requiredPaths),
 		Config:  &a2a.MessageSendConfig{Blocking: &blocking},
 	}
 	result, err := c.client.SendMessage(ctx, params)
@@ -113,12 +128,22 @@ func (c *AgentClient) SendMessageNonBlocking(ctx context.Context, contextID, spe
 // buildUserMessage assembles the outbound A2A user message shared by the
 // blocking and non-blocking send paths.
 func buildUserMessage(contextID, speaker, text string) *a2a.Message {
+	return buildUserMessageWithRequirements(contextID, speaker, text, nil)
+}
+
+func buildUserMessageWithRequirements(contextID, speaker, text string, requiredPaths []string) *a2a.Message {
 	msg := a2a.NewMessage(a2a.MessageRoleUser, a2a.TextPart{Text: text})
 	if contextID != "" {
 		msg.ContextID = contextID
 	}
 	if speaker != "" {
 		msg.Metadata = map[string]any{MetadataSpeakerKey: speaker}
+	}
+	if len(requiredPaths) > 0 {
+		if msg.Metadata == nil {
+			msg.Metadata = make(map[string]any)
+		}
+		msg.Metadata[MetadataRequiredFilesystemPathsKey] = append([]string(nil), requiredPaths...)
 	}
 	return msg
 }

@@ -30,12 +30,15 @@ func doctorCmd(args []string) {
 	fs := flag.NewFlagSet("doctor", flag.ExitOnError)
 	schedulerURL := fs.String("scheduler", defaultSchedulerURL, "Scheduler base URL")
 	configFlag := fs.String("config", "", "Path to ahsir.yaml (for locating the admin-token file; default: auto-detect)")
+	jsonOut := fs.Bool("json", false, "Output a machine-readable diagnostic report")
 	if err := fs.Parse(args); err != nil {
 		os.Exit(2)
 	}
 
 	failed := false
+	report := doctorReport{}
 	check := func(ok bool, critical bool, label, detail string) {
+		report.Checks = append(report.Checks, doctorCheck{OK: ok, Critical: critical, Label: label, Detail: detail})
 		mark := "✓"
 		if !ok {
 			if critical {
@@ -44,6 +47,9 @@ func doctorCmd(args []string) {
 			} else {
 				mark = "⚠"
 			}
+		}
+		if *jsonOut {
+			return
 		}
 		if detail != "" {
 			fmt.Printf("%s %-28s %s\n", mark, label, detail)
@@ -73,6 +79,10 @@ func doctorCmd(args []string) {
 	timeouts, err := httpGetJSON[map[string]string](*schedulerURL + "/config/timeouts")
 	if err != nil {
 		check(false, true, "scheduler", fmt.Sprintf("%s unreachable: %v", *schedulerURL, err))
+		report.OK = false
+		if *jsonOut {
+			printDoctorJSON(report)
+		}
 		fmt.Fprintln(os.Stderr, "\nscheduler is down — start it with `ahsir start [config]`")
 		os.Exit(1)
 	}
@@ -89,26 +99,79 @@ func doctorCmd(args []string) {
 		check(false, false, "admin token", "not found — `ahsir agent new/delete` will need AHSIR_ADMIN_TOKEN or a readable admin-token file beside "+cfgPath)
 	}
 
-	// 4. Registered agents + heartbeat status.
-	agents, err := httpGetJSON[[]struct {
-		Name   string `json:"name"`
-		URL    string `json:"url"`
-		Status string `json:"status"`
-	}](*schedulerURL + "/agents")
+	// 4. Scheduler-owned lifecycle state. Unlike registry heartbeat status,
+	// this distinguishes healthy scale-to-zero from actual failures.
+	agents, err := httpGetJSON[[]scheduler.AgentLifecycleSnapshot](*schedulerURL + "/diagnostics/agents")
 	if err != nil {
-		check(false, true, "agents", fmt.Sprintf("list failed: %v", err))
+		check(false, true, "agents", fmt.Sprintf("diagnostics failed: %v", err))
 	} else if len(agents) == 0 {
 		check(true, false, "agents", "none registered (use `ahsir agent new <name>`)")
 	} else {
-		for _, a := range agents {
-			online := a.Status == "online"
-			check(online, false, "agent "+a.Name, a.Status)
+		report.Agents = agents
+		if *jsonOut {
+			for _, a := range agents {
+				if a.Severity == scheduler.SeverityError {
+					failed = true
+				}
+			}
+		} else if renderAgentLifecycles(os.Stdout, agents) {
+			failed = true
 		}
 	}
 
+	report.OK = !failed
+	if *jsonOut {
+		printDoctorJSON(report)
+	}
 	if failed {
 		os.Exit(1)
 	}
+}
+
+type doctorCheck struct {
+	OK       bool   `json:"ok"`
+	Critical bool   `json:"critical"`
+	Label    string `json:"label"`
+	Detail   string `json:"detail,omitempty"`
+}
+
+type doctorReport struct {
+	OK     bool                               `json:"ok"`
+	Checks []doctorCheck                      `json:"checks"`
+	Agents []scheduler.AgentLifecycleSnapshot `json:"agents"`
+}
+
+func printDoctorJSON(report doctorReport) {
+	if report.Checks == nil {
+		report.Checks = []doctorCheck{}
+	}
+	if report.Agents == nil {
+		report.Agents = []scheduler.AgentLifecycleSnapshot{}
+	}
+	out, _ := json.MarshalIndent(report, "", "  ")
+	fmt.Println(string(out))
+}
+
+func renderAgentLifecycles(w io.Writer, agents []scheduler.AgentLifecycleSnapshot) bool {
+	failed := false
+	for _, agent := range agents {
+		mark := "⚠"
+		switch agent.Severity {
+		case scheduler.SeverityOK:
+			mark = "✓"
+		case scheduler.SeverityInfo:
+			mark = "○"
+		case scheduler.SeverityError:
+			mark = "✗"
+			failed = true
+		}
+		detail := string(agent.State)
+		if agent.Reason != "" {
+			detail += ": " + agent.Reason
+		}
+		fmt.Fprintf(w, "%s %-28s %s\n", mark, "agent "+agent.Name, detail)
+	}
+	return failed
 }
 
 // traceCmd: `ahsir trace [contextId] [--scheduler URL] [--json]`
