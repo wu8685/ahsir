@@ -199,6 +199,7 @@ func (c *Client) ChatStream(ctx context.Context, agent, contextID, message strin
 	var (
 		buf          strings.Builder
 		taskIDSeen   bool
+		terminalSeen bool
 		canceled     bool
 		streamFailed string
 	)
@@ -251,6 +252,7 @@ func (c *Client) ChatStream(ctx context.Context, agent, contextID, message strin
 				}
 			}
 		case "task":
+			terminalSeen = true
 			// Terminal event. Adopt its final message text if no deltas were
 			// streamed (partial_messages off, or a non-delta runtime).
 			if buf.Len() == 0 && ev.Status.Message != nil {
@@ -270,6 +272,9 @@ func (c *Client) ChatStream(ctx context.Context, agent, contextID, message strin
 	}
 	if err := sc.Err(); err != nil {
 		return buf.String(), fmt.Errorf("stream %q: read: %w", agent, err)
+	}
+	if !terminalSeen {
+		return buf.String(), fmt.Errorf("stream %q: ended before terminal task", agent)
 	}
 	if canceled {
 		return buf.String(), ErrTurnCanceled

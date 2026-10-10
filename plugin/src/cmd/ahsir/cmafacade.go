@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"log"
 	"net/http"
 	"os"
@@ -26,6 +27,13 @@ func startCMAFacade(listen, schedulerURL, adminToken, statePath string) error {
 	st, err := cmastore.New(statePath)
 	if err != nil {
 		return err
+	}
+	reconciled, err := st.ReconcileInterruptedSessions(time.Now().UTC())
+	if err != nil {
+		return fmt.Errorf("reconcile interrupted CMA sessions: %w", err)
+	}
+	if reconciled > 0 {
+		log.Printf("CMA facade startup reconciliation: terminated %d interrupted running session(s)", reconciled)
 	}
 	ac := cmaclient.New(schedulerURL, adminToken)
 	cfg := cmagateway.Config{

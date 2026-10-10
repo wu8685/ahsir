@@ -391,6 +391,50 @@ func (s *Store) ListSessions() []*cma.Session {
 	return out
 }
 
+// ReconcileInterruptedSessions settles persisted running Sessions whose
+// execution owner belonged to a previous process. Turn goroutines and A2A task
+// handles are intentionally transient, so a freshly-started facade can never
+// truthfully continue to advertise those Sessions as running.
+//
+// The transition is persisted as one snapshot before the caller opens the
+// listener. It is idempotent because only running Sessions are eligible.
+func (s *Store) ReconcileInterruptedSessions(now time.Time) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	count := 0
+	for _, rec := range s.sessions {
+		rec.mu.Lock()
+		if rec.Session.ArchivedAt != nil || rec.Session.Status != cma.StatusRunning {
+			rec.mu.Unlock()
+			continue
+		}
+		processedAt := now
+		rec.Events = append(rec.Events,
+			cma.Event{
+				ID: cma.NewID(cma.PrefixEvent), Type: cma.EvtSessionError, ProcessedAt: &processedAt,
+				Error: &cma.EventError{
+					Type:        "unknown_error",
+					Message:     "runtime_interrupted: ahsir restarted while this Session was running; the prior execution owner no longer exists",
+					RetryStatus: cma.RetryStatus{Type: "terminal"},
+				},
+			},
+			cma.Event{ID: cma.NewID(cma.PrefixEvent), Type: cma.EvtSessionStatusTerminate, ProcessedAt: &processedAt},
+		)
+		rec.Session.Status = cma.StatusTerminated
+		rec.Session.UpdatedAt = now
+		rec.mu.Unlock()
+		count++
+	}
+	if count == 0 {
+		return 0, nil
+	}
+	if err := s.saveLocked(); err != nil {
+		return count, err
+	}
+	return count, nil
+}
+
 // SaveSnapshot persists current state (call after mutating a session in place).
 func (s *Store) SaveSnapshot() error {
 	s.mu.RLock()
