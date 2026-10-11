@@ -204,9 +204,21 @@ type pooledEntry struct {
 // Caller must hold e.mu.
 func (e *pooledEntry) gatedLocked(p *SessionPool) Session {
 	if e.gatedWrap == nil || e.gatedWrap.inner != e.session {
-		e.gatedWrap = &gatedSession{inner: e.session, gate: e.gate, depth: p.currentQueueDepth, monitor: p.monitor}
+		owner := e.session
+		e.gatedWrap = &gatedSession{
+			inner: e.session, gate: e.gate, depth: p.currentQueueDepth, monitor: p.monitor,
+			onTurnFinished: func() { p.markTurnFinished(e, owner) },
+		}
 	}
 	return e.gatedWrap
+}
+
+func (p *SessionPool) markTurnFinished(entry *pooledEntry, owner Session) {
+	entry.mu.Lock()
+	if entry.state == entryActive && entry.session == owner {
+		entry.lastUsed = p.clock()
+	}
+	entry.mu.Unlock()
 }
 
 const defaultReapInterval = 1 * time.Minute
@@ -488,6 +500,7 @@ func (p *SessionPool) LookupOrCreate(ctx context.Context, contextID string) (Ses
 	entry.session = s
 	entry.state = entryActive
 	entry.lastUsed = now
+	entry.gate.endEviction()
 
 	// Two flavours of sessionID delivery, handled differently:
 	//
@@ -775,6 +788,12 @@ func (p *SessionPool) reapOnce() {
 		switch e.state {
 		case entryActive:
 			if e.session != nil && now.Sub(e.lastUsed) > p.idleTTL {
+				// Idle retention must never become a turn deadline. Claim the
+				// gate's eviction lease first; a running/queued turn makes the
+				// entry non-idle regardless of lastUsed age.
+				if !e.gate.tryBeginEviction() {
+					break
+				}
 				_ = e.session.Close()
 				e.session = nil
 				e.state = entryEvicted

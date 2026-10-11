@@ -161,6 +161,17 @@ var ErrTurnInFlight = errors.New("agent busy: a turn is already running for this
 // error.
 var ErrTurnCanceled = errors.New("turn canceled")
 
+// ErrSessionClosed marks an accepted turn that was terminated because the
+// owning Session was explicitly closed (for example during daemon shutdown).
+// A started turn must always receive one terminal outcome even when its
+// provider is being torn down.
+var ErrSessionClosed = errors.New("session closed while turn was running")
+
+// ErrSessionEvicted is returned when a stale pooled Session wrapper races with
+// an idle eviction. The eviction lease prevents a new turn from entering a
+// Session after the reaper has committed to closing it.
+var ErrSessionEvicted = errors.New("session is being evicted; retry the turn")
+
 // Session is a long-running conversation with one agent runtime instance.
 //
 // Implementations must serialize Stream calls: the caller is required to

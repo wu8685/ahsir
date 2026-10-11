@@ -22,6 +22,50 @@ type fakePoolSession struct {
 	closed bool
 }
 
+// blockingPoolSession keeps one Stream open until finish is called. It lets
+// retention tests advance the pool clock beyond idleTTL while a real turn is
+// still holding the per-context gate.
+type blockingPoolSession struct {
+	mu       sync.Mutex
+	closed   bool
+	events   chan Event
+	finished sync.Once
+}
+
+func newBlockingPoolSession() *blockingPoolSession {
+	return &blockingPoolSession{events: make(chan Event, 1)}
+}
+
+func (s *blockingPoolSession) Stream(context.Context, string) (<-chan Event, error) {
+	return s.events, nil
+}
+func (s *blockingPoolSession) Turn(context.Context, string) (string, error) {
+	return "", errors.New("blockingPoolSession Turn is not used")
+}
+func (s *blockingPoolSession) SessionID() string { return "blocking-session" }
+func (s *blockingPoolSession) IsHealthy() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return !s.closed
+}
+func (s *blockingPoolSession) Close() error {
+	s.mu.Lock()
+	s.closed = true
+	s.mu.Unlock()
+	return nil
+}
+func (s *blockingPoolSession) isClosed() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.closed
+}
+func (s *blockingPoolSession) finish() {
+	s.finished.Do(func() {
+		s.events <- EventTurnDone{}
+		close(s.events)
+	})
+}
+
 func (f *fakePoolSession) Stream(ctx context.Context, userText string) (<-chan Event, error) {
 	ch := make(chan Event, 1)
 	ch <- EventTurnDone{}
@@ -197,6 +241,89 @@ func TestSessionPool_IdleEviction(t *testing.T) {
 	mu.Unlock()
 	if !s0.isClosed() {
 		t.Error("want session Close() called on idle eviction")
+	}
+}
+
+func TestSessionPool_LongRunningTurnIsNotIdleEvicted(t *testing.T) {
+	now := time.Now()
+	inner := newBlockingPoolSession()
+	p := NewSessionPool(func(context.Context, string, string) (Session, error) {
+		return inner, nil
+	}, 30*time.Minute, 24*time.Hour)
+	defer p.Stop()
+	p.setClock(func() time.Time { return now })
+
+	s, err := p.LookupOrCreate(context.Background(), "ctx-long-turn")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ch, err := s.Stream(context.Background(), "work longer than idle TTL")
+	if err != nil {
+		t.Fatal(err)
+	}
+	drained := make(chan struct{})
+	go func() {
+		for range ch {
+		}
+		close(drained)
+	}()
+
+	now = now.Add(31 * time.Minute)
+	p.reapOnce()
+	if inner.isClosed() {
+		t.Fatal("idle reaper closed a session with an in-flight turn")
+	}
+
+	inner.finish()
+	select {
+	case <-drained:
+	case <-time.After(time.Second):
+		t.Fatal("turn did not drain")
+	}
+
+	// The idle window begins at turn completion, not at the original lookup.
+	now = now.Add(29 * time.Minute)
+	p.reapOnce()
+	if inner.isClosed() {
+		t.Fatal("session evicted before a full idle TTL after turn completion")
+	}
+	now = now.Add(2 * time.Minute)
+	p.reapOnce()
+	if !inner.isClosed() {
+		t.Fatal("session was not evicted after a full idle TTL")
+	}
+}
+
+func TestSessionPool_IdleEvictionLeaseRejectsStaleWrapper(t *testing.T) {
+	factory, _, _, _ := newRecordingFactory()
+	p := NewSessionPool(factory, 30*time.Minute, 24*time.Hour)
+	defer p.Stop()
+
+	now := time.Now()
+	p.setClock(func() time.Time { return now })
+	stale, err := p.LookupOrCreate(context.Background(), "ctx-lease")
+	if err != nil {
+		t.Fatal(err)
+	}
+	now = now.Add(31 * time.Minute)
+	p.reapOnce()
+
+	if _, err := stale.Stream(context.Background(), "late caller"); !errors.Is(err, ErrSessionEvicted) {
+		t.Fatalf("stale wrapper Stream error = %v, want ErrSessionEvicted", err)
+	}
+
+	resumed, err := p.LookupOrCreate(context.Background(), "ctx-lease")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ch, err := resumed.Stream(context.Background(), "new provider")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for ev := range ch {
+		if done, ok := ev.(EventTurnDone); ok && done.Err != nil {
+			t.Fatalf("resumed turn failed: %v", done.Err)
+		}
 	}
 }
 

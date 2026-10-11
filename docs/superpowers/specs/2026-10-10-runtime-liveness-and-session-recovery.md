@@ -2,7 +2,7 @@
 
 **日期：** 2026-10-10
 
-**状态：** Implemented — 2026-10-11
+**状态：** Implemented, including idle-reaper follow-up — 2026-10-11
 
 **关联 Issue：** [wu8685/ahsir#43](https://github.com/wu8685/ahsir/issues/43)
 
@@ -26,6 +26,12 @@ Hetairoi 触发的多个 GitHub issue 已经进入 ahsir，但长期停在 CMA `
 2. CMA store 会持久化 `running`，但启动时没有 execution lease/reconciliation。进程重启后，
    内存中的 turn goroutine 和 A2A task 已不存在，磁盘状态仍可能永久声称任务正在执行。
 
+2026-10-11 的长任务复测又暴露出第三个、独立于 provider 自行退出的缺口：SessionPool 默认
+`session_idle_ttl=30m`，但 `lastUsed` 只在 lookup/create 时刷新。reaper 没有与 per-context
+turn gate 协调，因而会把持续执行超过 30 分钟的 turn 当成 idle Session 关闭。`Close()` 又先把
+ClaudeSession 标记为 `closed`，使 EOF handler 跳过在途 turn 的 terminal event，最终形成
+“provider 已被 pool 杀死、A2A/CMA 仍永久 running”的状态。
+
 线上 CMA turn timeout 默认为 720 小时。这个值允许长任务运行，但不能替代 runtime liveness
 检测；`runtime_timeout: 0` 也只表示不设置工作时限，不能表示忽略进程死亡。
 
@@ -38,6 +44,9 @@ Hetairoi 触发的多个 GitHub issue 已经进入 ahsir，但长期停在 CMA `
 5. 上游得到持久化的 typed failure，Hetairoi 可据此执行 GitHub source 自己的失败通知策略。
 6. 无限 work timeout 与存活检测正交：活着的任务可无限运行，死亡的任务不能无限 `running`。
 7. 不自动重放可能已经产生外部副作用的业务 turn；重试必须创建一个明确的新 attempt。
+8. Session idle retention 只从最后一个 turn 完成后开始计时；在途或排队 turn 永远不属于 idle。
+9. pool eviction、process exit、显式关闭和 daemon shutdown 都不得让已接受 turn 失去 terminal
+   outcome。
 
 ## 3. 非目标
 
@@ -79,6 +88,15 @@ terminal arbitration 必须是原子的。正常 result、process wait、stdout 
 `running` 表示“当前进程持有一个活的 execution owner”，不能表示历史意图。CMA state 文件不
 持久化可跨进程恢复的 goroutine/A2A task，因此新进程加载到旧 `running` 时必须将其结算为
 `runtime_interrupted`，而不是继续展示 `running` 或伪造 `idle`。
+
+### 4.4 Session idle 与 turn lease
+
+- `session_idle_ttl` 衡量最后一个 turn **完成后**的空闲时间，不衡量 turn 已运行多久；
+- turn gate 的 running/queued 状态是 idle eviction 的权威依据；
+- reaper 必须与新 turn 原子竞争 eviction lease：确认 gate 空闲并阻止新 turn 进入后才可关闭；
+- turn 正常或异常结束时刷新 `lastTurnFinishedAt`；
+- idle eviction 只关闭没有 turn 的 Session，不产生伪造的业务失败；
+- daemon shutdown 或其他强制关闭若遇到在途 turn，必须先以 typed terminal error 结算该 turn。
 
 ## 5. Runtime supervisor 设计
 
@@ -212,6 +230,12 @@ exit status、drain grace 是否超时。不得打印 prompt、token 或完整 s
    第二次启动不重复追加。
 11. **恢复持久化失败**：facade 拒绝启动，不暴露不一致状态。
 12. **现有回归**：正常多轮、显式 cancel、timeout、Close、pool eviction、Codex provider 行为不变。
+13. **长 turn 不被 idle 回收**：推进 fake clock 超过 `session_idle_ttl`，在途 turn 和其 provider
+    仍存活；turn 完成后 TTL 从完成时刻重新计时。
+14. **reaper/start 竞态**：idle eviction lease 与新 turn 原子互斥，不得出现 turn 已接受后又被
+    idle reaper 关闭。
+15. **强制关闭终态**：关闭一个在途 ClaudeSession 时恰好产生一个 typed `EventTurnDone`，channel
+    随后关闭，executor/CMA 不得继续 running。
 
 测试至少运行：
 
@@ -246,3 +270,4 @@ GO111MODULE=on go vet ./...
 5. 当前 5 个 zombie Session 均不再是 `running`，且 GitHub 侧可看到 source-specific 失败通知。
 6. 重触发后的任务能完成 PR 或明确失败，不再无声悬挂。
 7. ahsir 内部不包含 GitHub-specific 通知逻辑；Hetairoi adapter 只消费 typed terminal outcome。
+8. 任意 turn 连续运行超过默认 30 分钟不会触发 session idle eviction；完成后空闲超过 TTL 才回收。

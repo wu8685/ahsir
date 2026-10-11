@@ -943,6 +943,39 @@ func TestClaudeSession_ProcessExitWithoutStdoutEOF_FailsTurn(t *testing.T) {
 	}
 }
 
+func TestClaudeSession_CloseInFlightTerminatesTurn(t *testing.T) {
+	f := newFakeClaudeTransport()
+	defer f.close()
+
+	s, err := newClaudeSessionWithTransport(context.Background(), SessionConfig{}, "", f.tr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ch, err := s.Stream(context.Background(), "still running")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	select {
+	case ev, ok := <-ch:
+		if !ok {
+			t.Fatal("turn channel closed without EventTurnDone")
+		}
+		done, ok := ev.(EventTurnDone)
+		if !ok || !errors.Is(done.Err, ErrSessionClosed) {
+			t.Fatalf("got %#v, want EventTurnDone wrapping ErrSessionClosed", ev)
+		}
+		if _, ok := <-ch; ok {
+			t.Fatal("turn channel remained open after terminal event")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Close left the in-flight turn blocked")
+	}
+}
+
 func TestClaudeSession_ProcessExitDrainsCanonicalResult(t *testing.T) {
 	f := newFakeClaudeTransport()
 	defer f.close()
