@@ -275,6 +275,13 @@ func (e *Executor) runTurn(ctx context.Context, session Session, prompt string, 
 			if onAux != nil {
 				onAux(x)
 			}
+		case EventToolResult:
+			// Tool outcomes must reach the wire (ev=tool_result →
+			// agent.tool_result); dropping them silently loses every
+			// streaming turn's tool observability.
+			if onAux != nil {
+				onAux(x)
+			}
 		case EventLifecycle:
 			// Lifecycle transitions (issue #43) ride the aux channel so the
 			// streaming path surfaces them as structured wire events.
