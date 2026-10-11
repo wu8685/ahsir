@@ -413,9 +413,10 @@ func TestDefineOutcome_Satisfied(t *testing.T) {
 	if end.Usage == nil {
 		t.Fatal("end.usage must be emitted (zero-valued) per the SDK model")
 	}
-	if rec.Status() != cma.StatusIdle {
-		t.Fatalf("session status = %q, want idle", rec.Status())
-	}
+	// finishOutcome publishes the terminal read-model state before the loop
+	// settles the session to idle, so a direct rec.Status() read can land in
+	// between; poll instead of racing the turn goroutine.
+	waitForStatus(t, rec, cma.StatusIdle)
 }
 
 func TestDefineOutcome_NeedsRevisionThenSatisfied(t *testing.T) {
