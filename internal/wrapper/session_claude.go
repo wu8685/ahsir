@@ -51,7 +51,9 @@ type ClaudeSession struct {
 	// implementations must be cheap and non-blocking.
 	onSessionIDKnown func(string)
 
-	readerDone chan struct{}
+	readerDone    chan struct{}
+	processExited bool
+	processErr    error
 }
 
 // claudeTransport abstracts the OS-level subprocess IO so tests can inject
@@ -59,9 +61,36 @@ type ClaudeSession struct {
 // process exits; kill terminates it and must be idempotent.
 type claudeTransport struct {
 	stdin  io.WriteCloser
-	stdout io.Reader
+	stdout io.ReadCloser
 	wait   func() error
 	kill   func() error
+}
+
+// claudeExitDrainGrace gives the protocol reader a bounded opportunity to
+// consume a canonical result already buffered in stdout after the root process
+// exits. It is deliberately independent of the business turn timeout: a live
+// process may run indefinitely, while a dead process must always converge.
+const claudeExitDrainGrace = 100 * time.Millisecond
+
+// ClaudeProcessExitError is the typed terminal cause for a provider root
+// process that disappeared before emitting a canonical result. Callers can use
+// errors.As without parsing the bounded human-readable message.
+type ClaudeProcessExitError struct {
+	Cause error
+}
+
+func (e *ClaudeProcessExitError) Error() string {
+	if e != nil && e.Cause != nil {
+		return "claude process exited mid-turn: " + e.Cause.Error()
+	}
+	return "claude process exited mid-turn"
+}
+
+func (e *ClaudeProcessExitError) Unwrap() error {
+	if e == nil {
+		return nil
+	}
+	return e.Cause
 }
 
 // transportFactory builds a fresh claudeTransport. resumeID, when non-empty,
@@ -255,6 +284,7 @@ func newClaudeSessionWithTransport(ctx context.Context, cfg SessionConfig, resum
 		readerDone: make(chan struct{}),
 	}
 	go s.reader()
+	go s.superviseProcess()
 	return s, nil
 }
 
@@ -372,10 +402,10 @@ func (s *ClaudeSession) abortTurn(ch chan Event, cause error) {
 	if s.state == stateInFlight {
 		s.state = stateEvicted
 	}
-	s.mu.Unlock()
-	log.Printf("claude session: turn aborted (%v), killing process (sessionID preserved for resume)", cause)
 	ch <- EventTurnDone{Err: cause}
 	close(ch)
+	s.mu.Unlock()
+	log.Printf("claude session: turn aborted (%v), killing process (sessionID preserved for resume)", cause)
 	// Kill AFTER signalling the caller: the reader goroutine sees EOF next,
 	// finds eventsCh already nil, and just confirms the EVICTED state.
 	_ = s.transport.kill()
@@ -421,11 +451,50 @@ func (s *ClaudeSession) Close() error {
 		s.mu.Unlock()
 		return nil
 	}
+	ch := s.eventsCh
+	s.eventsCh = nil
 	s.state = stateClosed
+	if ch != nil {
+		ch <- EventTurnDone{Err: ErrSessionClosed}
+		close(ch)
+	}
 	s.mu.Unlock()
 	_ = s.transport.kill()
+	_ = s.transport.stdout.Close()
 	<-s.readerDone
 	return nil
+}
+
+// superviseProcess makes root-process completion a first-class Session state
+// signal. stdout EOF remains useful protocol evidence, but it is not a
+// sufficient liveness detector: descendants may inherit the descriptor and
+// keep the reader blocked after the provider root has disappeared.
+func (s *ClaudeSession) superviseProcess() {
+	err := s.transport.wait()
+	s.mu.Lock()
+	s.processExited = true
+	s.processErr = err
+	s.mu.Unlock()
+
+	if err != nil {
+		log.Printf("claude session: root process exited: %v", err)
+	} else {
+		log.Printf("claude session: root process exited")
+	}
+
+	timer := time.NewTimer(claudeExitDrainGrace)
+	defer timer.Stop()
+	select {
+	case <-s.readerDone:
+		return
+	case <-timer.C:
+		// Kill any surviving process-group members and close our read side.
+		// Closing stdout guarantees Scanner unblocks even when an orphan kept a
+		// duplicate write descriptor open. The reader remains the sole owner of
+		// EOF terminal delivery, avoiding a send/close race with buffered events.
+		_ = s.transport.kill()
+		_ = s.transport.stdout.Close()
+	}
 }
 
 // reader is the single goroutine that owns transport.stdout. It parses
@@ -491,11 +560,24 @@ func (s *ClaudeSession) dispatchEvent(env protocolEnvelope, raw []byte) {
 	}
 }
 
+// emitEvent serializes ordinary protocol delivery with every terminal path.
+// Checking channel identity and sending while holding s.mu prevents a reader
+// event selected just before Close/abort/EOF from racing a channel close.
+func (s *ClaudeSession) emitEvent(ch chan Event, ev Event) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.eventsCh != ch {
+		return false
+	}
+	ch <- ev
+	return true
+}
+
 // emitUser parses a `type: user` envelope — claude echoes tool execution results
 // back as a user-role message with tool_result content blocks. Each becomes an
 // EventToolResult so callers can observe the outcome of a tool the runtime ran
 // internally.
-func (s *ClaudeSession) emitUser(ch chan<- Event, raw []byte) {
+func (s *ClaudeSession) emitUser(ch chan Event, raw []byte) {
 	var msg struct {
 		Message struct {
 			Content []json.RawMessage `json:"content"`
@@ -517,7 +599,7 @@ func (s *ClaudeSession) emitUser(ch chan<- Event, raw []byte) {
 			IsError   bool            `json:"is_error"`
 		}
 		if err := json.Unmarshal(part, &tr); err == nil {
-			ch <- EventToolResult{ToolUseID: tr.ToolUseID, Content: toolResultText(tr.Content), IsError: tr.IsError}
+			s.emitEvent(ch, EventToolResult{ToolUseID: tr.ToolUseID, Content: toolResultText(tr.Content), IsError: tr.IsError})
 		}
 	}
 }
@@ -555,7 +637,7 @@ func toolResultText(raw json.RawMessage) string {
 // content_block_stop / message_start etc.) are dropped — the canonical final
 // text still arrives separately as a `type: assistant` event so callers that
 // only care about full turns can ignore deltas safely.
-func (s *ClaudeSession) emitStreamEvent(ch chan<- Event, raw []byte) {
+func (s *ClaudeSession) emitStreamEvent(ch chan Event, raw []byte) {
 	var msg struct {
 		Event struct {
 			Type  string `json:"type"`
@@ -577,7 +659,7 @@ func (s *ClaudeSession) emitStreamEvent(ch chan<- Event, raw []byte) {
 	if msg.Event.Delta.Text == "" {
 		return
 	}
-	ch <- EventTextDelta{Text: msg.Event.Delta.Text}
+	s.emitEvent(ch, EventTextDelta{Text: msg.Event.Delta.Text})
 }
 
 func (s *ClaudeSession) handleInit(env protocolEnvelope) {
@@ -604,7 +686,7 @@ func (s *ClaudeSession) handleInit(env protocolEnvelope) {
 	}
 }
 
-func (s *ClaudeSession) emitAssistant(ch chan<- Event, raw []byte) {
+func (s *ClaudeSession) emitAssistant(ch chan Event, raw []byte) {
 	var msg struct {
 		Message struct {
 			Content []json.RawMessage `json:"content"`
@@ -626,10 +708,10 @@ func (s *ClaudeSession) emitAssistant(ch chan<- Event, raw []byte) {
 				Text string `json:"text"`
 			}
 			if err := json.Unmarshal(part, &p); err == nil {
-				ch <- EventText{Text: p.Text}
+				s.emitEvent(ch, EventText{Text: p.Text})
 			}
 		case "thinking":
-			ch <- EventThinking{}
+			s.emitEvent(ch, EventThinking{})
 		case "tool_use":
 			var p struct {
 				ID    string          `json:"id"`
@@ -638,16 +720,16 @@ func (s *ClaudeSession) emitAssistant(ch chan<- Event, raw []byte) {
 			}
 			if err := json.Unmarshal(part, &p); err == nil {
 				if call, ok := ParseA2ACallTool(p.Name, p.Input); ok {
-					ch <- EventAgentCall{Agent: call.Agent, Task: call.Task}
+					s.emitEvent(ch, EventAgentCall{Agent: call.Agent, Task: call.Task})
 					continue
 				}
-				ch <- EventToolUse{Id: p.ID, Name: p.Name, Input: p.Input}
+				s.emitEvent(ch, EventToolUse{Id: p.ID, Name: p.Name, Input: p.Input})
 			}
 		}
 	}
 }
 
-func (s *ClaudeSession) emitResult(ch chan<- Event, raw []byte) {
+func (s *ClaudeSession) emitResult(ch chan Event, raw []byte) {
 	var r struct {
 		IsError        bool    `json:"is_error"`
 		Result         string  `json:"result"`
@@ -677,6 +759,12 @@ func (s *ClaudeSession) emitResult(ch chan<- Event, raw []byte) {
 		err = s.resumeErr
 	}
 	s.mu.Unlock()
+	s.mu.Lock()
+	if s.eventsCh != ch {
+		s.mu.Unlock()
+		return
+	}
+	s.eventsCh = nil
 	ch <- EventTurnDone{
 		Err: err,
 		Stats: TurnStats{
@@ -686,19 +774,11 @@ func (s *ClaudeSession) emitResult(ch chan<- Event, raw []byte) {
 			DurationMS:   r.DurationMS,
 		},
 	}
-	s.endTurn()
-}
-
-func (s *ClaudeSession) endTurn() {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.eventsCh != nil {
-		close(s.eventsCh)
-		s.eventsCh = nil
-	}
+	close(ch)
 	if s.state == stateInFlight {
 		s.state = stateReady
 	}
+	s.mu.Unlock()
 }
 
 // failTurn aborts an in-flight turn synchronously (used when stdin write
@@ -711,11 +791,11 @@ func (s *ClaudeSession) failTurn(err error) {
 	if s.state == stateInFlight {
 		s.state = stateEvicted
 	}
-	s.mu.Unlock()
 	if ch != nil {
 		ch <- EventTurnDone{Err: err}
 		close(ch)
 	}
+	s.mu.Unlock()
 }
 
 // handleEOF fires when the reader's scanner exits (process died or stdout
@@ -731,11 +811,13 @@ func (s *ClaudeSession) handleEOF(scanErr error) {
 	ch := s.eventsCh
 	s.eventsCh = nil
 	if ch != nil {
-		eofErr := errors.New("claude process exited mid-turn")
-		if scanErr != nil {
-			eofErr = fmt.Errorf("claude process exited mid-turn: %w", scanErr)
+		var cause error
+		if s.processExited && s.processErr != nil {
+			cause = s.processErr
+		} else if scanErr != nil && !errors.Is(scanErr, io.ErrClosedPipe) {
+			cause = scanErr
 		}
-		ch <- EventTurnDone{Err: eofErr}
+		ch <- EventTurnDone{Err: &ClaudeProcessExitError{Cause: cause}}
 		close(ch)
 	}
 	s.state = stateEvicted

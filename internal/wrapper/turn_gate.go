@@ -24,9 +24,10 @@ const defaultTurnQueueDepth = 4
 // turnGate serializes turns for one contextID. Ownership passes to waiters in
 // strict FIFO order; a full queue rejects with ErrTurnInFlight.
 type turnGate struct {
-	mu      sync.Mutex
-	busy    bool
-	waiters []chan struct{}
+	mu       sync.Mutex
+	busy     bool
+	evicting bool
+	waiters  []chan struct{}
 }
 
 func newTurnGate() *turnGate {
@@ -45,6 +46,10 @@ func (g *turnGate) acquire(ctx context.Context, depth int) error {
 		return err
 	}
 	g.mu.Lock()
+	if g.evicting {
+		g.mu.Unlock()
+		return ErrSessionEvicted
+	}
 	if !g.busy {
 		g.busy = true
 		g.mu.Unlock()
@@ -79,6 +84,28 @@ func (g *turnGate) acquire(ctx context.Context, depth int) error {
 	}
 }
 
+// tryBeginEviction atomically verifies that no turn is running or queued and
+// prevents a new turn from entering until the pool installs a replacement
+// Session. It closes the lookup→Stream race that a standalone inFlight check
+// would leave open.
+func (g *turnGate) tryBeginEviction() bool {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.evicting || g.busy || len(g.waiters) > 0 {
+		return false
+	}
+	g.evicting = true
+	return true
+}
+
+// endEviction re-opens the gate after the pool has installed a fresh or
+// resumed provider Session.
+func (g *turnGate) endEviction() {
+	g.mu.Lock()
+	g.evicting = false
+	g.mu.Unlock()
+}
+
 // inFlight reports whether this context currently has a turn running (the gate
 // is held) or waiting (queued behind the running one). Both count as "mid-turn"
 // for scale-to-zero idle detection: the pool must not reap an agent that still
@@ -109,10 +136,11 @@ func (g *turnGate) release() {
 // after the event channel drains — the gate must cover the whole turn, not
 // just its start, because the provider stream is the serial resource.
 type gatedSession struct {
-	inner   Session
-	gate    *turnGate
-	depth   func() int   // live read of the pool's configured queue depth
-	monitor *idleMonitor // scale-to-zero refcount hook; nil when reaping disabled
+	inner          Session
+	gate           *turnGate
+	depth          func() int   // live read of the pool's configured queue depth
+	monitor        *idleMonitor // scale-to-zero refcount hook; nil when reaping disabled
+	onTurnFinished func()       // refreshes the pool's session-idle timestamp
 }
 
 func (g *gatedSession) Stream(ctx context.Context, userText string) (<-chan Event, error) {
@@ -141,11 +169,16 @@ func (g *gatedSession) Stream(ctx context.Context, userText string) (<-chan Even
 	}
 	out := make(chan Event)
 	go func() {
-		defer g.gate.release()
-		if release != nil {
-			defer release()
-		}
 		defer close(out)
+		defer func() {
+			if g.onTurnFinished != nil {
+				g.onTurnFinished()
+			}
+			if release != nil {
+				release()
+			}
+			g.gate.release()
+		}()
 		for ev := range ch {
 			select {
 			case out <- ev:
@@ -166,6 +199,9 @@ func (g *gatedSession) Turn(ctx context.Context, userText string) (string, error
 		return "", err
 	}
 	defer g.gate.release()
+	if g.onTurnFinished != nil {
+		defer g.onTurnFinished()
+	}
 	if g.monitor != nil {
 		release, ok := g.monitor.turnStarted()
 		if !ok {

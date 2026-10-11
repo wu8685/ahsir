@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 )
 
@@ -103,5 +104,24 @@ func TestPreStreamBadGatewayIsNotSafeToReplay(t *testing.T) {
 	err := &PreStreamHTTPError{Agent: "cma-x-v4", StatusCode: http.StatusBadGateway, Detail: "proxy connection reset"}
 	if IsPreStreamRuntimeError(err) {
 		t.Fatal("ambiguous 502 must not be classified as safe to replay")
+	}
+}
+
+func TestChatStream_EOFWithoutTerminalTaskIsFailure(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(w, `data: {"result":{"kind":"status-update","taskId":"task-1","status":{"state":"working","message":{"parts":[{"kind":"text","text":"partial"}]}}}}`+"\n\n")
+		// Return normally: the transport sees a clean EOF, but the A2A
+		// protocol never supplied its required terminal task frame.
+	}))
+	defer srv.Close()
+
+	c := New(srv.URL, "")
+	got, err := c.ChatStream(context.Background(), "cma-x-v1", "ctx-1", "work", nil, nil, nil)
+	if got != "partial" {
+		t.Fatalf("partial text=%q, want partial", got)
+	}
+	if err == nil || !strings.Contains(err.Error(), "before terminal task") {
+		t.Fatalf("err=%v, want truncated-stream failure", err)
 	}
 }

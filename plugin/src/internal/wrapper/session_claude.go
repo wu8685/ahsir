@@ -51,7 +51,9 @@ type ClaudeSession struct {
 	// implementations must be cheap and non-blocking.
 	onSessionIDKnown func(string)
 
-	readerDone chan struct{}
+	readerDone    chan struct{}
+	processExited bool
+	processErr    error
 }
 
 // claudeTransport abstracts the OS-level subprocess IO so tests can inject
@@ -59,9 +61,36 @@ type ClaudeSession struct {
 // process exits; kill terminates it and must be idempotent.
 type claudeTransport struct {
 	stdin  io.WriteCloser
-	stdout io.Reader
+	stdout io.ReadCloser
 	wait   func() error
 	kill   func() error
+}
+
+// claudeExitDrainGrace gives the protocol reader a bounded opportunity to
+// consume a canonical result already buffered in stdout after the root process
+// exits. It is deliberately independent of the business turn timeout: a live
+// process may run indefinitely, while a dead process must always converge.
+const claudeExitDrainGrace = 100 * time.Millisecond
+
+// ClaudeProcessExitError is the typed terminal cause for a provider root
+// process that disappeared before emitting a canonical result. Callers can use
+// errors.As without parsing the bounded human-readable message.
+type ClaudeProcessExitError struct {
+	Cause error
+}
+
+func (e *ClaudeProcessExitError) Error() string {
+	if e != nil && e.Cause != nil {
+		return "claude process exited mid-turn: " + e.Cause.Error()
+	}
+	return "claude process exited mid-turn"
+}
+
+func (e *ClaudeProcessExitError) Unwrap() error {
+	if e == nil {
+		return nil
+	}
+	return e.Cause
 }
 
 // transportFactory builds a fresh claudeTransport. resumeID, when non-empty,
@@ -255,6 +284,7 @@ func newClaudeSessionWithTransport(ctx context.Context, cfg SessionConfig, resum
 		readerDone: make(chan struct{}),
 	}
 	go s.reader()
+	go s.superviseProcess()
 	return s, nil
 }
 
@@ -424,8 +454,41 @@ func (s *ClaudeSession) Close() error {
 	s.state = stateClosed
 	s.mu.Unlock()
 	_ = s.transport.kill()
+	_ = s.transport.stdout.Close()
 	<-s.readerDone
 	return nil
+}
+
+// superviseProcess makes root-process completion a first-class Session state
+// signal. stdout EOF remains useful protocol evidence, but it is not a
+// sufficient liveness detector: descendants may inherit the descriptor and
+// keep the reader blocked after the provider root has disappeared.
+func (s *ClaudeSession) superviseProcess() {
+	err := s.transport.wait()
+	s.mu.Lock()
+	s.processExited = true
+	s.processErr = err
+	s.mu.Unlock()
+
+	if err != nil {
+		log.Printf("claude session: root process exited: %v", err)
+	} else {
+		log.Printf("claude session: root process exited")
+	}
+
+	timer := time.NewTimer(claudeExitDrainGrace)
+	defer timer.Stop()
+	select {
+	case <-s.readerDone:
+		return
+	case <-timer.C:
+		// Kill any surviving process-group members and close our read side.
+		// Closing stdout guarantees Scanner unblocks even when an orphan kept a
+		// duplicate write descriptor open. The reader remains the sole owner of
+		// EOF terminal delivery, avoiding a send/close race with buffered events.
+		_ = s.transport.kill()
+		_ = s.transport.stdout.Close()
+	}
 }
 
 // reader is the single goroutine that owns transport.stdout. It parses
@@ -731,11 +794,13 @@ func (s *ClaudeSession) handleEOF(scanErr error) {
 	ch := s.eventsCh
 	s.eventsCh = nil
 	if ch != nil {
-		eofErr := errors.New("claude process exited mid-turn")
-		if scanErr != nil {
-			eofErr = fmt.Errorf("claude process exited mid-turn: %w", scanErr)
+		var cause error
+		if s.processExited && s.processErr != nil {
+			cause = s.processErr
+		} else if scanErr != nil && !errors.Is(scanErr, io.ErrClosedPipe) {
+			cause = scanErr
 		}
-		ch <- EventTurnDone{Err: eofErr}
+		ch <- EventTurnDone{Err: &ClaudeProcessExitError{Cause: cause}}
 		close(ch)
 	}
 	s.state = stateEvicted

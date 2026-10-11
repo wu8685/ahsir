@@ -54,8 +54,9 @@ type fakeClaudeTransport struct {
 	stdin   *stdinSink
 	tr      *claudeTransport
 
-	once   sync.Once
-	waitCh chan struct{}
+	killOnce sync.Once
+	exitOnce sync.Once
+	waitCh   chan struct{}
 }
 
 func newFakeClaudeTransport() *fakeClaudeTransport {
@@ -71,11 +72,11 @@ func newFakeClaudeTransport() *fakeClaudeTransport {
 		stdout: stdoutR,
 		wait:   func() error { <-f.waitCh; return nil },
 		kill: func() error {
-			f.once.Do(func() {
+			f.killOnce.Do(func() {
 				_ = sink.Close()
 				_ = stdoutW.Close()
 				_ = stdoutR.Close()
-				close(f.waitCh)
+				f.signalExit()
 			})
 			return nil
 		},
@@ -95,6 +96,13 @@ func (f *fakeClaudeTransport) writeLine(t *testing.T, line string) {
 
 func (f *fakeClaudeTransport) stdinBytes() string {
 	return f.stdin.String()
+}
+
+// signalExit models the provider root process exiting while an inherited
+// stdout descriptor remains open. This is the production failure mode that
+// must not leave a turn blocked forever waiting for EOF.
+func (f *fakeClaudeTransport) signalExit() {
+	f.exitOnce.Do(func() { close(f.waitCh) })
 }
 
 func (f *fakeClaudeTransport) close() { _ = f.tr.kill() }
@@ -893,6 +901,122 @@ func TestClaudeSession_ZeroTimeoutNeverFires(t *testing.T) {
 	}
 	if !s.IsHealthy() {
 		t.Error("session must stay healthy after a clean turn")
+	}
+}
+
+func TestClaudeSession_ProcessExitWithoutStdoutEOF_FailsTurn(t *testing.T) {
+	f := newFakeClaudeTransport()
+	defer f.close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	s, err := newClaudeSessionWithTransport(ctx, SessionConfig{}, "", f.tr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+
+	ch, err := s.Stream(ctx, "provider disappears")
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.signalExit() // deliberately leave stdout open
+
+	select {
+	case ev, ok := <-ch:
+		if !ok {
+			t.Fatal("turn channel closed without EventTurnDone")
+		}
+		done, ok := ev.(EventTurnDone)
+		if !ok || done.Err == nil || !strings.Contains(done.Err.Error(), "process exited") {
+			t.Fatalf("got %#v, want process-exited EventTurnDone", ev)
+		}
+		var exitErr *ClaudeProcessExitError
+		if !errors.As(done.Err, &exitErr) {
+			t.Fatalf("error type=%T, want *ClaudeProcessExitError", done.Err)
+		}
+	case <-time.After(750 * time.Millisecond):
+		t.Fatal("provider process exited but turn remained blocked on stdout EOF")
+	}
+	if s.IsHealthy() {
+		t.Fatal("process-exited session must be evicted")
+	}
+}
+
+func TestClaudeSession_CloseInFlightTerminatesTurn(t *testing.T) {
+	f := newFakeClaudeTransport()
+	defer f.close()
+
+	s, err := newClaudeSessionWithTransport(context.Background(), SessionConfig{}, "", f.tr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ch, err := s.Stream(context.Background(), "still running")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	select {
+	case ev, ok := <-ch:
+		if !ok {
+			t.Fatal("turn channel closed without EventTurnDone")
+		}
+		done, ok := ev.(EventTurnDone)
+		if !ok || !errors.Is(done.Err, ErrSessionClosed) {
+			t.Fatalf("got %#v, want EventTurnDone wrapping ErrSessionClosed", ev)
+		}
+		if _, ok := <-ch; ok {
+			t.Fatal("turn channel remained open after terminal event")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Close left the in-flight turn blocked")
+	}
+}
+
+func TestClaudeSession_ProcessExitDrainsCanonicalResult(t *testing.T) {
+	f := newFakeClaudeTransport()
+	defer f.close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	s, err := newClaudeSessionWithTransport(ctx, SessionConfig{}, "", f.tr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+
+	ch, err := s.Stream(ctx, "finish at exit")
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.signalExit()
+	go func() {
+		time.Sleep(10 * time.Millisecond)
+		f.writeLine(t, resultOK("sess-tail"))
+	}()
+
+	var terminals int
+	var doneErr error
+	for ev := range ch {
+		if done, ok := ev.(EventTurnDone); ok {
+			terminals++
+			doneErr = done.Err
+		}
+	}
+	if terminals != 1 || doneErr != nil {
+		t.Fatalf("terminal count=%d err=%v, want one successful terminal", terminals, doneErr)
+	}
+	// The provider root is gone even though its final result was valid. The
+	// completed turn succeeds, but the process-backed Session cannot be reused.
+	deadline := time.Now().Add(time.Second)
+	for s.IsHealthy() && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if s.IsHealthy() {
+		t.Fatal("exited provider must eventually evict the otherwise successful session")
 	}
 }
 
