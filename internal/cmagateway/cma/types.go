@@ -279,6 +279,12 @@ const (
 	EvtSessionStatusRescheduled     = "session.status_rescheduled"
 	EvtSessionError                 = "session.error"
 	EvtSessionDeleted               = "session.deleted"
+	// EvtSessionLifecycle carries ahsir-owned Agent Session lifecycle
+	// transitions (issue #43): session.initializing/initialized/
+	// initialization_failed, turn.running/soft_deadline/finalizing/finalized/
+	// finalization_failed, and the terminal turn.outcome with its typed Kind.
+	// Additive: existing clients that don't know the type can ignore it.
+	EvtSessionLifecycle = "session.lifecycle"
 )
 
 // Outcome read-model states while an outcome is active, and terminal results.
@@ -358,6 +364,29 @@ type OutcomeEvaluation struct {
 	CompletedAt   *time.Time         `json:"completed_at,omitempty"`
 }
 
+// Terminal lifecycle outcome kinds carried on session.lifecycle
+// (event=turn.outcome). Clients classify a turn by Kind, never by parsing
+// human-readable error strings.
+const (
+	LifecycleKindCompleted             = "completed"
+	LifecycleKindRuntimeTimeout        = "runtime_timeout"
+	LifecycleKindFacadeTimeout         = "facade_timeout"
+	LifecycleKindCanceled              = "canceled"
+	LifecycleKindProviderError         = "provider_error"
+	LifecycleKindFinalizeTimeout       = "finalize_timeout"
+	LifecycleKindInitializationFailure = "initialization_failure"
+)
+
+// LifecycleInfo rides on session.lifecycle events.
+type LifecycleInfo struct {
+	Event   string `json:"event"`
+	TurnID  string `json:"turn_id,omitempty"`
+	Phase   string `json:"phase,omitempty"`
+	Kind    string `json:"kind,omitempty"`
+	Trigger string `json:"trigger,omitempty"`
+	Detail  string `json:"detail,omitempty"`
+}
+
 // StopReason rides on session.status_idle. type ∈ end_turn | requires_action |
 // retries_exhausted.
 type StopReason struct {
@@ -430,6 +459,9 @@ type Event struct {
 	Result                   string      `json:"result,omitempty"`
 	Explanation              string      `json:"explanation,omitempty"`
 	Usage                    *ModelUsage `json:"usage,omitempty"`
+
+	// session.lifecycle: the ahsir-owned lifecycle transition (issue #43).
+	Lifecycle *LifecycleInfo `json:"lifecycle,omitempty"`
 }
 
 // SendEventsRequest is the POST /v1/sessions/{id}/events body.

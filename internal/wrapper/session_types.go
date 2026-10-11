@@ -129,6 +129,23 @@ type EventTurnDone struct {
 	Stats TurnStats
 }
 
+// EventLifecycle is emitted by the lifecycle controller (issue #43) into a
+// turn's event stream whenever an ahsir-owned lifecycle transition happens:
+// session.initializing / session.initialized / session.initialization_failed,
+// turn.running / turn.soft_deadline / turn.finalizing / turn.finalized /
+// turn.finalization_failed, and the terminal turn.outcome. It marks lifecycle
+// turns as system-owned work (never ordinary user turns) and carries the
+// machine-readable terminal Kind so clients never parse error strings.
+// Detail is bounded and credential-safe (no env values, headers, or secrets).
+type EventLifecycle struct {
+	Event   string // one of the Evt* lifecycle event types
+	TurnID  string // stable id of the business/lifecycle turn this concerns
+	Phase   string // lifecycle phase after this transition
+	Kind    string // terminal cause; set on EvtTurnOutcome
+	Trigger string // finalization trigger; set on turn.finalizing
+	Detail  string // bounded, sanitized free-text detail
+}
+
 // TurnStats reports per-turn cost/usage when available. Zero values are fine
 // for backends that don't surface these (e.g. OneshotSession).
 type TurnStats struct {
@@ -145,6 +162,7 @@ func (EventThinking) isEvent()   {}
 func (EventToolResult) isEvent() {}
 func (EventAgentCall) isEvent()  {}
 func (EventTurnDone) isEvent()   {}
+func (EventLifecycle) isEvent()  {}
 
 // ErrTurnInFlight is returned by Session.Stream when a turn is already
 // running on the same session (one contextId = one session = one physically

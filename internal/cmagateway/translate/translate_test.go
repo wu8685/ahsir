@@ -270,3 +270,46 @@ func TestInstances(t *testing.T) {
 		})
 	}
 }
+
+func TestAgentToCard_LifecycleMetadata(t *testing.T) {
+	defaults := RuntimeDefaults{Provider: "anthropic", BaseURL: "https://x", APIKey: "${K}"}
+
+	t.Run("absent metadata leaves lifecycle disabled", func(t *testing.T) {
+		card := mustAgentCard(t, baseAgent(), defaults)
+		if card.Lifecycle.Initialize.Enabled || card.Lifecycle.Finalize.Enabled {
+			t.Fatalf("lifecycle must default to disabled: %+v", card.Lifecycle)
+		}
+	})
+
+	t.Run("metadata maps to lifecycle card block", func(t *testing.T) {
+		a := baseAgent()
+		a.Metadata["lifecycle_initialize_enabled"] = "true"
+		a.Metadata["lifecycle_initialize_timeout"] = "90s"
+		a.Metadata["lifecycle_initialize_prompt"] = "read the guidance"
+		a.Metadata["lifecycle_initialize_on_failure"] = "degraded"
+		a.Metadata["lifecycle_finalize_enabled"] = "true"
+		a.Metadata["lifecycle_finalize_work_timeout"] = "20m"
+		a.Metadata["lifecycle_finalize_grace_timeout"] = "2m"
+		a.Metadata["lifecycle_finalize_prompt"] = "deliver now"
+		card := mustAgentCard(t, a, defaults)
+		lc := card.Lifecycle
+		if !lc.Initialize.Enabled || lc.Initialize.Timeout != "90s" ||
+			lc.Initialize.Prompt != "read the guidance" || lc.Initialize.OnFailure != "degraded" {
+			t.Fatalf("initialize mapping wrong: %+v", lc.Initialize)
+		}
+		if !lc.Finalize.Enabled || lc.Finalize.WorkTimeout != "20m" ||
+			lc.Finalize.GraceTimeout != "2m" || lc.Finalize.Prompt != "deliver now" {
+			t.Fatalf("finalize mapping wrong: %+v", lc.Finalize)
+		}
+	})
+
+	t.Run("enabled=false metadata stays disabled", func(t *testing.T) {
+		a := baseAgent()
+		a.Metadata["lifecycle_initialize_enabled"] = "false"
+		a.Metadata["lifecycle_initialize_prompt"] = "should be ignored"
+		card := mustAgentCard(t, a, defaults)
+		if card.Lifecycle.Initialize.Enabled || card.Lifecycle.Initialize.Prompt != "" {
+			t.Fatalf("disabled lifecycle block must not leak config: %+v", card.Lifecycle.Initialize)
+		}
+	})
+}

@@ -21,6 +21,32 @@ type AgentCard struct {
 	Streaming   StreamingConfig  `json:"streaming"`
 	Pool        PoolConfig       `json:"pool,omitempty"`
 	MCP         MCPConfig        `json:"mcp,omitempty"`
+	// Lifecycle mirrors ahsir's wrapper.LifecycleConfig (issue #43): the
+	// opt-in Agent Session lifecycle — one-time initialization plus the
+	// two-stage work/grace turn deadline. Omitted means legacy behaviour.
+	Lifecycle LifecycleConfig `json:"lifecycle,omitempty"`
+}
+
+// LifecycleConfig mirrors ahsir's wrapper.LifecycleConfig, with JSON tags
+// equal to ahsir's YAML tags. The facade populates it from agent metadata
+// (see translate); ahsir owns validation.
+type LifecycleConfig struct {
+	Initialize LifecycleInitializeConfig `json:"initialize,omitempty"`
+	Finalize   LifecycleFinalizeConfig   `json:"finalize,omitempty"`
+}
+
+type LifecycleInitializeConfig struct {
+	Enabled   bool   `json:"enabled,omitempty"`
+	Timeout   string `json:"timeout,omitempty"`
+	Prompt    string `json:"prompt,omitempty"`
+	OnFailure string `json:"on_failure,omitempty"`
+}
+
+type LifecycleFinalizeConfig struct {
+	Enabled      bool   `json:"enabled,omitempty"`
+	WorkTimeout  string `json:"work_timeout,omitempty"`
+	GraceTimeout string `json:"grace_timeout,omitempty"`
+	Prompt       string `json:"prompt,omitempty"`
 }
 
 type SkillConfig struct {

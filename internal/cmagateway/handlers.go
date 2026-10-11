@@ -750,6 +750,14 @@ func (s *Server) executeTurnCore(parent context.Context, rec *store.SessionRecor
 		s.emitMessageIfAny(rec, reply)
 		return turnResult{reply: reply, canceled: true}, nil
 	case err != nil:
+		// Timeout precedence (issue #43): the facade turn timeout is the
+		// outermost bound. When IT fired (rather than the agent's own
+		// work/grace deadlines, which self-report over the stream), record
+		// the typed facade_timeout outcome before terminating so clients
+		// never classify a turn by parsing session.error strings.
+		if ctx.Err() == context.DeadlineExceeded {
+			s.emitLifecycleTerminal(rec, cma.LifecycleKindFacadeTimeout, "facade turn timeout")
+		}
 		err = fmt.Errorf("cma agent id=%s version=%d scheduler=%q: dispatch failed: %w; reconciliation=%s",
 			agent.ID, agent.Version, rec.AhsirName, err, reconcileResult)
 		s.terminateTurn(rec, err)
@@ -854,7 +862,34 @@ func (s *Server) emitObservability(rec *store.SessionRecord, se ahsir.StreamEven
 			ev.ModelUsage.OutputTokens = se.Usage.OutputTokens
 		}
 		s.emit(rec, ev)
+	case "lifecycle":
+		// ahsir-owned Session lifecycle transition (issue #43): relayed
+		// verbatim as a typed session.lifecycle event so clients can track
+		// initialize/finalize phases and terminal outcomes without parsing
+		// error strings. Detail is bounded + sanitized by the agent side.
+		if se.Lifecycle == nil {
+			return
+		}
+		ev := newEvent(cma.EvtSessionLifecycle)
+		ev.Lifecycle = &cma.LifecycleInfo{
+			Event:   se.Lifecycle.Event,
+			TurnID:  se.Lifecycle.TurnID,
+			Phase:   se.Lifecycle.Phase,
+			Kind:    se.Lifecycle.Kind,
+			Trigger: se.Lifecycle.Trigger,
+			Detail:  se.Lifecycle.Detail,
+		}
+		s.emit(rec, ev)
 	}
+}
+
+// emitLifecycleTerminal records a facade-observed terminal lifecycle outcome
+// (issue #43) for turns that end without the agent runtime emitting its own
+// typed outcome — today: the facade's own turn deadline winning the race.
+func (s *Server) emitLifecycleTerminal(rec *store.SessionRecord, kind, detail string) {
+	ev := newEvent(cma.EvtSessionLifecycle)
+	ev.Lifecycle = &cma.LifecycleInfo{Event: "turn.outcome", Kind: kind, Detail: detail}
+	s.emit(rec, ev)
 }
 
 // splitMCPToolName recognizes claude's MCP tool naming, mcp__<server>__<tool>,
