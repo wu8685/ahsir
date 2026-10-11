@@ -12,6 +12,12 @@ const (
 	PrefixEnvironment = "env"
 	PrefixSession     = "sesn"
 	PrefixEvent       = "sevt"
+	// PrefixOutcome identifies a defined outcome ("outc_…", per the CMA docs).
+	PrefixOutcome = "outc"
+	// PrefixGraderContext identifies a one-shot grader conversation. Every
+	// grading call uses a fresh one so the grader's context window holds only
+	// the goal, rubric, and deliverable under evaluation.
+	PrefixGraderContext = "gctx"
 )
 
 var enc = base32.NewEncoding("abcdefghijklmnopqrstuvwxyz234567").WithPadding(base32.NoPadding)

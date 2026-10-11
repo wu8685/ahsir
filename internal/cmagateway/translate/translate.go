@@ -39,6 +39,14 @@ func AhsirAgentName(agentID string, version int64) string {
 	return fmt.Sprintf("cma-%s-v%d", id, version)
 }
 
+// AhsirGraderName derives the dedicated grader agent for one (agentID,
+// version) — an ahsir agent distinct from the executor so outcome grading runs
+// in its own process and context window (issue #36).
+func AhsirGraderName(agentID string, version int64) string {
+	id := strings.TrimPrefix(agentID, cma.PrefixAgent+"_")
+	return fmt.Sprintf("cma-grader-%s-v%d", id, version)
+}
+
 // AgentToCard renders a versioned CMA agent into an ahsir card.
 //
 //   - model        -> runtime.model

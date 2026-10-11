@@ -77,13 +77,13 @@ type ContentBlock struct {
 // Agent is a persisted, versioned config. model/system/tools live here, never
 // on a session.
 type Agent struct {
-	Type        string            `json:"type"` // "agent"
-	ID          string            `json:"id"`
-	Version     int64             `json:"version"`
-	Name        string            `json:"name"`
-	Model       ModelConfig       `json:"model"`
-	System      string            `json:"system,omitempty"`
-	Description string            `json:"description,omitempty"`
+	Type        string      `json:"type"` // "agent"
+	ID          string      `json:"id"`
+	Version     int64       `json:"version"`
+	Name        string      `json:"name"`
+	Model       ModelConfig `json:"model"`
+	System      string      `json:"system,omitempty"`
+	Description string      `json:"description,omitempty"`
 	// These four are REQUIRED in the SDK response model — always emit [] / {},
 	// never null or absent (no omitempty; handlers normalize nil -> empty).
 	Tools      []ToolDef         `json:"tools"`
@@ -202,20 +202,25 @@ type SessionUsage struct{}
 
 // Session is a stateful interaction with an agent.
 type Session struct {
-	Type          string            `json:"type"` // "session"
-	ID            string            `json:"id"`
-	Title         string            `json:"title,omitempty"`
-	Status        string            `json:"status"`
-	EnvironmentID string            `json:"environment_id"`
-	Agent         SessionAgent      `json:"agent"`
-	Resources     []any             `json:"resources"`
-	VaultIDs      []string          `json:"vault_ids"`
-	Stats         SessionStats      `json:"stats"`
-	Usage         SessionUsage      `json:"usage"`
-	Metadata      map[string]string `json:"metadata"`
-	CreatedAt     time.Time         `json:"created_at"`
-	UpdatedAt     time.Time         `json:"updated_at"`
-	ArchivedAt    *time.Time        `json:"archived_at"`
+	Type          string       `json:"type"` // "session"
+	ID            string       `json:"id"`
+	Title         string       `json:"title,omitempty"`
+	Status        string       `json:"status"`
+	EnvironmentID string       `json:"environment_id"`
+	Agent         SessionAgent `json:"agent"`
+	Resources     []any        `json:"resources"`
+	VaultIDs      []string     `json:"vault_ids"`
+	Stats         SessionStats `json:"stats"`
+	Usage         SessionUsage `json:"usage"`
+	// OutcomeEvaluations is the outcome read model (issue #36): one entry per
+	// outcome defined on this session, oldest first. An active entry reports
+	// result pending/running/evaluating; a completed one reports a terminal
+	// result. Mutations are copy-on-write under the session record lock.
+	OutcomeEvaluations []OutcomeEvaluation `json:"outcome_evaluations,omitempty"`
+	Metadata           map[string]string   `json:"metadata"`
+	CreatedAt          time.Time           `json:"created_at"`
+	UpdatedAt          time.Time           `json:"updated_at"`
+	ArchivedAt         *time.Time          `json:"archived_at"`
 }
 
 // SessionCreateRequest is the POST /v1/sessions body.
@@ -252,25 +257,106 @@ const (
 	EvtUserInterrupt        = "user.interrupt"
 	EvtUserToolConfirmation = "user.tool_confirmation"
 	EvtUserCustomToolResult = "user.custom_tool_result"
+	EvtUserDefineOutcome    = "user.define_outcome"
 )
 
 // Outbound event types (session → client) emitted on the stream.
 const (
-	EvtAgentMessage           = "agent.message"
-	EvtAgentThinking          = "agent.thinking"
-	EvtAgentToolUse           = "agent.tool_use"
-	EvtAgentMCPToolUse        = "agent.mcp_tool_use"
-	EvtAgentToolResult        = "agent.tool_result"
-	EvtAgentMCPToolResult     = "agent.mcp_tool_result"
-	EvtSpanModelRequestStart  = "span.model_request_start"
-	EvtSpanModelRequestEnd    = "span.model_request_end"
-	EvtSessionStatusRunning     = "session.status_running"
-	EvtSessionStatusIdle        = "session.status_idle"
-	EvtSessionStatusTerminate   = "session.status_terminated"
-	EvtSessionStatusRescheduled = "session.status_rescheduled"
-	EvtSessionError             = "session.error"
-	EvtSessionDeleted           = "session.deleted"
+	EvtAgentMessage                 = "agent.message"
+	EvtAgentThinking                = "agent.thinking"
+	EvtAgentToolUse                 = "agent.tool_use"
+	EvtAgentMCPToolUse              = "agent.mcp_tool_use"
+	EvtAgentToolResult              = "agent.tool_result"
+	EvtAgentMCPToolResult           = "agent.mcp_tool_result"
+	EvtSpanModelRequestStart        = "span.model_request_start"
+	EvtSpanModelRequestEnd          = "span.model_request_end"
+	EvtSpanOutcomeEvaluationStart   = "span.outcome_evaluation_start"
+	EvtSpanOutcomeEvaluationOngoing = "span.outcome_evaluation_ongoing"
+	EvtSpanOutcomeEvaluationEnd     = "span.outcome_evaluation_end"
+	EvtSessionStatusRunning         = "session.status_running"
+	EvtSessionStatusIdle            = "session.status_idle"
+	EvtSessionStatusTerminate       = "session.status_terminated"
+	EvtSessionStatusRescheduled     = "session.status_rescheduled"
+	EvtSessionError                 = "session.error"
+	EvtSessionDeleted               = "session.deleted"
 )
+
+// Outcome read-model states while an outcome is active, and terminal results.
+// The docs reuse `result` for both: pending/running/evaluating until the
+// outcome completes, then a terminal result.
+const (
+	OutcomeStatePending    = "pending"
+	OutcomeStateRunning    = "running"
+	OutcomeStateEvaluating = "evaluating"
+
+	OutcomeResultSatisfied            = "satisfied"
+	OutcomeResultNeedsRevision        = "needs_revision"
+	OutcomeResultMaxIterationsReached = "max_iterations_reached"
+	OutcomeResultFailed               = "failed"
+	OutcomeResultInterrupted          = "interrupted"
+)
+
+// Grader verdicts (subset of the end-event results an evaluation can produce).
+const (
+	OutcomeVerdictSatisfied     = "satisfied"
+	OutcomeVerdictNeedsRevision = "needs_revision"
+)
+
+// OutcomeTerminal reports whether an outcome read-model result is final, i.e.
+// the session may accept a new user.define_outcome.
+func OutcomeTerminal(result string) bool {
+	switch result {
+	case OutcomeResultSatisfied, OutcomeResultMaxIterationsReached, OutcomeResultFailed, OutcomeResultInterrupted:
+		return true
+	}
+	return false
+}
+
+// Rubric is the rubric reference on user.define_outcome. This facade supports
+// inline text only; the file variant requires the Files API, which is a
+// documented non-goal, so type "file" is rejected with 400.
+type Rubric struct {
+	Type    string `json:"type"` // "text" | "file"
+	Content string `json:"content,omitempty"`
+	FileID  string `json:"file_id,omitempty"`
+}
+
+// OutcomeCriterion is one per-rubric-criterion grading result. Structured
+// criteria live on the session read model; the event stream carries only the
+// free-text explanation (per the docs' end-event shape).
+type OutcomeCriterion struct {
+	Criterion string `json:"criterion"`
+	Passed    bool   `json:"passed"`
+	Feedback  string `json:"feedback,omitempty"`
+}
+
+// OutcomeGrade is the sanitized, structured result of one grader evaluation.
+// It contains only fields that are safe to show the user — the grader's raw
+// reply (and any hidden reasoning) never reaches the wire.
+type OutcomeGrade struct {
+	Verdict     string             `json:"verdict"` // satisfied | needs_revision
+	Criteria    []OutcomeCriterion `json:"criteria"`
+	Explanation string             `json:"explanation,omitempty"`
+}
+
+// OutcomeEvaluation is one outcome's entry in the session read model
+// (session.outcome_evaluations). Chained outcomes accumulate, oldest first.
+// deliverable is the v1 readable artifact: the final executor reply
+// (size-capped); criteria+explanation form the structured grader summary.
+type OutcomeEvaluation struct {
+	OutcomeID     string             `json:"outcome_id"`
+	Description   string             `json:"description"`
+	Rubric        string             `json:"rubric"`
+	MaxIterations int                `json:"max_iterations"`
+	Iteration     int                `json:"iteration"`
+	Result        string             `json:"result"`
+	Explanation   string             `json:"explanation,omitempty"`
+	Criteria      []OutcomeCriterion `json:"criteria,omitempty"`
+	Deliverable   string             `json:"deliverable,omitempty"`
+	CreatedAt     time.Time          `json:"created_at"`
+	UpdatedAt     time.Time          `json:"updated_at"`
+	CompletedAt   *time.Time         `json:"completed_at,omitempty"`
+}
 
 // StopReason rides on session.status_idle. type ∈ end_turn | requires_action |
 // retries_exhausted.
@@ -327,6 +413,23 @@ type Event struct {
 	// span.model_request_end: links back to the start span + usage.
 	ModelRequestStartID string      `json:"model_request_start_id,omitempty"`
 	ModelUsage          *ModelUsage `json:"model_usage,omitempty"`
+
+	// user.define_outcome payload (inbound; echoed back with the generated
+	// outcome_id and the resolved max_iterations).
+	Description   string  `json:"description,omitempty"`
+	Rubric        *Rubric `json:"rubric,omitempty"`
+	MaxIterations int     `json:"max_iterations,omitempty"`
+
+	// span.outcome_evaluation_* payload. Iteration is a pointer so the
+	// 0-indexed first iteration serializes as 0 rather than being omitted;
+	// OutcomeEvaluationStartID is a pointer so an interrupt before any
+	// evaluation can serialize the docs-mandated empty string.
+	OutcomeID                string      `json:"outcome_id,omitempty"`
+	OutcomeEvaluationStartID *string     `json:"outcome_evaluation_start_id,omitempty"`
+	Iteration                *int        `json:"iteration,omitempty"`
+	Result                   string      `json:"result,omitempty"`
+	Explanation              string      `json:"explanation,omitempty"`
+	Usage                    *ModelUsage `json:"usage,omitempty"`
 }
 
 // SendEventsRequest is the POST /v1/sessions/{id}/events body.

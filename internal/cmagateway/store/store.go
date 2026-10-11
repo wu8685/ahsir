@@ -4,7 +4,9 @@
 package store
 
 import (
+	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"sync"
 	"time"
@@ -35,6 +37,11 @@ type SessionRecord struct {
 	// (never persisted) — it's only actionable within the running process and
 	// backs user.interrupt → tasks/cancel.
 	inFlightTaskID string
+
+	// outcomeCancel cancels the active outcome loop (user.interrupt while an
+	// outcome is running). Transient like inFlightTaskID: after a restart the
+	// recovery path marks any non-terminal outcome failed instead.
+	outcomeCancel context.CancelFunc
 
 	// Serial turn executor: a session's turns must run strictly FIFO and never
 	// interleave (one ahsir agent + one contextId per session). EnqueueTurn
@@ -162,6 +169,9 @@ func (s *Store) saveLocked() error {
 	for id, rec := range s.sessions {
 		rec.mu.Lock()
 		sessCopy := *rec.Session // shallow copy; nested maps/slices are immutable post-create
+		// Outcome entries are copy-on-write; still copy the slice so the JSON
+		// encoder is immune even to a caller that mutates an entry in place.
+		sessCopy.OutcomeEvaluations = append([]cma.OutcomeEvaluation(nil), rec.Session.OutcomeEvaluations...)
 		evCopy := make([]cma.Event, len(rec.Events))
 		copy(evCopy, rec.Events)
 		rec.mu.Unlock()
@@ -396,6 +406,94 @@ func (s *Store) SaveSnapshot() error {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return s.saveLocked()
+}
+
+// Path returns the state file path (used by restart-recovery tests).
+func (s *Store) Path() string { return s.path }
+
+// ----- Outcomes (issue #36) -----
+
+// BeginOutcome atomically appends a new pending outcome to the session when no
+// outcome is active (pending/running/evaluating), and persists. It returns
+// false (without persisting) when the latest outcome is still active — the
+// caller maps that to a 409.
+func (s *Store) BeginOutcome(rec *SessionRecord, oc cma.OutcomeEvaluation) (bool, error) {
+	rec.mu.Lock()
+	if n := len(rec.Session.OutcomeEvaluations); n > 0 && !cma.OutcomeTerminal(rec.Session.OutcomeEvaluations[n-1].Result) {
+		rec.mu.Unlock()
+		return false, nil
+	}
+	// Copy-on-write: the snapshot in saveLocked shares nested slices with the
+	// live session, so never mutate an existing slice in place — replace it.
+	evals := append(append([]cma.OutcomeEvaluation(nil), rec.Session.OutcomeEvaluations...), oc)
+	rec.Session.OutcomeEvaluations = evals
+	rec.Session.UpdatedAt = time.Now().UTC()
+	rec.mu.Unlock()
+	return true, s.persist()
+}
+
+// UpdateOutcome applies mutate to a fresh copy of the named outcome entry and
+// persists. mutate must assign new slices rather than editing shared ones.
+func (s *Store) UpdateOutcome(rec *SessionRecord, outcomeID string, mutate func(*cma.OutcomeEvaluation)) error {
+	rec.mu.Lock()
+	idx := -1
+	for i := range rec.Session.OutcomeEvaluations {
+		if rec.Session.OutcomeEvaluations[i].OutcomeID == outcomeID {
+			idx = i // last occurrence wins
+		}
+	}
+	if idx < 0 {
+		rec.mu.Unlock()
+		return fmt.Errorf("outcome %q not found on session %q", outcomeID, rec.Session.ID)
+	}
+	cp := append([]cma.OutcomeEvaluation(nil), rec.Session.OutcomeEvaluations...)
+	mutate(&cp[idx])
+	now := time.Now().UTC()
+	cp[idx].UpdatedAt = now
+	rec.Session.OutcomeEvaluations = cp
+	rec.Session.UpdatedAt = now
+	rec.mu.Unlock()
+	return s.persist()
+}
+
+// OutcomeEvaluations returns a copy of the session's outcome read model.
+func (r *SessionRecord) OutcomeEvaluations() []cma.OutcomeEvaluation {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	out := make([]cma.OutcomeEvaluation, len(r.Session.OutcomeEvaluations))
+	copy(out, r.Session.OutcomeEvaluations)
+	return out
+}
+
+// SessionSnapshot returns a copy of the session struct safe to marshal without
+// holding the record lock (the outcome loop replaces OutcomeEvaluations
+// concurrently with GET /v1/sessions/{id}).
+func (r *SessionRecord) SessionSnapshot() *cma.Session {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	cp := *r.Session
+	cp.OutcomeEvaluations = append([]cma.OutcomeEvaluation(nil), r.Session.OutcomeEvaluations...)
+	return &cp
+}
+
+// SetOutcomeCancel records (or clears, with nil) the cancel func of the active
+// outcome loop.
+func (r *SessionRecord) SetOutcomeCancel(f context.CancelFunc) {
+	r.mu.Lock()
+	r.outcomeCancel = f
+	r.mu.Unlock()
+}
+
+// CancelOutcome cancels the active outcome loop, if any. The cancel func runs
+// after the record lock is released so cancellation callbacks never deadlock
+// against record state.
+func (r *SessionRecord) CancelOutcome() {
+	r.mu.Lock()
+	f := r.outcomeCancel
+	r.mu.Unlock()
+	if f != nil {
+		f()
+	}
 }
 
 // AppendEvent appends an event to a session's log, fans it out to live

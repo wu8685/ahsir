@@ -19,15 +19,25 @@ type Server struct {
 	store *store.Store
 	ahsir *ahsir.Client
 	rt    translate.RuntimeDefaults
+	// graderFor builds the outcome grader for a session's agent (issue #36).
+	// Tests substitute a fake; production uses the ahsir-backed grader.
+	graderFor func(agent *cma.Agent) OutcomeGrader
 }
 
 func New(cfg Config, st *store.Store, ac *ahsir.Client) *Server {
-	return &Server{
+	s := &Server{
 		cfg:   cfg,
 		store: st,
 		ahsir: ac,
 		rt:    translate.RuntimeDefaults{Provider: cfg.RuntimeProvider, BaseURL: cfg.RuntimeBaseURL, APIKey: cfg.RuntimeAPIKey},
 	}
+	s.graderFor = func(agent *cma.Agent) OutcomeGrader {
+		return newAhsirGrader(ac, s.rt, agent, cfg.GraderTimeout)
+	}
+	// A restart must not silently drop or, worse, optimistically complete an
+	// outcome that was mid-flight: mark every active outcome failed.
+	s.recoverOutcomes()
+	return s
 }
 
 // Handler builds the routed, authenticated http.Handler for the CMA surface.
