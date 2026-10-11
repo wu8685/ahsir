@@ -5,6 +5,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"strconv"
 	"time"
 
 	"github.com/wu8685/ahsir/internal/cmagateway"
@@ -45,6 +46,13 @@ func startCMAFacade(listen, schedulerURL, adminToken, statePath string) error {
 		// Non-positive lets the handler pick its own default; a big value keeps
 		// long agent turns from being cut short (matches the cma-service plist).
 		TurnTimeout: cmaDurEnv("CMA_TURN_TIMEOUT", 720*time.Hour),
+		// Outcome-driven sessions (issue #36): iteration cap, per-grading-call
+		// timeout, and evaluation heartbeat cadence. 0 selects the documented
+		// default — no knob silently degrades to a short timeout, and true
+		// infinite waits are not supported (see docs/cma-api.md).
+		OutcomeMaxIterationsCap:  cmaIntEnv("CMA_OUTCOME_MAX_ITERATIONS", 20),
+		GraderTimeout:            cmaDurEnv("CMA_GRADER_TIMEOUT", 5*time.Minute),
+		OutcomeHeartbeatInterval: cmaDurEnv("CMA_OUTCOME_HEARTBEAT_INTERVAL", 15*time.Second),
 	}
 	srv := cmagateway.New(cfg, st, ac)
 	log.Printf("CMA facade listening on %s (scheduler=%s, state=%s)", listen, schedulerURL, statePath)
@@ -67,6 +75,15 @@ func cmaDurEnv(key string, def time.Duration) time.Duration {
 	if v := os.Getenv(key); v != "" {
 		if d, err := time.ParseDuration(v); err == nil {
 			return d
+		}
+	}
+	return def
+}
+
+func cmaIntEnv(key string, def int) int {
+	if v := os.Getenv(key); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			return n
 		}
 	}
 	return def

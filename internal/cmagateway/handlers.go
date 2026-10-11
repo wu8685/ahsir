@@ -345,7 +345,9 @@ func (s *Server) getSession(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusNotFound, "not_found_error", "session not found")
 		return
 	}
-	writeJSON(w, http.StatusOK, rec.Session)
+	// Read a locked snapshot: the outcome loop replaces OutcomeEvaluations
+	// concurrently with this handler.
+	writeJSON(w, http.StatusOK, rec.SessionSnapshot())
 }
 
 func (s *Server) listSessions(w http.ResponseWriter, r *http.Request) {
@@ -383,22 +385,25 @@ func (s *Server) archiveSession(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusNotFound, "not_found_error", "session not found")
 		return
 	}
+	rec.CancelOutcome() // stop any active outcome loop before reclaiming
 	_ = s.store.ArchiveSession(rec, time.Now().UTC())
-	s.gcAhsirAgentIfUnused(rec.AhsirName)
-	writeJSON(w, http.StatusOK, rec.Session)
+	s.gcAhsirAgentIfUnused(rec)
+	writeJSON(w, http.StatusOK, rec.SessionSnapshot())
 }
 
-// gcAhsirAgentIfUnused reclaims the backing ahsir agent only when no other live
-// session pins the same (agent_id, version). The agent is shared, so a refcount
-// of zero is the safe condition to stop it; a future session for that version
-// re-registers it via ensureRegistered (we clear the registered flag here).
-func (s *Server) gcAhsirAgentIfUnused(ahsirName string) {
-	if s.store.ActiveAhsirRefs(ahsirName) != 0 {
+// gcAhsirAgentIfUnused reclaims the backing ahsir agents — the executor and
+// its outcome grader (issue #36) — only when no other live session pins the
+// same (agent_id, version). The agents are shared, so a refcount of zero is
+// the safe condition to stop them; a future session for that version
+// re-registers them via ensureRegistered / grader provisioning.
+func (s *Server) gcAhsirAgentIfUnused(rec *store.SessionRecord) {
+	if s.store.ActiveAhsirRefs(rec.AhsirName) != 0 {
 		return
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	_ = s.ahsir.DeleteAgent(ctx, ahsirName)
+	_ = s.ahsir.DeleteAgent(ctx, rec.AhsirName)
+	_ = s.ahsir.DeleteAgent(ctx, translate.AhsirGraderName(rec.Session.Agent.ID, rec.Session.Agent.Version))
 }
 
 // cancelInFlight best-effort cancels a session's running turn (A2A tasks/cancel),
@@ -436,10 +441,11 @@ func (s *Server) deleteSession(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
 	defer cancel()
 	s.cancelInFlight(ctx, rec)
+	rec.CancelOutcome()
 	waitInFlightCleared(rec, 5*time.Second)
 	s.emit(rec, newEvent(cma.EvtSessionDeleted))
 	_, _ = s.store.DeleteSession(rec.Session.ID)
-	s.gcAhsirAgentIfUnused(rec.AhsirName)
+	s.gcAhsirAgentIfUnused(rec)
 	writeJSON(w, http.StatusOK, cma.DeletedResource{ID: rec.Session.ID, Type: "session_deleted"})
 }
 
@@ -465,12 +471,24 @@ func (s *Server) sendEvents(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "invalid_request_error", "invalid body: "+err.Error())
 		return
 	}
+	// Validate every user.define_outcome in the batch before any side effect
+	// (reconcile, persist, enqueue), so a malformed batch is rejected whole
+	// rather than partially accepted.
+	for _, ev := range req.Events {
+		if ev.Type == cma.EvtUserDefineOutcome {
+			if _, _, _, msg := s.validateDefineOutcome(ev); msg != "" {
+				writeErr(w, http.StatusBadRequest, "invalid_request_error", msg)
+				return
+			}
+		}
+	}
 	// user.message is acknowledged by event-driven callers as soon as this
 	// handler succeeds. Reconcile the persisted CMA desired state synchronously
 	// before appending any event from the batch: accepting first and discovering
 	// a missing scheduler runtime on the background turn can permanently lose a
-	// source event that Hetairoi already deduplicated.
-	if containsUserMessage(req.Events) {
+	// source event that Hetairoi already deduplicated. The same applies to
+	// user.define_outcome, which dispatches executor turns (issue #36).
+	if containsUserMessage(req.Events) || containsDefineOutcome(req.Events) {
 		if err := s.reconcileSession(r.Context(), rec); err != nil {
 			var adminErr *ahsir.AdminHTTPError
 			switch {
@@ -494,10 +512,21 @@ func (s *Server) sendEvents(w http.ResponseWriter, r *http.Request) {
 		switch ev.Type {
 		case cma.EvtUserMessage:
 			s.deliverUserMessage(rec, ev.Content)
+		case cma.EvtUserDefineOutcome:
+			if status, msg := s.deliverDefineOutcome(rec, ev); status != http.StatusOK {
+				typ := "invalid_request_error"
+				if status >= 500 {
+					typ = "api_error"
+				}
+				writeErr(w, status, typ, msg)
+				return
+			}
 		case cma.EvtUserInterrupt:
 			// Cancel the in-flight turn out of band (interrupt is not itself a
 			// queued turn). The running executeTurn observes the cancellation
-			// via its A2A stream and settles the session back to idle.
+			// via its A2A stream and settles the session back to idle. An active
+			// outcome is canceled too: its loop records the interrupted
+			// terminal state (issue #36).
 			if taskID := rec.InFlightTask(); taskID != "" {
 				ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
 				err := s.ahsir.CancelTask(ctx, rec.AhsirName, taskID)
@@ -506,6 +535,7 @@ func (s *Server) sendEvents(w http.ResponseWriter, r *http.Request) {
 			} else {
 				log.Printf("interrupt: session=%s no in-flight task to cancel", rec.Session.ID)
 			}
+			rec.CancelOutcome()
 		default:
 			// custom_tool_result / tool_confirmation deferred.
 		}
@@ -517,6 +547,15 @@ func (s *Server) sendEvents(w http.ResponseWriter, r *http.Request) {
 func containsUserMessage(events []cma.Event) bool {
 	for _, ev := range events {
 		if ev.Type == cma.EvtUserMessage {
+			return true
+		}
+	}
+	return false
+}
+
+func containsDefineOutcome(events []cma.Event) bool {
+	for _, ev := range events {
+		if ev.Type == cma.EvtUserDefineOutcome {
 			return true
 		}
 	}
@@ -629,15 +668,39 @@ func (s *Server) runTurn(rec *store.SessionRecord, text string) {
 	rec.EnqueueTurn(func() { s.executeTurn(rec, text) })
 }
 
-// executeTurn drives one user message through ahsir and emits CMA events. Runs
-// on the session's serial turn goroutine, so it may block on ahsir.
+// executeTurn drives one user message through ahsir and settles the session
+// back to idle (or terminated). Plain user.message turns use this wrapper; the
+// outcome loop (issue #36) calls executeTurnCore directly so it can interleave
+// grading between turns and idle only when the outcome terminates.
+func (s *Server) executeTurn(rec *store.SessionRecord, text string) {
+	if _, err := s.executeTurnCore(context.Background(), rec, text); err != nil {
+		return // executeTurnCore already terminated the session
+	}
+	s.emitIdle(rec)
+}
+
+// turnResult is what executeTurnCore learned from the runtime: the aggregated
+// reply text, and whether the turn ended by cancellation (user.interrupt /
+// outcome cancel) rather than completion.
+type turnResult struct {
+	reply    string
+	canceled bool
+}
+
+// executeTurnCore drives one message through ahsir and emits CMA events. Runs
+// on the session's serial turn goroutine, so it may block on ahsir. parent
+// scopes the turn (the outcome loop passes the outcome's context so an
+// interrupt cancels an in-flight stream; plain turns pass Background).
 //
 // The turn is driven over the A2A message/stream transport: text deltas are
 // accumulated and emitted as a single agent.message at completion (the CMA
 // agent.message event carries a complete message, not deltas). The A2A task id
 // is published to the record as soon as it's known so a concurrent
 // user.interrupt can cancel this turn (→ tasks/cancel).
-func (s *Server) executeTurn(rec *store.SessionRecord, text string) {
+//
+// On cancellation the partial reply (if any) is emitted and the caller decides
+// how to settle the session. On any other error the session is terminated here.
+func (s *Server) executeTurnCore(parent context.Context, rec *store.SessionRecord, text string) (turnResult, error) {
 	s.setStatus(rec, cma.StatusRunning)
 	s.emit(rec, newEvent(cma.EvtSessionStatusRunning))
 
@@ -645,14 +708,15 @@ func (s *Server) executeTurn(rec *store.SessionRecord, text string) {
 	if turnTimeout <= 0 {
 		turnTimeout = 10 * time.Minute
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), turnTimeout)
+	ctx, cancel := context.WithTimeout(parent, turnTimeout)
 	defer cancel()
 
 	agent, err := s.sessionAgent(rec)
 	if err != nil {
-		s.terminateTurn(rec, fmt.Errorf("cma agent id=%s version=%d scheduler=%q: dispatch rejected; reconciliation=skipped: %w",
-			rec.Session.Agent.ID, rec.Session.Agent.Version, rec.AhsirName, err))
-		return
+		err = fmt.Errorf("cma agent id=%s version=%d scheduler=%q: dispatch rejected; reconciliation=skipped: %w",
+			rec.Session.Agent.ID, rec.Session.Agent.Version, rec.AhsirName, err)
+		s.terminateTurn(rec, err)
+		return turnResult{}, err
 	}
 
 	onReschedule := func() { s.emit(rec, newEvent(cma.EvtSessionStatusRescheduled)) }
@@ -678,19 +742,23 @@ func (s *Server) executeTurn(rec *store.SessionRecord, text string) {
 	rec.SetInFlightTask("") // turn is no longer cancelable
 
 	switch {
-	case errors.Is(err, ahsir.ErrTurnCanceled):
-		// Interrupted: surface any partial text, then return to idle (ready for
-		// the next turn) rather than terminating the session.
+	case errors.Is(err, ahsir.ErrTurnCanceled) || (err != nil && parent.Err() != nil):
+		// Interrupted — either the runtime reported the cancel, or the parent
+		// (outcome) context tore the stream down. Surface any partial text and
+		// let the caller settle the session (idle for a plain turn, interrupted
+		// for an outcome).
 		s.emitMessageIfAny(rec, reply)
-		s.emitIdle(rec)
+		return turnResult{reply: reply, canceled: true}, nil
 	case err != nil:
-		s.terminateTurn(rec, fmt.Errorf("cma agent id=%s version=%d scheduler=%q: dispatch failed: %w; reconciliation=%s",
-			agent.ID, agent.Version, rec.AhsirName, err, reconcileResult))
+		err = fmt.Errorf("cma agent id=%s version=%d scheduler=%q: dispatch failed: %w; reconciliation=%s",
+			agent.ID, agent.Version, rec.AhsirName, err, reconcileResult)
+		s.terminateTurn(rec, err)
+		return turnResult{}, err
 	default:
 		msg := newEvent(cma.EvtAgentMessage)
 		msg.Content = []cma.ContentBlock{{Type: "text", Text: reply}}
 		s.emit(rec, msg)
-		s.emitIdle(rec)
+		return turnResult{reply: reply}, nil
 	}
 }
 

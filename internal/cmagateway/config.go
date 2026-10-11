@@ -16,4 +16,18 @@ type Config struct {
 
 	// TurnTimeout bounds a single turn's execution (0 => handler default).
 	TurnTimeout time.Duration
+
+	// Outcome knobs (issue #36). Zero values select the documented defaults;
+	// there is deliberately no "unbounded" setting — see docs/cma-api.md.
+	//
+	// OutcomeMaxIterationsCap caps a requested max_iterations (default 20,
+	// mirroring the CMA docs); OutcomeDefaultIterations applies when the
+	// request omits it (default 3).
+	OutcomeMaxIterationsCap  int
+	OutcomeDefaultIterations int
+	// GraderTimeout bounds one grading call (default 5m).
+	GraderTimeout time.Duration
+	// OutcomeHeartbeatInterval is the span.outcome_evaluation_ongoing cadence
+	// while the grader runs (default 15s; negative disables).
+	OutcomeHeartbeatInterval time.Duration
 }
