@@ -276,6 +276,15 @@ func (e *Executor) runTurn(ctx context.Context, session Session, prompt string, 
 				onAux(x)
 			}
 		case EventToolResult:
+			// Tool outcomes must reach the wire (ev=tool_result →
+			// agent.tool_result); dropping them silently loses every
+			// streaming turn's tool observability.
+			if onAux != nil {
+				onAux(x)
+			}
+		case EventLifecycle:
+			// Lifecycle transitions (issue #43) ride the aux channel so the
+			// streaming path surfaces them as structured wire events.
 			if onAux != nil {
 				onAux(x)
 			}
@@ -444,6 +453,19 @@ func (e *Executor) interactStream(ctx context.Context, session Session, task *a2
 				data = map[string]any{"ev": "thinking"}
 			case EventToolResult:
 				data = map[string]any{"ev": "tool_result", "tool_use_id": x.ToolUseID, "content": x.Content, "is_error": x.IsError}
+			case EventLifecycle:
+				// ahsir-owned lifecycle transition (issue #43): session.* and
+				// turn.* phase markers plus the typed terminal outcome.
+				data = map[string]any{"ev": "lifecycle", "event": x.Event, "turn_id": x.TurnID, "phase": x.Phase}
+				if x.Kind != "" {
+					data["kind"] = x.Kind
+				}
+				if x.Trigger != "" {
+					data["trigger"] = x.Trigger
+				}
+				if x.Detail != "" {
+					data["detail"] = x.Detail
+				}
 			default:
 				return true
 			}

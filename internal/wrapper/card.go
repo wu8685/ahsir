@@ -32,6 +32,12 @@ type AgentCardConfig struct {
 	Pool       PoolConfig       `yaml:"pool" json:"pool"`
 	Streaming  StreamingConfig  `yaml:"streaming" json:"streaming"`
 	MCP        MCPConfig        `yaml:"mcp" json:"mcp"`
+	// Lifecycle is the optional Agent Session lifecycle block (issue #43):
+	// one-time Session initialization plus the two-stage work/grace turn
+	// deadline. A missing block preserves the historical one-shot timeout
+	// behaviour. As a card field, lifecycle changes participate in Agent
+	// versioning (CardMatches) like any other card change.
+	Lifecycle LifecycleConfig `yaml:"lifecycle" json:"lifecycle"`
 }
 
 // MCPConfig declares the MCP servers an agent's claude process may use.
@@ -420,6 +426,13 @@ func (b *AgentCardBuilder) Load() (*AgentCardConfig, error) {
 	}
 	if cfg.Runtime.Timeout == "" {
 		cfg.Runtime.Timeout = "120s"
+	}
+	// Validate the lifecycle block at load time so a malformed duration or
+	// contradictory deadline pair fails agent startup instead of the first
+	// turn. ResolveLifecycle is side-effect-free; the agent bootstrap
+	// re-resolves to obtain the runtime form.
+	if _, err := ResolveLifecycle(cfg.Lifecycle); err != nil {
+		return nil, err
 	}
 
 	return &cfg, nil

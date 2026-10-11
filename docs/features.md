@@ -102,6 +102,75 @@ knows who said what). Concurrent turns on one context wait in a per-context FIFO
 queue (`pool.queue_depth`, default 4; `0` restores fail-fast 409). This is the
 substrate the roundtable (§6) is built on.
 
+### Session lifecycle: initialize + graceful finalize (opt-in)
+
+By default a turn has one hard deadline (`runtime.timeout`): the runtime is
+cancelled and the caller gets a generic error. A card can opt into the
+ahsir-owned **Session lifecycle** (issue #43) — runtime infrastructure only;
+it knows nothing about business protocols:
+
+```yaml
+lifecycle:
+  initialize:            # lazy, once per Session + lifecycle version
+    enabled: true
+    timeout: 1m          # bounded [1s, 1h]
+    prompt: "Read the workspace guidance and validate your tools."
+    on_failure: fail_closed   # default; "degraded" is the explicit opt-out
+  finalize:              # two-stage turn deadline
+    enabled: true
+    work_timeout: 20m    # soft deadline of a business turn (required)
+    grace_timeout: 2m    # bound on the finalize turn (must be ≤ work_timeout)
+    prompt: "Stop investigating and deliver from existing evidence."
+```
+
+- **Initialization** runs before the first business turn of a Session — not on
+  process boot, and never again after its completion marker
+  (`.a2a/lifecycle.json`) survives restarts, scale-to-zero, and resume. It fails
+  **closed** by default: a failed/timed-out init records a typed
+  `initialization_failure` outcome and the user turn does not start.
+  `on_failure: degraded` is the explicit opt-in to proceed uninitialized.
+  Init prompts must be idempotent and must not perform irreversible external
+  writes.
+- **Two-stage deadline**: at `work_timeout` the active runtime turn is
+  cancelled (partial text, tool evidence, and the provider resume identity are
+  preserved), then one high-priority **finalize turn** runs in the same logical
+  Session — for runtimes without in-flight control messages (both `claude` and
+  `codex` today) ahsir aborts the turn and starts a separate finalize turn on
+  the preserved resume identity. Only if finalize cannot complete within
+  `grace_timeout` does ahsir hard-terminate, with the distinct
+  `finalize_timeout` outcome.
+- **Timeout precedence** is deterministic: the lifecycle controller enforces
+  work then grace; the provider-level `runtime.timeout` is raised to
+  work+grace as a hard backstop; the CMA facade turn timeout remains the
+  outermost bound and records `facade_timeout` when it wins.
+- **Concurrency**: initialize/finalize turns are system-owned lifecycle work,
+  serialized per Session ahead of/after business turns. A user turn arriving
+  during initialization or finalization **queues** (bounded by its own
+  deadline) — it never interleaves.
+- **Idle scale-to-zero never finalizes**: with no active business turn,
+  resource reaping is just process cleanup, not business completion.
+
+Every accepted turn has a stable `turn_id` and emits persisted, ordered
+lifecycle events — `session.initializing` / `session.initialized` /
+`session.initialization_failed`, `turn.running` / `turn.soft_deadline` /
+`turn.finalizing` / `turn.finalized` / `turn.finalization_failed`, and a
+terminal `turn.outcome` carrying a machine-readable `kind`
+(`completed` | `runtime_timeout` | `facade_timeout` | `canceled` |
+`provider_error` | `finalize_timeout` | `initialization_failure`), timestamps,
+effective deadlines, bounded/sanitized error metadata, and the last durable
+agent message. Clients correlate by `session_id` + `turn_id` and never parse
+`session.error` strings. The CMA facade relays them as `session.lifecycle`
+events on the session stream/log; facade-side agents opt in via the
+`lifecycle_*` agent metadata keys (e.g. `lifecycle_finalize_enabled=true`),
+which version with the agent like any other field.
+
+Lifecycle state survives ahsir restarts; a crash mid-initialize/finalize
+settles deterministically to idle without duplicating a completed lifecycle
+turn and without claiming finalization succeeded. Lifecycle events never carry
+secrets, environment values, or authorization headers, and all free-text
+fields are length-bounded. Cards without a `lifecycle:` block behave exactly
+as before.
+
 ---
 
 ## 4. Personas: agents on demand

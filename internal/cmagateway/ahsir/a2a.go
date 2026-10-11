@@ -118,7 +118,7 @@ type a2aEvent struct {
 // the CMA observability events (tool_use / mcp_tool_use / span.*). Kind is the
 // DataPart's "ev" discriminator.
 type StreamEvent struct {
-	Kind  string          // "tool_use" | "thinking" | "tool_result" | "span_start" | "span_end"
+	Kind  string          // "tool_use" | "thinking" | "tool_result" | "span_start" | "span_end" | "lifecycle"
 	ID    string          // tool-use id (tool_use)
 	Name  string          // tool name (tool_use)
 	Input json.RawMessage // tool input (tool_use)
@@ -128,6 +128,20 @@ type StreamEvent struct {
 	ToolUseID string // the tool_use this result is for
 	Content   string // flattened result text
 	IsError   bool
+
+	// Lifecycle carries an ahsir-owned Session lifecycle transition (issue
+	// #43) when Kind == "lifecycle".
+	Lifecycle *StreamLifecycle
+}
+
+// StreamLifecycle is the neutral carrier for one lifecycle transition.
+type StreamLifecycle struct {
+	Event   string // session.initializing | ... | turn.outcome
+	TurnID  string
+	Phase   string
+	Kind    string // terminal cause on turn.outcome
+	Trigger string
+	Detail  string // bounded, sanitized
 }
 
 // StreamUsage is the token usage carried on a span_end StreamEvent.
@@ -168,6 +182,28 @@ func parseDataPart(data map[string]json.RawMessage) (StreamEvent, bool) {
 	}
 	if r, ok := data["is_error"]; ok {
 		_ = json.Unmarshal(r, &ev.IsError)
+	}
+	if ev.Kind == "lifecycle" {
+		var lc StreamLifecycle
+		if r, ok := data["event"]; ok {
+			_ = json.Unmarshal(r, &lc.Event)
+		}
+		if r, ok := data["turn_id"]; ok {
+			_ = json.Unmarshal(r, &lc.TurnID)
+		}
+		if r, ok := data["phase"]; ok {
+			_ = json.Unmarshal(r, &lc.Phase)
+		}
+		if r, ok := data["kind"]; ok {
+			_ = json.Unmarshal(r, &lc.Kind)
+		}
+		if r, ok := data["trigger"]; ok {
+			_ = json.Unmarshal(r, &lc.Trigger)
+		}
+		if r, ok := data["detail"]; ok {
+			_ = json.Unmarshal(r, &lc.Detail)
+		}
+		ev.Lifecycle = &lc
 	}
 	return ev, ev.Kind != ""
 }

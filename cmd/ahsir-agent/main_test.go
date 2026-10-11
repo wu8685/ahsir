@@ -538,3 +538,30 @@ func TestBuildSessionConfig_WorkdirDecoupledFromWorkspace(t *testing.T) {
 		t.Fatalf("relative allowed_path must NOT resolve against workspace; args=%v", cfg.Args)
 	}
 }
+
+func TestLifecycleBackstopTimeout(t *testing.T) {
+	resolve := func(cfg wrapper.LifecycleConfig) wrapper.ResolvedLifecycle {
+		r, err := wrapper.ResolveLifecycle(cfg)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return r
+	}
+
+	// Lifecycle disabled: provider timeout untouched (legacy behaviour).
+	if got := lifecycleBackstopTimeout(120*time.Second, resolve(wrapper.LifecycleConfig{})); got != 120*time.Second {
+		t.Fatalf("disabled lifecycle must not change timeout, got %v", got)
+	}
+
+	// Finalize enabled: provider timeout raised to work+grace backstop.
+	lc := resolve(wrapper.LifecycleConfig{Finalize: wrapper.LifecycleFinalizeConfig{
+		Enabled: true, WorkTimeout: "20m", GraceTimeout: "2m",
+	}})
+	if got := lifecycleBackstopTimeout(120*time.Second, lc); got != 22*time.Minute {
+		t.Fatalf("backstop = %v, want 22m", got)
+	}
+	// A larger operator timeout is left alone.
+	if got := lifecycleBackstopTimeout(30*time.Minute, lc); got != 30*time.Minute {
+		t.Fatalf("larger operator timeout must win, got %v", got)
+	}
+}

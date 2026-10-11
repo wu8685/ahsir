@@ -2,6 +2,7 @@ package ahsir
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"net/http"
@@ -123,5 +124,34 @@ func TestChatStream_EOFWithoutTerminalTaskIsFailure(t *testing.T) {
 	}
 	if err == nil || !strings.Contains(err.Error(), "before terminal task") {
 		t.Fatalf("err=%v, want truncated-stream failure", err)
+	}
+}
+
+func TestParseDataPartLifecycle(t *testing.T) {
+	data := map[string]json.RawMessage{
+		"ev":      json.RawMessage(`"lifecycle"`),
+		"event":   json.RawMessage(`"turn.outcome"`),
+		"turn_id": json.RawMessage(`"turn_abc"`),
+		"phase":   json.RawMessage(`"idle"`),
+		"kind":    json.RawMessage(`"runtime_timeout"`),
+		"trigger": json.RawMessage(`"soft_deadline"`),
+		"detail":  json.RawMessage(`"finalize ok"`),
+	}
+	se, ok := parseDataPart(data)
+	if !ok {
+		t.Fatal("lifecycle DataPart not recognized")
+	}
+	if se.Kind != "lifecycle" || se.Lifecycle == nil {
+		t.Fatalf("lifecycle payload missing: %+v", se)
+	}
+	lc := se.Lifecycle
+	if lc.Event != "turn.outcome" || lc.TurnID != "turn_abc" || lc.Kind != "runtime_timeout" || lc.Trigger != "soft_deadline" || lc.Detail != "finalize ok" {
+		t.Fatalf("lifecycle payload wrong: %+v", lc)
+	}
+
+	// Non-lifecycle events must not gain a lifecycle payload.
+	se2, ok := parseDataPart(map[string]json.RawMessage{"ev": json.RawMessage(`"thinking"`)})
+	if !ok || se2.Lifecycle != nil {
+		t.Fatalf("non-lifecycle event must not carry a lifecycle payload: %+v", se2)
 	}
 }

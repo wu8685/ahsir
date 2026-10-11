@@ -24,6 +24,20 @@ const (
 	metadataRuntimeAPIKeyEnv = "runtime_api_key_env"
 	metadataRuntimeWireAPI   = "runtime_wire_api"
 	metadataNetworkAccess    = "network_access"
+
+	// Lifecycle (issue #43). The CMA agent model has no lifecycle field, so
+	// the facade accepts the opt-in Agent Session lifecycle block via agent
+	// metadata. Because every agent update creates a new immutable version
+	// (and a fresh ahsir card), lifecycle prompt/config changes participate
+	// in Agent versioning like any other agent field.
+	metadataLifecycleInitializeEnabled   = "lifecycle_initialize_enabled"
+	metadataLifecycleInitializeTimeout   = "lifecycle_initialize_timeout"
+	metadataLifecycleInitializePrompt    = "lifecycle_initialize_prompt"
+	metadataLifecycleInitializeOnFailure = "lifecycle_initialize_on_failure"
+	metadataLifecycleFinalizeEnabled     = "lifecycle_finalize_enabled"
+	metadataLifecycleFinalizeWorkTimeout = "lifecycle_finalize_work_timeout"
+	metadataLifecycleFinalizeGrace       = "lifecycle_finalize_grace_timeout"
+	metadataLifecycleFinalizePrompt      = "lifecycle_finalize_prompt"
 )
 
 var shellEnvNameRE = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
@@ -126,6 +140,7 @@ func AgentToCard(name string, a *cma.Agent, d RuntimeDefaults) (*ahsir.AgentCard
 			OutboundAccess: a.Metadata[metadataNetworkAccess] == "true",
 		},
 		Streaming: ahsir.StreamingConfig{PartialMessages: true},
+		Lifecycle: lifecycleFromMetadata(a.Metadata),
 		Pool: ahsir.PoolConfig{
 			// Opt a facade agent into per-session filesystem isolation
 			// ("off" | "scratch" | "worktree"). Empty -> ahsir default (off,
@@ -172,4 +187,28 @@ func skillDescription(s cma.SkillRef) string {
 		return "anthropic prebuilt skill: " + s.SkillID
 	}
 	return "custom skill: " + s.SkillID
+}
+
+// lifecycleFromMetadata maps the lifecycle_* agent metadata keys onto the
+// card's lifecycle block. Both blocks stay disabled unless their explicit
+// enabled flag is "true" — a missing key set preserves the legacy one-shot
+// timeout behaviour (issue #43).
+func lifecycleFromMetadata(meta map[string]string) ahsir.LifecycleConfig {
+	var lc ahsir.LifecycleConfig
+	if meta == nil {
+		return lc
+	}
+	if strings.EqualFold(strings.TrimSpace(meta[metadataLifecycleInitializeEnabled]), "true") {
+		lc.Initialize.Enabled = true
+		lc.Initialize.Timeout = strings.TrimSpace(meta[metadataLifecycleInitializeTimeout])
+		lc.Initialize.Prompt = meta[metadataLifecycleInitializePrompt]
+		lc.Initialize.OnFailure = strings.TrimSpace(meta[metadataLifecycleInitializeOnFailure])
+	}
+	if strings.EqualFold(strings.TrimSpace(meta[metadataLifecycleFinalizeEnabled]), "true") {
+		lc.Finalize.Enabled = true
+		lc.Finalize.WorkTimeout = strings.TrimSpace(meta[metadataLifecycleFinalizeWorkTimeout])
+		lc.Finalize.GraceTimeout = strings.TrimSpace(meta[metadataLifecycleFinalizeGrace])
+		lc.Finalize.Prompt = meta[metadataLifecycleFinalizePrompt]
+	}
+	return lc
 }

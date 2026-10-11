@@ -48,6 +48,15 @@ func main() {
 		log.Fatalf("Failed to load agent card: %v", err)
 	}
 
+	// Resolve the Agent Session lifecycle block (issue #43). Load already
+	// validated it; this yields the runtime form (defaults applied, version
+	// hash computed) used to wire the lifecycle controller below. A missing
+	// lifecycle block resolves to "disabled" and nothing changes.
+	lifecycle, err := wrapper.ResolveLifecycle(cfg.Lifecycle)
+	if err != nil {
+		log.Fatalf("Invalid lifecycle config for agent %q: %v", cfg.Name, err)
+	}
+
 	runtimeCard := builder.BuildRuntime(cfg, *port)
 
 	// Resolve runtime config up-front so configuration mistakes (e.g. an
@@ -60,6 +69,13 @@ func main() {
 		if err != nil {
 			log.Fatalf("Invalid runtime config for agent %q: %v", cfg.Name, err)
 		}
+		// Timeout precedence (issue #13 acceptance): when finalization is
+		// enabled, the wrapper enforces work_timeout (soft) then grace_timeout
+		// (finalize bound). Raise the provider-level per-turn timeout to
+		// work+grace so it can only fire as a hard backstop if the wrapper's
+		// own enforcement somehow fails — it must never cut a turn before the
+		// wrapper's soft deadline or mid-finalize.
+		sessionCfg.Timeout = lifecycleBackstopTimeout(sessionCfg.Timeout, lifecycle)
 	}
 
 	wrapperCfg := wrapper.AgentWrapperConfig{
@@ -212,7 +228,22 @@ func main() {
 			log.Printf("Pool queue: queue_depth=%d", *cfg.Pool.QueueDepth)
 		}
 
-		w.SetupExecutor(pool.LookupOrCreate, listAgents, callAgent, maxCalls, basePrompt)
+		// Agent Session lifecycle (issue #43): when the card carries a
+		// lifecycle block, wrap the session factory with the lifecycle
+		// controller — one-time Session initialization, work/grace two-stage
+		// deadline, typed persisted outcomes (.a2a/lifecycle.json). Disabled
+		// cards get pool.LookupOrCreate unchanged.
+		openSession := pool.LookupOrCreate
+		if lifecycle.Enabled() {
+			lifecycleStore := wrapper.NewLifecycleStore(filepath.Join(*workspace, ".a2a", "lifecycle.json"))
+			openSession = wrapper.WrapOpenSession(lifecycle, lifecycleStore, pool.LookupOrCreate)
+			log.Printf("Lifecycle enabled: initialize=%v finalize=%v (work=%v grace=%v) state=%s",
+				lifecycle.Initialize.Enabled, lifecycle.Finalize.Enabled,
+				lifecycle.Finalize.WorkTimeout, lifecycle.Finalize.GraceTimeout,
+				filepath.Join(*workspace, ".a2a", "lifecycle.json"))
+		}
+
+		w.SetupExecutor(openSession, listAgents, callAgent, maxCalls, basePrompt)
 		log.Printf("Executor wired: %s SessionPool (%s %v, timeout=%s, persist=%s, session_idle_ttl=%s, evicted_ttl=%s, max_evicted=%d)", sessionCfg.Provider, sessionCfg.Command, sessionCfg.Args, sessionCfg.Timeout, persistPath, retention.idleTTL, retention.evictedTTL, retention.maxEvicted)
 
 		// Scale-to-zero: after agent_idle_timeout with no turn in flight, reap
@@ -556,6 +587,22 @@ func buildSessionConfig(name string, rt wrapper.RuntimeConfig, fs wrapper.Filesy
 		WriteAccess:       fs.Enabled && fs.WriteAccess,
 		NetworkAccess:     networkAccess,
 	}, nil
+}
+
+// lifecycleBackstopTimeout returns the provider-level per-turn timeout to use
+// under a resolved lifecycle config (issue #43). Precedence is deterministic:
+// the lifecycle controller enforces work_timeout (soft) then grace_timeout;
+// the provider timeout is raised to work+grace so it only acts as a hard
+// backstop. A larger operator-configured runtime.timeout is left alone.
+func lifecycleBackstopTimeout(current time.Duration, lc wrapper.ResolvedLifecycle) time.Duration {
+	if !lc.Finalize.Enabled {
+		return current
+	}
+	backstop := lc.Finalize.WorkTimeout + lc.Finalize.GraceTimeout
+	if current < backstop {
+		return backstop
+	}
+	return current
 }
 
 func mergeEnv(base []string, extra map[string]string) []string {

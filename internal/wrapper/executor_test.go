@@ -1090,3 +1090,79 @@ func TestExecutorStreamAppendsTranscriptTurn(t *testing.T) {
 		t.Errorf("stream transcript turn mismatch: %+v", turns[0])
 	}
 }
+
+// toolResultEmittingSession emits one EventToolUse and one EventToolResult
+// before its reply — the shape both providers produce around a tool call.
+type toolResultEmittingSession struct{}
+
+func (toolResultEmittingSession) Stream(_ context.Context, _ string) (<-chan Event, error) {
+	ch := make(chan Event, 5)
+	ch <- EventToolUse{Id: "tu_1", Name: "read_file"}
+	ch <- EventToolResult{ToolUseID: "tu_1", Content: "file contents", IsError: false}
+	ch <- EventTextDelta{Text: "done"}
+	ch <- EventText{Text: "done"}
+	ch <- EventTurnDone{}
+	close(ch)
+	return ch, nil
+}
+func (s toolResultEmittingSession) Turn(ctx context.Context, text string) (string, error) {
+	ch, err := s.Stream(ctx, text)
+	if err != nil {
+		return "", err
+	}
+	_, out, doneErr := drainEvents(ch)
+	return out, doneErr
+}
+func (toolResultEmittingSession) SessionID() string { return "s" }
+func (toolResultEmittingSession) IsHealthy() bool   { return true }
+func (toolResultEmittingSession) Close() error      { return nil }
+
+// TestExecutor_ExecuteStream_SurfacesToolResultEvents is a regression test for
+// the streaming path dropping tool_result events: both providers emit
+// EventToolResult and the facade maps ev=tool_result to CMA agent.tool_result,
+// so runTurn must forward the event to onAux alongside the other aux cases.
+func TestExecutor_ExecuteStream_SurfacesToolResultEvents(t *testing.T) {
+	executor := NewExecutor(ExecutorConfig{
+		OpenSession: func(ctx context.Context, contextID string) (Session, error) {
+			return toolResultEmittingSession{}, nil
+		},
+		ListAgents: func() []*a2a.AgentCard { return nil },
+		MaxDepth:   5,
+		BasePrompt: "You are a helper.",
+	})
+
+	msg := a2a.NewMessage(a2a.MessageRoleUser, a2a.TextPart{Text: "work"})
+	var toolResultData []map[string]any
+	var finalTask *a2a.Task
+	for ev, err := range executor.ExecuteStream(context.Background(), msg) {
+		if err != nil {
+			t.Fatalf("yield err: %v", err)
+		}
+		switch e := ev.(type) {
+		case *a2a.TaskStatusUpdateEvent:
+			if e.Status.Message == nil {
+				continue
+			}
+			for _, p := range e.Status.Message.Parts {
+				if dp, ok := p.(a2a.DataPart); ok {
+					if dp.Data["ev"] == "tool_result" {
+						toolResultData = append(toolResultData, dp.Data)
+					}
+				}
+			}
+		case *a2a.Task:
+			finalTask = e
+		}
+	}
+
+	if finalTask == nil || finalTask.Status.State != a2a.TaskStateCompleted {
+		t.Fatalf("turn must complete, task=%+v", finalTask)
+	}
+	if len(toolResultData) != 1 {
+		t.Fatalf("want 1 tool_result DataPart, got %d", len(toolResultData))
+	}
+	d := toolResultData[0]
+	if d["tool_use_id"] != "tu_1" || d["content"] != "file contents" || d["is_error"] != false {
+		t.Fatalf("tool_result DataPart wrong: %v", d)
+	}
+}
