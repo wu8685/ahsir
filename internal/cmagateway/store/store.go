@@ -194,10 +194,12 @@ func (s *Store) saveLocked() error {
 }
 
 // persist snapshots and writes the store without the caller holding s.mu. Used
-// by the event-append and status-change paths that mutate a single record.
+// by the event-append and status-change paths that mutate a single record. It
+// takes the full lock: concurrent persists share the state.json.tmp scratch
+// file, so they must be serialized.
 func (s *Store) persist() error {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	return s.saveLocked()
 }
 
@@ -391,12 +393,16 @@ func (s *Store) ActiveAhsirRefs(ahsirName string) int {
 	return n
 }
 
+// ListSessions returns a locked snapshot of every session. Each entry is a
+// copy (see SessionSnapshot): the outcome loop and status transitions mutate
+// sessions concurrently with GET /v1/sessions, so callers must never receive
+// live *cma.Session pointers.
 func (s *Store) ListSessions() []*cma.Session {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	out := make([]*cma.Session, 0, len(s.sessions))
 	for _, rec := range s.sessions {
-		out = append(out, rec.Session)
+		out = append(out, rec.SessionSnapshot())
 	}
 	return out
 }
@@ -418,6 +424,19 @@ func (s *Store) Path() string { return s.path }
 // false (without persisting) when the latest outcome is still active — the
 // caller maps that to a 409.
 func (s *Store) BeginOutcome(rec *SessionRecord, oc cma.OutcomeEvaluation) (bool, error) {
+	return s.beginOutcome(rec, oc, nil, false)
+}
+
+// BeginOutcomeWithCancel is BeginOutcome plus registration of the outcome
+// loop's cancel func under the same record lock: an interrupt landing between
+// the persist and the loop's enqueue still cancels the queued loop. On
+// conflict (false) the cancel func is NOT registered and remains the caller's
+// responsibility to release.
+func (s *Store) BeginOutcomeWithCancel(rec *SessionRecord, oc cma.OutcomeEvaluation, cancel context.CancelFunc) (bool, error) {
+	return s.beginOutcome(rec, oc, cancel, true)
+}
+
+func (s *Store) beginOutcome(rec *SessionRecord, oc cma.OutcomeEvaluation, cancel context.CancelFunc, withCancel bool) (bool, error) {
 	rec.mu.Lock()
 	if n := len(rec.Session.OutcomeEvaluations); n > 0 && !cma.OutcomeTerminal(rec.Session.OutcomeEvaluations[n-1].Result) {
 		rec.mu.Unlock()
@@ -428,6 +447,9 @@ func (s *Store) BeginOutcome(rec *SessionRecord, oc cma.OutcomeEvaluation) (bool
 	evals := append(append([]cma.OutcomeEvaluation(nil), rec.Session.OutcomeEvaluations...), oc)
 	rec.Session.OutcomeEvaluations = evals
 	rec.Session.UpdatedAt = time.Now().UTC()
+	if withCancel {
+		rec.outcomeCancel = cancel
+	}
 	rec.mu.Unlock()
 	return true, s.persist()
 }

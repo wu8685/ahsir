@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/wu8685/ahsir/internal/cmagateway/ahsir"
 	"github.com/wu8685/ahsir/internal/cmagateway/cma"
@@ -174,8 +175,9 @@ func parseGradeReply(raw string) (*cma.OutcomeGrade, error) {
 	return grade, nil
 }
 
-// extractJSONObject returns the outermost balanced {...} span, tolerating a
-// leading markdown fence or prose. Returns "" when no object is present.
+// extractJSONObject returns the span from the first '{' to the last '}',
+// tolerating a leading markdown fence or prose. Returns "" when no object is
+// present.
 func extractJSONObject(raw string) string {
 	s := strings.TrimSpace(raw)
 	s = strings.TrimPrefix(s, "```json")
@@ -189,10 +191,15 @@ func extractJSONObject(raw string) string {
 	return s[start : end+1]
 }
 
-// truncateForOutcome caps a wire-bound string, marking truncation.
+// truncateForOutcome caps a wire-bound string at max bytes, marking
+// truncation. The cut never splits a UTF-8 rune, so the persisted deliverable
+// stays valid UTF-8.
 func truncateForOutcome(s string, max int) string {
 	if max <= 0 || len(s) <= max {
 		return s
+	}
+	for max > 0 && !utf8.RuneStart(s[max]) {
+		max--
 	}
 	return s[:max] + "… [truncated]"
 }

@@ -9,6 +9,7 @@ import (
 	"sync"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/wu8685/ahsir/internal/cmagateway/ahsir"
 	"github.com/wu8685/ahsir/internal/cmagateway/cma"
@@ -203,6 +204,20 @@ func TestTruncateForOutcome(t *testing.T) {
 	}
 	if got := truncateForOutcome("", 10); got != "" {
 		t.Fatalf("truncateForOutcome empty = %q", got)
+	}
+}
+
+func TestTruncateForOutcomeUTF8Boundary(t *testing.T) {
+	// "界" is 3 bytes; max=8 lands mid-rune (2 full runes = 6 bytes).
+	got := truncateForOutcome(strings.Repeat("界", 10), 8)
+	if !utf8.ValidString(got) {
+		t.Fatalf("truncateForOutcome produced invalid UTF-8: %q", got)
+	}
+	if !strings.HasPrefix(got, "界界") {
+		t.Fatalf("truncateForOutcome = %q, want 2 full runes kept", got)
+	}
+	if !strings.Contains(got, "truncated") {
+		t.Fatalf("truncateForOutcome = %q, want truncation marker", got)
 	}
 }
 

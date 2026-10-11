@@ -1,6 +1,8 @@
 package store
 
 import (
+	"context"
+	"encoding/json"
 	"path/filepath"
 	"sync"
 	"testing"
@@ -158,5 +160,130 @@ func TestUpdateOutcomeUnknownID(t *testing.T) {
 	rec := outcomeTestSession(t, s)
 	if err := s.UpdateOutcome(rec, "outc_missing", func(o *cma.OutcomeEvaluation) {}); err == nil {
 		t.Fatal("UpdateOutcome for an unknown outcome_id succeeded, want error")
+	}
+}
+
+func TestListSessionsReturnsSnapshots(t *testing.T) {
+	s, err := New(filepath.Join(t.TempDir(), "state.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec := outcomeTestSession(t, s)
+	if _, err := s.BeginOutcome(rec, cma.OutcomeEvaluation{OutcomeID: "outc_s", Result: cma.OutcomeStatePending}); err != nil {
+		t.Fatal(err)
+	}
+	list := s.ListSessions()
+	if len(list) != 1 {
+		t.Fatalf("ListSessions = %d sessions, want 1", len(list))
+	}
+	if list[0] == rec.Session {
+		t.Fatal("ListSessions handed out the live *cma.Session; want a snapshot")
+	}
+	// Mutating a listed session must not leak into the store.
+	list[0].Status = "hacked"
+	list[0].OutcomeEvaluations = append(list[0].OutcomeEvaluations, cma.OutcomeEvaluation{OutcomeID: "outc_forged"})
+	if got := rec.OutcomeEvaluations(); len(got) != 1 {
+		t.Fatalf("caller mutation leaked into Store: outcome_evaluations = %d, want 1", len(got))
+	}
+	if again := s.ListSessions()[0]; again.Status == "hacked" {
+		t.Fatalf("caller mutation leaked into Store: status = %q", again.Status)
+	}
+}
+
+// TestListSessionsConcurrentOutcomeUpdates hammers ListSessions and marshals
+// every returned session (as GET /v1/sessions does) while the outcome loop
+// replaces OutcomeEvaluations and status transitions run. With -race this
+// fails if ListSessions hands out live *cma.Session pointers.
+func TestListSessionsConcurrentOutcomeUpdates(t *testing.T) {
+	s, err := New(filepath.Join(t.TempDir(), "state.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec := outcomeTestSession(t, s)
+	if _, err := s.BeginOutcome(rec, cma.OutcomeEvaluation{OutcomeID: "outc_race", Result: cma.OutcomeStatePending}); err != nil {
+		t.Fatal(err)
+	}
+
+	done := make(chan struct{})
+	var wg sync.WaitGroup
+	wg.Add(3)
+	go func() { // writer: the outcome loop
+		defer wg.Done()
+		for i := 0; i < 200; i++ {
+			if err := s.UpdateOutcome(rec, "outc_race", func(o *cma.OutcomeEvaluation) {
+				o.Result = cma.OutcomeStateRunning
+				o.Iteration = i
+			}); err != nil {
+				t.Error(err)
+				return
+			}
+		}
+	}()
+	go func() { // writer: status transitions
+		defer wg.Done()
+		for i := 0; i < 200; i++ {
+			if err := s.SetSessionStatus(rec, cma.StatusIdle, time.Now().UTC()); err != nil {
+				t.Error(err)
+				return
+			}
+		}
+		close(done)
+	}()
+	go func() { // reader: GET /v1/sessions
+		defer wg.Done()
+		for {
+			select {
+			case <-done:
+				return
+			default:
+			}
+			for _, sess := range s.ListSessions() {
+				if _, err := json.Marshal(sess); err != nil {
+					t.Errorf("marshal listed session: %v", err)
+				}
+			}
+		}
+	}()
+	wg.Wait()
+}
+
+// TestBeginOutcomeWithCancelRegistersCancelAtomically covers the
+// interrupt-during-define window: the cancel func is registered under the same
+// record lock as the outcome append, so an interrupt landing before the loop
+// is enqueued still cancels it.
+func TestBeginOutcomeWithCancelRegistersCancelAtomically(t *testing.T) {
+	s, err := New(filepath.Join(t.TempDir(), "state.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec := outcomeTestSession(t, s)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	ok, err := s.BeginOutcomeWithCancel(rec, cma.OutcomeEvaluation{OutcomeID: "outc_c", Result: cma.OutcomeStatePending}, cancel)
+	if err != nil || !ok {
+		t.Fatalf("BeginOutcomeWithCancel = %v, %v; want true, nil", ok, err)
+	}
+	rec.CancelOutcome()
+	select {
+	case <-ctx.Done():
+	default:
+		t.Fatal("CancelOutcome did not cancel the context registered at begin")
+	}
+
+	// On conflict the cancel func must not be registered (the active outcome
+	// keeps its own) — begin a second outcome while the first is active.
+	if err := s.UpdateOutcome(rec, "outc_c", func(o *cma.OutcomeEvaluation) { o.Result = cma.OutcomeStateRunning }); err != nil {
+		t.Fatal(err)
+	}
+	ctx2, cancel2 := context.WithCancel(context.Background())
+	defer cancel2()
+	ok, err = s.BeginOutcomeWithCancel(rec, cma.OutcomeEvaluation{OutcomeID: "outc_c2", Result: cma.OutcomeStatePending}, cancel2)
+	if err != nil || ok {
+		t.Fatalf("BeginOutcomeWithCancel during active = %v, %v; want false, nil", ok, err)
+	}
+	select {
+	case <-ctx2.Done():
+		t.Fatal("conflicting BeginOutcomeWithCancel consumed the caller's cancel func")
+	default:
 	}
 }

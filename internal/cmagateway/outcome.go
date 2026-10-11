@@ -91,11 +91,14 @@ func (s *Server) deliverDefineOutcome(rec *store.SessionRecord, ev cma.Event) (i
 		CreatedAt:     now,
 		UpdatedAt:     now,
 	}
-	ok, err := s.store.BeginOutcome(rec, oc)
+	ctx, cancel := context.WithCancel(context.Background())
+	ok, err := s.store.BeginOutcomeWithCancel(rec, oc, cancel)
 	if err != nil {
+		cancel()
 		return 500, "persist outcome: " + err.Error()
 	}
 	if !ok {
+		cancel()
 		return 409, "an outcome is already active on this session; interrupt it or wait for its terminal span.outcome_evaluation_end"
 	}
 	echo := newEvent(cma.EvtUserDefineOutcome)
@@ -105,11 +108,9 @@ func (s *Server) deliverDefineOutcome(rec *store.SessionRecord, ev cma.Event) (i
 	echo.OutcomeID = oc.OutcomeID
 	s.emit(rec, echo)
 
-	// The cancel func is registered before the job is enqueued so an interrupt
-	// landing while the outcome is still queued behind another turn is honored
-	// as soon as the loop starts.
-	ctx, cancel := context.WithCancel(context.Background())
-	rec.SetOutcomeCancel(cancel)
+	// The cancel func was registered atomically with the begin, so an
+	// interrupt landing while the outcome is still queued behind another turn
+	// is honored as soon as the loop starts.
 	rec.EnqueueTurn(func() { s.executeOutcome(ctx, rec, oc.OutcomeID) })
 	return 200, ""
 }
