@@ -19,6 +19,13 @@ import (
 // Compile-time assertion that CodexSession satisfies the Session interface.
 var _ Session = (*CodexSession)(nil)
 
+// ErrCodexStreamTruncated marks a `codex exec --json` stream that ended (EOF)
+// without any terminal event (turn.completed / turn.failed / error). The
+// observed cause is the process being killed — e.g. by the wrapper's work
+// deadline — and exiting 0 without reporting the interrupted turn (issue
+// #47). EOF without a terminal event is never a successful completion.
+var ErrCodexStreamTruncated = errors.New("codex stream closed without a terminal event")
+
 // CodexSession is a Session backend powered by `codex exec --json`.
 //
 // Unlike ClaudeSession, Codex does not keep a single subprocess alive.
@@ -245,6 +252,12 @@ func runCodexExecStream(ctx context.Context, cfg SessionConfig, resumeID, prompt
 	waitErr := cmd.Wait()
 	close(done)
 	if parseErr != nil {
+		// The protocol truth (typed failure / truncated stream) is primary;
+		// the exit status is attached as credential-safe context when the
+		// process also died (e.g. killed by a wrapper deadline).
+		if waitErr != nil {
+			return result, fmt.Errorf("%w (process exit: %v)", parseErr, waitErr)
+		}
 		return result, parseErr
 	}
 	if waitErr != nil {
@@ -398,6 +411,10 @@ func parseCodexJSONL(r io.Reader) (codexRunResult, error) {
 func parseCodexJSONLStream(r io.Reader, emit func(Event), onThreadID func(string)) (codexRunResult, error) {
 	var result codexRunResult
 	var protocolErr error
+	// sawTerminal tracks whether an explicit terminal event (turn.completed /
+	// turn.failed / error) was received. EOF without one means the process
+	// died mid-turn — a truncated stream, never a silent success (issue #47).
+	sawTerminal := false
 	started := map[string]bool{}
 	scanner := bufio.NewScanner(r)
 	scanner.Buffer(make([]byte, 64*1024), 16*1024*1024)
@@ -427,9 +444,11 @@ func parseCodexJSONLStream(r io.Reader, emit func(Event), onThreadID func(string
 				onThreadID(env.ThreadID)
 			}
 		case "turn.completed":
+			sawTerminal = true
 			result.Stats.InputTokens = env.Usage.InputTokens
 			result.Stats.OutputTokens = env.Usage.OutputTokens
 		case "turn.failed", "error":
+			sawTerminal = true
 			msg := env.Message
 			if msg == "" {
 				msg = env.Error
@@ -444,6 +463,9 @@ func parseCodexJSONLStream(r io.Reader, emit func(Event), onThreadID func(string
 	}
 	if err := scanner.Err(); err != nil {
 		return result, fmt.Errorf("read codex jsonl: %w", err)
+	}
+	if protocolErr == nil && !sawTerminal {
+		protocolErr = ErrCodexStreamTruncated
 	}
 	return result, protocolErr
 }

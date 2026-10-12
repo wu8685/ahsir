@@ -45,6 +45,17 @@ import (
 // enforcement fails. The CMA facade's turn timeout remains the outermost
 // bound and records kind=facade_timeout when it wins. When lifecycle is
 // disabled, the historical one-step provider timeout is the only deadline.
+//
+// Terminal-event and deadline truth (issue #47): a turn settles as completed
+// ONLY on an explicit terminal event (EventTurnDone with Err == nil) observed
+// while no wrapper-owned deadline or caller cancellation has fired. Channel
+// EOF alone is never completion — a stream that closes without EventTurnDone
+// is truncated (ErrStreamTruncated). When completion races a fired
+// deadline/cancellation, the deadline wins deterministically: the wrapper
+// cannot distinguish "provider finished just before the deadline" from
+// "provider was killed and reported nil" (observed with Codex exiting 0
+// without turn.completed), so it runs the bounded finalize turn to settle
+// the turn with real output instead of trusting a nil provider error.
 
 // Typed lifecycle errors surfaced as EventTurnDone.Err so callers can react
 // without parsing message strings.
@@ -58,6 +69,10 @@ var (
 	// ErrFinalizationFailed terminates a turn whose finalize turn failed at
 	// the provider level.
 	ErrFinalizationFailed = errors.New("finalize turn failed")
+	// ErrStreamTruncated terminates a turn whose provider stream closed
+	// without delivering EventTurnDone. Channel EOF alone is not a terminal
+	// signal: only an explicit terminal event settles a turn (issue #47).
+	ErrStreamTruncated = errors.New("provider stream closed without a terminal event")
 )
 
 // LifecycleController owns per-Session lifecycle state for one agent.
@@ -252,24 +267,28 @@ func (s *lifecycleSession) initialize(ctx context.Context, out chan<- Event) boo
 		return fail(fmt.Errorf("start initialization turn: %w", err))
 	}
 	var turnErr error
+	var gotTerminal bool
 	for ev := range ch {
 		// Initialization output is system-owned lifecycle work: it is
 		// drained for completion but NOT forwarded as business reply text.
 		if done, ok := ev.(EventTurnDone); ok {
 			turnErr = done.Err
+			gotTerminal = true
 		}
 	}
 	switch {
-	case turnErr == nil:
+	case initCtx.Err() == context.DeadlineExceeded && ctx.Err() == nil:
+		return fail(fmt.Errorf("initialization exceeded timeout %v (deadline %s)", cfg.Initialize.Timeout, deadline.Format(time.RFC3339)))
+	case ctx.Err() != nil:
+		return fail(fmt.Errorf("initialization interrupted: %w", ErrTurnCanceled))
+	case turnErr == nil && gotTerminal:
 		s.ctrl.store.MarkInitialized(s.contextID, cfg.Version)
 		s.ctrl.store.SetPhase(s.contextID, PhaseIdle, "")
 		s.emit(out, EventLifecycle{Event: EvtSessionInitialized, TurnID: turnID, Phase: PhaseIdle})
 		log.Printf("lifecycle: session %s initialized (turn=%s, took=%v)", s.contextID, turnID, time.Since(started))
 		return true
-	case initCtx.Err() == context.DeadlineExceeded && ctx.Err() == nil:
-		return fail(fmt.Errorf("initialization exceeded timeout %v (deadline %s)", cfg.Initialize.Timeout, deadline.Format(time.RFC3339)))
-	case ctx.Err() != nil:
-		return fail(fmt.Errorf("initialization interrupted: %w", ErrTurnCanceled))
+	case turnErr == nil:
+		return fail(fmt.Errorf("initialization turn: %w", ErrStreamTruncated))
 	default:
 		return fail(fmt.Errorf("initialization turn: %w", turnErr))
 	}
@@ -323,9 +342,11 @@ func (s *lifecycleSession) runBusiness(ctx context.Context, userText string, out
 	// may still settle the turn cleanly.
 	var lastText string
 	var done EventTurnDone
+	var gotTerminal bool
 	for ev := range ch {
 		if d, ok := ev.(EventTurnDone); ok {
 			done = d
+			gotTerminal = true
 			continue
 		}
 		if t, ok := ev.(EventText); ok {
@@ -334,23 +355,41 @@ func (s *lifecycleSession) runBusiness(ctx context.Context, userText string, out
 		out <- ev
 	}
 
+	// Decision order is deterministic (issue #47): wrapper-owned deadline and
+	// cancellation truth is evaluated BEFORE the provider's reported error.
+	// A nil provider error observed after the work deadline fired is not
+	// trusted — Codex can exit 0 without a terminal protocol event when
+	// killed — and the turn settles through the bounded finalize turn
+	// instead of recording an empty "completed".
+	softDeadline := cfg.Finalize.Enabled && workCtx.Err() == context.DeadlineExceeded && ctx.Err() == nil
+	callerGone := cfg.Finalize.Enabled && ctx.Err() != nil
 	switch {
-	case done.Err == nil:
+	case softDeadline:
+		// Soft deadline fired while the caller is still attached.
+		s.emit(out, EventLifecycle{Event: EvtTurnSoftDeadline, TurnID: turnID, Phase: PhaseRunning})
+		s.finalize(out, turnID, TriggerSoftDeadline, KindRuntimeTimeout, started, workDeadline, lastText)
+		return
+	case callerGone:
+		// Explicit graceful stop (tasks/cancel, client shutdown) while the
+		// turn was active. Finalization runs on a detached context.
+		s.finalize(out, turnID, TriggerGracefulStop, KindCanceled, started, workDeadline, lastText)
+		return
+	case done.Err == nil && gotTerminal:
 		s.finishTurn(out, TurnOutcome{
 			TurnID: turnID, Phase: PhaseIdle, Kind: KindCompleted,
 			StartedAt: started, FinishedAt: time.Now().UTC(), WorkDeadline: workDeadline,
 			LastMessage: lastText,
 		}, &done, nil)
 		return
-	case cfg.Finalize.Enabled && workCtx.Err() == context.DeadlineExceeded && ctx.Err() == nil:
-		// Soft deadline fired while the caller is still attached.
-		s.emit(out, EventLifecycle{Event: EvtTurnSoftDeadline, TurnID: turnID, Phase: PhaseRunning})
-		s.finalize(out, turnID, TriggerSoftDeadline, KindRuntimeTimeout, started, workDeadline, lastText)
-		return
-	case cfg.Finalize.Enabled && ctx.Err() != nil:
-		// Explicit graceful stop (tasks/cancel, client shutdown) while the
-		// turn was active. Finalization runs on a detached context.
-		s.finalize(out, turnID, TriggerGracefulStop, KindCanceled, started, workDeadline, lastText)
+	case done.Err == nil:
+		// EOF without EventTurnDone: the stream was truncated mid-turn.
+		// Partial evidence stays visible, but this is never a completion.
+		err := fmt.Errorf("business turn: %w", ErrStreamTruncated)
+		s.finishTurn(out, TurnOutcome{
+			TurnID: turnID, Phase: PhaseIdle, Kind: KindProviderError,
+			StartedAt: started, FinishedAt: time.Now().UTC(), WorkDeadline: workDeadline,
+			Error: err.Error(), LastMessage: lastText,
+		}, nil, err)
 		return
 	default:
 		// Provider failure (or legacy one-step timeout with finalize
@@ -400,9 +439,11 @@ func (s *lifecycleSession) finalize(out chan<- Event, turnID, trigger, triggerKi
 
 	var summary string
 	var done EventTurnDone
+	var gotTerminal bool
 	for ev := range ch {
 		if d, ok := ev.(EventTurnDone); ok {
 			done = d
+			gotTerminal = true
 			continue
 		}
 		// The finalize summary IS the turn's final delivery — forward it.
@@ -413,7 +454,14 @@ func (s *lifecycleSession) finalize(out chan<- Event, turnID, trigger, triggerKi
 	}
 
 	switch {
-	case done.Err == nil:
+	case graceCtx.Err() == context.DeadlineExceeded:
+		// Hard-terminate boundary: the finalize turn itself exceeded grace.
+		// The grace deadline is evaluated before the provider's error for the
+		// same reason as the work deadline: a nil provider error after the
+		// grace kill is not a finalization (issue #47).
+		s.finishFinalize(out, turnID, trigger, started, workDeadline, &graceDeadline, partialText,
+			KindFinalizeTimeout, fmt.Errorf("%w (%v)", ErrFinalizeTimeout, cfg.Finalize.GraceTimeout))
+	case done.Err == nil && gotTerminal:
 		s.emit(out, EventLifecycle{Event: EvtTurnFinalized, TurnID: turnID, Phase: PhaseIdle, Trigger: trigger})
 		s.finishTurn(out, TurnOutcome{
 			TurnID: turnID, Phase: PhaseIdle, Kind: triggerKind, Finalized: true, Trigger: trigger,
@@ -421,10 +469,10 @@ func (s *lifecycleSession) finalize(out chan<- Event, turnID, trigger, triggerKi
 			WorkDeadline: workDeadline, GraceDeadline: &graceDeadline,
 			LastMessage: summary,
 		}, &EventTurnDone{Stats: done.Stats}, nil)
-	case graceCtx.Err() == context.DeadlineExceeded:
-		// Hard-terminate boundary: the finalize turn itself exceeded grace.
+	case done.Err == nil:
+		// Finalize stream truncated (EOF without EventTurnDone).
 		s.finishFinalize(out, turnID, trigger, started, workDeadline, &graceDeadline, partialText,
-			KindFinalizeTimeout, fmt.Errorf("%w (%v)", ErrFinalizeTimeout, cfg.Finalize.GraceTimeout))
+			KindProviderError, fmt.Errorf("%w: %w", ErrFinalizationFailed, ErrStreamTruncated))
 	default:
 		s.finishFinalize(out, turnID, trigger, started, workDeadline, &graceDeadline, partialText,
 			KindProviderError, fmt.Errorf("%w: %v", ErrFinalizationFailed, done.Err))
