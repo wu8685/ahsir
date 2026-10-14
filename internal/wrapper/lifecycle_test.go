@@ -2,6 +2,7 @@ package wrapper
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -29,6 +30,15 @@ type fakeTurnScript struct {
 	block    bool   // then block until ctx is done
 	reply    string // emitted on clean completion (when !block)
 	failWith error  // immediate provider error
+	// nilOnCancel emulates the Codex-style defect from issue #47: the turn
+	// blocks until its ctx is done and then reports EventTurnDone{Err: nil}
+	// — the provider "succeeded" precisely because it was killed.
+	nilOnCancel bool
+	// noDone closes the stream without any EventTurnDone (truncated stream).
+	noDone bool
+	// toolOnly emits a tool-use event and a clean done with NO text — a
+	// successful turn whose delivery happened entirely through tools.
+	toolOnly bool
 }
 
 type fakeSession struct{ rt *fakeRuntime }
@@ -53,18 +63,31 @@ func (s *fakeSession) Stream(ctx context.Context, text string) (<-chan Event, er
 			ch <- EventTextDelta{Text: sc.partial}
 			ch <- EventText{Text: sc.partial}
 		}
-		if sc.block {
+		if sc.toolOnly {
+			ch <- EventToolUse{Id: "tool-1", Name: "deliver_message", Input: json.RawMessage(`{"to":"user"}`)}
+		}
+		if sc.block || sc.nilOnCancel {
 			<-ctx.Done()
 			s.rt.mu.Lock()
 			if s.rt.killOnCancel {
 				s.rt.unhealthy = true
 			}
 			s.rt.mu.Unlock()
-			ch <- EventTurnDone{Err: ErrTurnCanceled}
+			switch {
+			case sc.noDone:
+				return // truncated: EOF without a terminal event
+			case sc.nilOnCancel:
+				ch <- EventTurnDone{} // issue #47: nil error after cancellation
+			default:
+				ch <- EventTurnDone{Err: ErrTurnCanceled}
+			}
 			return
 		}
 		if sc.reply != "" {
 			ch <- EventText{Text: sc.reply}
+		}
+		if sc.noDone {
+			return
 		}
 		ch <- EventTurnDone{}
 	}()
@@ -417,6 +440,177 @@ func testSoftDeadline(t *testing.T, killOnCancel bool) {
 
 func TestLifecycleSoftDeadlineFinalizesCodexStyle(t *testing.T)  { testSoftDeadline(t, false) }
 func TestLifecycleSoftDeadlineFinalizesClaudeStyle(t *testing.T) { testSoftDeadline(t, true) }
+
+// Issue #47 regression: the provider returns a NIL error after the work
+// deadline killed it (Codex-style graceful exit without a terminal protocol
+// event, surfaced as EventTurnDone{Err: nil}). Deadline truth must take
+// precedence over the nil provider error: the turn must NOT be recorded as
+// completed; exactly one bounded finalize turn must settle it.
+func TestLifecycleSoftDeadlineNilProviderErrorFinalizes(t *testing.T) {
+	script := func(prompt string) fakeTurnScript {
+		if prompt == "FINALIZE" {
+			return fakeTurnScript{reply: "final summary"}
+		}
+		return fakeTurnScript{partial: "wip", nilOnCancel: true}
+	}
+	ctrl, store, rt := testLifecycle(t, finalizeLifecycle(80*time.Millisecond, 5*time.Second), false, script)
+	sess, _ := ctrl.OpenSession(context.Background(), "ctx1")
+	ch, err := sess.Stream(context.Background(), "do work")
+	if err != nil {
+		t.Fatal(err)
+	}
+	events, text, doneErr := drain(ch)
+	if doneErr != nil {
+		t.Fatalf("successful finalize must settle the turn without error: %v", doneErr)
+	}
+	if !strings.Contains(text, "final summary") {
+		t.Fatalf("finalize summary missing from delivery: %q", text)
+	}
+	out := store.Record("ctx1").LastOutcome
+	if out == nil || out.Kind != KindRuntimeTimeout || !out.Finalized || out.Trigger != TriggerSoftDeadline {
+		t.Fatalf("nil provider error at deadline must not record completed: %+v", out)
+	}
+	if out.LastMessage != "final summary" {
+		t.Fatalf("last message = %q", out.LastMessage)
+	}
+	prompts := rt.seen()
+	if len(prompts) != 2 || prompts[1] != "FINALIZE" {
+		t.Fatalf("exactly one finalize turn must run: %v", prompts)
+	}
+	types := lifecycleEventTypes(events)
+	if !containsStr(types, EvtTurnSoftDeadline) || !containsStr(types, EvtTurnFinalized) {
+		t.Fatalf("soft-deadline finalize events missing: %v", types)
+	}
+}
+
+// EOF without EventTurnDone (no deadline involved) is a truncated stream,
+// never a silent completion.
+func TestLifecycleMissingTerminalEventIsTruncated(t *testing.T) {
+	script := func(prompt string) fakeTurnScript {
+		return fakeTurnScript{reply: "partial reply", noDone: true}
+	}
+	ctrl, store, rt := testLifecycle(t, finalizeLifecycle(time.Hour, time.Second), false, script)
+	sess, _ := ctrl.OpenSession(context.Background(), "ctx1")
+	ch, _ := sess.Stream(context.Background(), "work")
+	_, text, doneErr := drain(ch)
+	if !errors.Is(doneErr, ErrStreamTruncated) {
+		t.Fatalf("err = %v, want ErrStreamTruncated", doneErr)
+	}
+	out := store.Record("ctx1").LastOutcome
+	if out == nil || out.Kind != KindProviderError || out.Finalized {
+		t.Fatalf("truncated stream must not record completed: %+v", out)
+	}
+	if out.LastMessage != "partial reply" {
+		t.Fatalf("partial evidence must be preserved: %q", out.LastMessage)
+	}
+	_ = text
+	if prompts := rt.seen(); len(prompts) != 1 {
+		t.Fatalf("finalize must not run on a truncated stream without deadline: %v", prompts)
+	}
+}
+
+// EOF without EventTurnDone at the work deadline follows the soft-deadline
+// path: deadline truth still triggers exactly one bounded finalize turn.
+func TestLifecycleMissingTerminalEventAtDeadlineFinalizes(t *testing.T) {
+	script := func(prompt string) fakeTurnScript {
+		if prompt == "FINALIZE" {
+			return fakeTurnScript{reply: "recovered summary"}
+		}
+		return fakeTurnScript{block: true, noDone: true}
+	}
+	ctrl, store, rt := testLifecycle(t, finalizeLifecycle(60*time.Millisecond, 5*time.Second), false, script)
+	sess, _ := ctrl.OpenSession(context.Background(), "ctx1")
+	ch, _ := sess.Stream(context.Background(), "work")
+	_, text, doneErr := drain(ch)
+	if doneErr != nil {
+		t.Fatalf("finalize after truncation-at-deadline must settle cleanly: %v", doneErr)
+	}
+	if !strings.Contains(text, "recovered summary") {
+		t.Fatalf("finalize summary missing: %q", text)
+	}
+	out := store.Record("ctx1").LastOutcome
+	if out == nil || out.Kind != KindRuntimeTimeout || !out.Finalized {
+		t.Fatalf("outcome = %+v, want kind=runtime_timeout finalized=true", out)
+	}
+	if prompts := rt.seen(); len(prompts) != 2 || prompts[1] != "FINALIZE" {
+		t.Fatalf("exactly one finalize turn must run: %v", prompts)
+	}
+}
+
+// Tool-only delivery: a turn that delivered through tools and produced no
+// assistant text is a legitimate completion — no blanket nonempty-text rule.
+func TestLifecycleToolOnlyDeliveryCompletes(t *testing.T) {
+	ctrl, store, _ := testLifecycle(t, finalizeLifecycle(time.Hour, time.Second), false,
+		func(string) fakeTurnScript { return fakeTurnScript{toolOnly: true} })
+	sess, _ := ctrl.OpenSession(context.Background(), "ctx1")
+	ch, _ := sess.Stream(context.Background(), "deliver via tool")
+	events, text, doneErr := drain(ch)
+	if doneErr != nil {
+		t.Fatalf("tool-only delivery must complete: %v", doneErr)
+	}
+	if text != "" {
+		t.Fatalf("no text expected, got %q", text)
+	}
+	sawTool := false
+	for _, ev := range events {
+		if _, ok := ev.(EventToolUse); ok {
+			sawTool = true
+		}
+	}
+	if !sawTool {
+		t.Fatal("tool-use event must be forwarded")
+	}
+	out := store.Record("ctx1").LastOutcome
+	if out == nil || out.Kind != KindCompleted || out.LastMessage != "" {
+		t.Fatalf("tool-only delivery is a valid completion: %+v", out)
+	}
+}
+
+// The finalize turn is held to the same rule: a nil provider error after the
+// grace deadline fired is the hard-terminate boundary, not a finalization.
+func TestLifecycleFinalizeNilProviderErrorAtGraceDeadline(t *testing.T) {
+	script := func(prompt string) fakeTurnScript {
+		// Business blocks until the work deadline (canceled-style); the
+		// finalize turn then hangs and returns nil after the grace kill.
+		if prompt == "FINALIZE" {
+			return fakeTurnScript{nilOnCancel: true}
+		}
+		return fakeTurnScript{block: true}
+	}
+	ctrl, store, _ := testLifecycle(t, finalizeLifecycle(60*time.Millisecond, 120*time.Millisecond), false, script)
+	sess, _ := ctrl.OpenSession(context.Background(), "ctx1")
+	ch, _ := sess.Stream(context.Background(), "work")
+	_, _, doneErr := drain(ch)
+	if !errors.Is(doneErr, ErrFinalizeTimeout) {
+		t.Fatalf("err = %v, want ErrFinalizeTimeout", doneErr)
+	}
+	out := store.Record("ctx1").LastOutcome
+	if out == nil || out.Kind != KindFinalizeTimeout || out.Finalized {
+		t.Fatalf("nil finalize error at grace deadline must not record finalized: %+v", out)
+	}
+}
+
+// A finalize stream that closes without EventTurnDone (before grace expires)
+// is a finalization failure with the typed truncation cause, never finalized.
+func TestLifecycleFinalizeMissingTerminalEvent(t *testing.T) {
+	script := func(prompt string) fakeTurnScript {
+		if prompt == "FINALIZE" {
+			return fakeTurnScript{reply: "half a summary", noDone: true}
+		}
+		return fakeTurnScript{block: true}
+	}
+	ctrl, store, _ := testLifecycle(t, finalizeLifecycle(60*time.Millisecond, 5*time.Second), false, script)
+	sess, _ := ctrl.OpenSession(context.Background(), "ctx1")
+	ch, _ := sess.Stream(context.Background(), "work")
+	_, _, doneErr := drain(ch)
+	if !errors.Is(doneErr, ErrFinalizationFailed) || !errors.Is(doneErr, ErrStreamTruncated) {
+		t.Fatalf("err = %v, want ErrFinalizationFailed wrapping ErrStreamTruncated", doneErr)
+	}
+	out := store.Record("ctx1").LastOutcome
+	if out == nil || out.Kind != KindProviderError || out.Finalized {
+		t.Fatalf("truncated finalize stream must not record finalized: %+v", out)
+	}
+}
 
 // Acceptance 6: finalize exceeding grace_timeout hard-terminates with a
 // distinct finalize-timeout reason.

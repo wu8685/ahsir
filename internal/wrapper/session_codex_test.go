@@ -269,6 +269,109 @@ func TestParseCodexJSONL_ErrorEvent(t *testing.T) {
 	}
 }
 
+// Issue #47: a stream that ends without turn.completed/turn.failed/error is
+// truncated — the process was killed or crashed mid-turn. It must surface a
+// typed protocol error, not a silent nil success.
+func TestParseCodexJSONL_MissingTerminalEventIsTruncated(t *testing.T) {
+	in := strings.NewReader(strings.Join([]string{
+		`{"type":"thread.started","thread_id":"thread-abc"}`,
+		`{"type":"item.completed","item":{"id":"item_1","type":"agent_message","text":"partial answer"}}`,
+	}, "\n") + "\n")
+
+	got, err := parseCodexJSONL(in)
+	if !errors.Is(err, ErrCodexStreamTruncated) {
+		t.Fatalf("err = %v, want ErrCodexStreamTruncated", err)
+	}
+	if got.Text != "partial answer" || got.ThreadID != "thread-abc" {
+		t.Fatalf("partial evidence must survive: %+v", got)
+	}
+}
+
+// An empty stream (process died before emitting anything) is truncated too.
+func TestParseCodexJSONL_EmptyStreamIsTruncated(t *testing.T) {
+	if _, err := parseCodexJSONL(strings.NewReader("")); !errors.Is(err, ErrCodexStreamTruncated) {
+		t.Fatalf("err = %v, want ErrCodexStreamTruncated", err)
+	}
+}
+
+// A turn that ends with turn.completed but no agent_message is a legitimate
+// tool-only delivery: no text is not a failure.
+func TestParseCodexJSONL_ToolOnlyCompletionIsNotTruncated(t *testing.T) {
+	in := strings.NewReader(strings.Join([]string{
+		`{"type":"thread.started","thread_id":"thread-abc"}`,
+		`{"type":"item.completed","item":{"id":"item_1","type":"command_execution","command":"curl -X POST https://hooks.example/done","status":"completed","exit_code":0}}`,
+		`{"type":"turn.completed","usage":{"input_tokens":9,"output_tokens":3}}`,
+	}, "\n") + "\n")
+
+	got, err := parseCodexJSONL(in)
+	if err != nil {
+		t.Fatalf("tool-only completion must succeed: %v", err)
+	}
+	if got.Text != "" {
+		t.Fatalf("no assistant text expected, got %q", got.Text)
+	}
+	if len(got.Tools) != 1 {
+		t.Fatalf("tool evidence missing: %+v", got.Tools)
+	}
+}
+
+// Controlled-runtime reproduction of issue #47 at the provider level: a
+// codex-like process that exits 0 on SIGTERM without emitting any terminal
+// event. The nil process exit must surface as ErrCodexStreamTruncated, never
+// as a nil turn error.
+func TestRunCodexExecStream_GracefulExitWithoutTerminalIsTruncated(t *testing.T) {
+	dir := t.TempDir()
+	scriptPath := filepath.Join(dir, "fake-codex")
+	script := "#!/bin/sh\n" +
+		"printf '%s\\n' '{\"type\":\"thread.started\",\"thread_id\":\"thread-killme\"}'\n" +
+		"trap 'exit 0' TERM INT\n" +
+		// In-shell wait loop (no child process): a killed child would inherit
+		// the stdout pipe and keep the parser blocked until it exits.
+		"while :; do :; done\n" +
+		"exit 0\n"
+	if err := os.WriteFile(scriptPath, []byte(script), 0o755); err != nil {
+		t.Fatalf("write fake codex: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	type runOut struct {
+		result codexRunResult
+		err    error
+	}
+	threadStarted := make(chan struct{}, 1)
+	done := make(chan runOut, 1)
+	go func() {
+		res, err := runCodexExecStream(ctx, SessionConfig{Command: scriptPath}, "", "work", nil, func(string) {
+			select {
+			case threadStarted <- struct{}{}:
+			default:
+			}
+		})
+		done <- runOut{res, err}
+	}()
+
+	// Cancel once the turn is demonstrably running, like the wrapper's work
+	// deadline firing.
+	select {
+	case <-threadStarted:
+	case <-time.After(5 * time.Second):
+		t.Fatal("fake codex never reported thread.started")
+	}
+	cancel()
+	select {
+	case out := <-done:
+		if !errors.Is(out.err, ErrCodexStreamTruncated) {
+			t.Fatalf("err = %v, want ErrCodexStreamTruncated", out.err)
+		}
+		if out.result.ThreadID != "thread-killme" {
+			t.Fatalf("thread identity must survive truncation: %+v", out.result)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("runCodexExecStream did not return after cancel")
+	}
+}
+
 func TestCodexSession_TurnStoresThreadID(t *testing.T) {
 	var calls int
 	s := newCodexSessionWithRunner(SessionConfig{Command: "codex"}, "", func(ctx context.Context, cfg SessionConfig, resumeID, prompt string) (codexRunResult, error) {
